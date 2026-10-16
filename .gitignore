@@ -1,0 +1,6 @@
+node_modules/
+target/
+.anchor/
+test-ledger/
+.DS_Store
+*.log

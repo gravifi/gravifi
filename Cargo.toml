@@ -1,0 +1,23 @@
+[workspace]
+members = ["programs/*"]
+resolver = "2"
+
+[workspace.package]
+# Matches the Rust bundled in solana-cli 2.1.0's SBF toolchain.
+rust-version = "1.79"
+
+[profile.release]
+# Non-negotiable for a program that moves money: a silent wrapping multiply in the
+# share maths is an exploit, not a rounding error.
+overflow-checks = true
+lto = "fat"
+codegen-units = 1
+# Size, not speed: rent is charged per byte, and these programs are branch-heavy
+# rather than compute-heavy. overflow-checks stays on regardless of what it costs.
+opt-level = "z"
+strip = true
+
+[profile.release.build-override]
+opt-level = 3
+incremental = false
+codegen-units = 1

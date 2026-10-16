@@ -1,0 +1,6 @@
+# The SBF toolchain that ships with solana-cli 2.1.0 bundles Rust 1.79, which predates
+# edition2024. Left alone, cargo resolves transitive deps to versions the on-chain
+# compiler cannot parse. MSRV-aware resolution makes cargo pick versions that 1.79 can
+# actually build, instead of pinning crates one at a time forever.
+[resolver]
+incompatible-rust-versions = "fallback"
