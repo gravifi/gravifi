@@ -109,8 +109,10 @@ comes round, or it drifts past its tolerance, a keeper trades it back:
   tolerance, or the whole slice reverts. The keeper is lent the tokens to sell, and the program
   checks what comes back to the vault in the same transaction.
 
-A rebalance can't take value out of a basket: the program checks every slice and the share
-supply can't change in the middle of one.
+The program checks every slice, and the share supply can't change in the middle of one. The
+floor is only as good as the price it's checked against: today the keeper's price authority
+posts those prices (from Jupiter), so a rebalance can't take value out of a basket as long as
+the prices posted are honest. Section 8 says who holds that key, and the roadmap bounds it.
 
 **Tokens a basket is sent.** Some tokens pay their holders in another token (a stonkfun token
 can pay ZEC), and anyone can send a basket an airdrop. Those tokens aren't part of the recipe,
@@ -200,11 +202,13 @@ There is no governance and no vote. Control is split so that no role can reach h
 | **Holders** | Redeem at any time, send or trade their shares | |
 | **A basket's creator** | Change their basket's weights, assets, rebalancing, fee (within the caps), split | Touch the vault's tokens; anything at all once the basket is immutable |
 | **The protocol authority** (the team) | List assets, set fees within the ceilings, name the keepers, and upgrade the program | Through any of its settings: move a vault's tokens, block a redemption, exceed the fee ceilings, send less than half of the protocol fee to the burn |
-| **The keeper** | Run rebalance and buyback slices within the program's checks | Take value out of a basket or the burn address |
+| **The keeper** | Post the prices rebalances and buybacks are checked against; run rebalance and buyback slices within the program's checks | Move a vault's tokens outside a slice, or accept less back than the posted price allows |
 | **The burn address** | Buy GRAVI and burn it | Anything else: it has no key |
 
 The program and protocol authority are held today by one team key, and upgrading a program
-can change what it does. That is why the next steps (section 10) are a multisig, so no single
+can change what it does. The keeper's price authority and rebalancer are one more key, held by
+the app's server: whoever held it could post false prices and trade baskets at a loss, a slice
+at a time. Holders trust the team with both keys today. That is why the next steps (section 10) are a multisig, so no single
 key can upgrade it, and a verified build, so anyone can check that what runs on-chain is the
 published code.
 
@@ -214,8 +218,12 @@ GraviFi is new software. Before using it, know that:
 
 - **No independent audit yet.** The program has passed an internal security review and its
   test suite; an independent audit is next. Only put in what you can afford to lose.
+- **Key risk.** The team holds the keys that upgrade the program and post the prices
+  rebalances are checked against (section 8). Until the multisig and on-chain price limits
+  land, a lost or misused key could cost basket holders money.
 - **Issuer risk.** Tokenized stocks and pre-IPO tokens depend on their issuers, who can pause,
-  freeze or claw back their tokens.
+  freeze or claw back their tokens. A holder can still redeem everything else and leave such a
+  token in the basket (section 2.2).
 - **Market risk.** Baskets move with what they hold. Thinly traded tokens can cost more to buy
   and sell, and the app shows that cost before you sign.
 - **Buys take more than one transaction.** The swaps land first, then the mint. If a swap fails,
@@ -229,7 +237,9 @@ Nothing in this paper is investment advice, or an offer to sell GRAVI or any oth
 1. **Independent security audit.**
 2. **Multisig** for the program and protocol authority, and a **verified build**, so anyone can
    check that the program on-chain is exactly this code.
-3. **Pyth prices** for rebalances and buybacks.
+3. **Bounded prices** for rebalances and buybacks: limits in the program on how far and how fast
+   a posted price can move, separate keys for prices and trading, and Pyth prices where feeds
+   exist.
 4. **Allowlisted baskets**, where a creator chooses who can mint.
 5. **Baskets of up to 16 assets.**
 

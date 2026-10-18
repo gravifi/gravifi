@@ -39,6 +39,8 @@ export interface WorldOpts {
   unitsA?: bigint;
   /** A Token-2022 transfer fee on token B, in bps (as stonkfun tokens and PreStocks charge). */
   feeBpsB?: number;
+  /** Token B's issuer can freeze accounts and pause the mint, as tokenized stocks' can. */
+  issuerB?: { freezable?: boolean; pausable?: boolean };
 }
 
 export async function listAsset(ctx: Ctx, mint: PublicKey) {
@@ -77,7 +79,7 @@ export async function world(opts: WorldOpts = {}) {
   const graviMint = await initProtocol(ctx, opts.protocolFeeBps ?? 0, opts.burnShareBps ?? 5_000);
 
   const mintA = await createMint(ctx, 6, TOKEN_PROGRAM_ID);
-  const mintB = await createMint(ctx, 9, TOKEN_2022_PROGRAM_ID, undefined, opts.feeBpsB);
+  const mintB = await createMint(ctx, 9, TOKEN_2022_PROGRAM_ID, undefined, opts.feeBpsB, opts.issuerB);
   await listAsset(ctx, mintA);
   await listAsset(ctx, mintB);
 

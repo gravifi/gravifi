@@ -79,7 +79,9 @@ verified build. Until then, only put in what you can afford to lose.
 ## Security
 
 Found something? Write to **team@gravifi.xyz**. Please don't open a public issue for a
-vulnerability.
+vulnerability. What qualifies for a reward, and what doesn't (the team's keys, issuer actions
+and known issues are out of scope; every report needs a reproduction), is on
+[gravifi.xyz/bounty](https://gravifi.xyz/bounty).
 
 ## License
 

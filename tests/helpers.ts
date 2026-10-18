@@ -16,8 +16,11 @@ import {
   TOKEN_2022_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
   createAssociatedTokenAccountIdempotentInstruction,
+  createInitializeDefaultAccountStateInstruction,
   createInitializeMint2Instruction,
+  createInitializePausableConfigInstruction,
   createInitializeTransferHookInstruction,
+  AccountState,
   createInitializeTransferFeeConfigInstruction,
   createMintToInstruction,
   getAssociatedTokenAddressSync,
@@ -102,9 +105,17 @@ export async function createMint(
   tokenProgram = TOKEN_PROGRAM_ID,
   hookProgram?: PublicKey,
   feeBps?: number,
+  /** As issuers of tokenized stocks set them up: the payer can freeze accounts, pause the
+   *  whole mint (Token-2022), or have new accounts start frozen (Token-2022). */
+  issuer: { freezable?: boolean; pausable?: boolean; startsFrozen?: boolean } = {},
 ) {
   const mint = Keypair.generate();
-  const extensions = [...(hookProgram ? [ExtensionType.TransferHook] : []), ...(feeBps !== undefined ? [ExtensionType.TransferFeeConfig] : [])];
+  const extensions = [
+    ...(hookProgram ? [ExtensionType.TransferHook] : []),
+    ...(feeBps !== undefined ? [ExtensionType.TransferFeeConfig] : []),
+    ...(issuer.pausable ? [ExtensionType.PausableConfig] : []),
+    ...(issuer.startsFrozen ? [ExtensionType.DefaultAccountState] : []),
+  ];
   const space = getMintLen(extensions);
   const lamports = Number(ctx.svm.minimumBalanceForRentExemption(BigInt(space)));
   const ixs: TransactionInstruction[] = [
@@ -122,7 +133,10 @@ export async function createMint(
   if (feeBps !== undefined) {
     ixs.push(createInitializeTransferFeeConfigInstruction(mint.publicKey, ctx.payer.publicKey, ctx.payer.publicKey, feeBps, 2n ** 63n, tokenProgram));
   }
-  ixs.push(createInitializeMint2Instruction(mint.publicKey, decimals, ctx.payer.publicKey, null, tokenProgram));
+  if (issuer.pausable) ixs.push(createInitializePausableConfigInstruction(mint.publicKey, ctx.payer.publicKey, tokenProgram));
+  if (issuer.startsFrozen) ixs.push(createInitializeDefaultAccountStateInstruction(mint.publicKey, AccountState.Frozen, tokenProgram));
+  const freeze = issuer.freezable || issuer.startsFrozen ? ctx.payer.publicKey : null;
+  ixs.push(createInitializeMint2Instruction(mint.publicKey, decimals, ctx.payer.publicKey, freeze, tokenProgram));
   await send(ctx, ixs, [mint]);
   return mint.publicKey;
 }
