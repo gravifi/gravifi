@@ -16,6 +16,7 @@ import {
   fakeProgramData,
   fund,
   mintTo,
+  now,
   pda,
   rpc,
   send,
@@ -184,6 +185,29 @@ describe("asset registry", () => {
     await rpc(w.ctx, redeemIx(w, w.creator, ONE_SHARE), [w.creator]);
     assert.equal(supply(w.ctx, w.shareMint), SEED_SHARES - ONE_SHARE);
   });
+
+  const delistIx = (w: World, mint: PublicKey, baskets: PublicKey[]) =>
+    w.ctx.vault.methods
+      .setAssetStatus({ delisted: {} })
+      .accountsPartial({ signer: w.ctx.payer.publicKey, protocol: pda.protocol(), mint, assetEntry: pda.asset(mint) })
+      .remainingAccounts(baskets.map((pubkey) => ({ pubkey, isSigner: false, isWritable: true })));
+
+  test("a delisting pauses minting into the baskets passed with it, in the same instruction", async () => {
+    const w = await world();
+    await rpc(w.ctx, delistIx(w, w.mintB, [w.basket]));
+    // No sync in between: there's no window in which new money still goes in.
+    await expectError(rpc(w.ctx, mintIx(w, w.creator, ONE_SHARE), [w.creator]), "MintPaused");
+    await rpc(w.ctx, redeemIx(w, w.creator, ONE_SHARE), [w.creator]);
+    // A repeat delisting still pauses a basket that was missed the first time.
+    await rpc(w.ctx, delistIx(w, w.mintB, [w.basket]));
+  });
+
+  test("a delisting refuses a basket that doesn't hold the asset", async () => {
+    const w = await world();
+    const other = await createMint(w.ctx, 6, TOKEN_PROGRAM_ID);
+    await listAsset(w.ctx, other);
+    await expectError(rpc(w.ctx, delistIx(w, other, [w.basket])), "ConstituentMismatch");
+  });
 });
 
 describe("basket creation", () => {
@@ -226,6 +250,28 @@ describe("basket creation", () => {
         ),
         code,
       );
+    });
+  }
+
+  for (const [name, program] of [["classic", TOKEN_PROGRAM_ID], ["Token-2022", TOKEN_2022_PROGRAM_ID]] as const) {
+    test(`a basket is created even if someone sent lamports to its ${name} share mint first`, async () => {
+      const w = await world();
+      const id = new Uint8Array(16).fill(6);
+      const basket = pda.basket(w.creator.publicKey, id);
+      const shareMint = pda.share(basket);
+      // The address is public before the basket exists (it's in the basket's lookup table).
+      w.ctx.svm.airdrop(shareMint, 5_000n);
+      await rpc(
+        w.ctx,
+        w.ctx.vault.methods
+          .initializeBasket(basketArgs(id, [w.mintA, w.mintB], [5_000, 5_000]))
+          .accountsPartial({ creator: w.creator.publicKey, basket, shareMint, shareTokenProgram: program })
+          .remainingAccounts(entries([w.mintA, w.mintB])),
+        [w.creator],
+      );
+      const acc = w.ctx.svm.getAccount(shareMint)!;
+      assert.ok(acc.owner.equals(program), "the share mint belongs to the token program");
+      assert.equal(supply(w.ctx, shareMint), 0n);
     });
   }
 });
@@ -426,7 +472,7 @@ describe("fees", () => {
 
 
   test("minting keeps 0.4% of the new shares for the protocol, split between burn and treasury", async () => {
-    const w = await world({ protocolFeeBps: 40, burnShareBps: 2_000 });
+    const w = await world({ protocolFeeBps: 40, burnShareBps: 7_500 });
     const accts = feeAccounts(w);
     const alice = fund(w.ctx);
     const acct = await fundHolder(w, alice);
@@ -437,8 +483,8 @@ describe("fees", () => {
 
     const fee = (shares * 40n) / 10_000n;
     assert.equal(balance(w.ctx, acct.shares), shares - fee);
-    assert.equal(balance(w.ctx, accts.burnShares) - burn0, fee / 5n);
-    assert.equal(balance(w.ctx, accts.treasuryShares) - treasury0, fee - fee / 5n);
+    assert.equal(balance(w.ctx, accts.burnShares) - burn0, (fee * 3n) / 4n);
+    assert.equal(balance(w.ctx, accts.treasuryShares) - treasury0, fee - (fee * 3n) / 4n);
     // Alice paid the underlying for every share, fee included, so the vault stays fully backed.
     assert.equal(a0 - balance(w.ctx, acct.a), ceilDiv(UNITS_A * shares, ONE_SHARE));
     const [ua, ub] = await units(w);
@@ -448,7 +494,7 @@ describe("fees", () => {
   });
 
   test("redeeming keeps 0.4% of the shares handed in and pays out the rest", async () => {
-    const w = await world({ protocolFeeBps: 40, burnShareBps: 2_000 });
+    const w = await world({ protocolFeeBps: 40, burnShareBps: 7_500 });
     const accts = feeAccounts(w);
     const holder = ata(w.shareMint, w.creator.publicKey);
     const a0 = balance(w.ctx, ata(w.mintA, w.creator.publicKey));
@@ -468,6 +514,68 @@ describe("fees", () => {
   test("the protocol fee can't be set above 0.5% per mint or redeem", async () => {
     const ctx = setup();
     await expectError(initProtocol(ctx, 51, 5_000), "FeeTooHigh");
+  });
+
+  test("the burn's share of the protocol fee can't be set under half", async () => {
+    await expectError(initProtocol(setup(), 40, 4_999), "BurnShareTooLow");
+    const w = await world({ protocolFeeBps: 40 });
+    const setFees = (burn: number) =>
+      w.ctx.vault.methods.setProtocolFees(40, burn).accountsPartial({ authority: w.ctx.payer.publicKey, protocol: pda.protocol() });
+    await expectError(rpc(w.ctx, setFees(0)), "BurnShareTooLow");
+    await expectError(rpc(w.ctx, setFees(4_999)), "BurnShareTooLow");
+    await rpc(w.ctx, setFees(10_000));
+    await rpc(w.ctx, setFees(5_000));
+  });
+
+  const policyIx = (w: World, feeBps: number) =>
+    w.ctx.vault.methods
+      .setPolicy({ hybrid: {} }, new BN(30 * 86_400), 500, feeBps)
+      .accountsPartial({ authority: w.creator.publicKey, basket: w.basket })
+      .instruction();
+
+  test("a creator fee set after a year at 0% starts then, not from launch", async () => {
+    const w = await world({ creatorFeeBps: 0 });
+    const accts = feeAccounts(w);
+    warp(w.ctx, SECONDS_PER_YEAR);
+    await send(w.ctx, [await policyIx(w, 20)], [w.creator]);
+    await rpc(w.ctx, accrueIx(w, accts));
+    assert.equal(balance(w.ctx, accts.creatorShares), SEED_SHARES, "nothing owed for the year at 0%");
+
+    warp(w.ctx, SECONDS_PER_YEAR);
+    await rpc(w.ctx, accrueIx(w, accts));
+    assert.equal(balance(w.ctx, accts.creatorShares), SEED_SHARES + (SEED_SHARES * 20n) / 10_000n);
+  });
+
+  test("at 0% accruing moves the fee clock on", async () => {
+    const w = await world({ creatorFeeBps: 0 });
+    warp(w.ctx, 1_000);
+    await rpc(w.ctx, accrueIx(w, feeAccounts(w)));
+    const b: any = await w.ctx.vault.account.basket.fetch(w.basket);
+    assert.equal(b.lastFeeAccrual.toNumber(), now(w.ctx));
+  });
+
+  test("a fee change restarts the fee clock; accruing first in the same transaction collects the old rate", async () => {
+    const w = await world({ creatorFeeBps: 20 });
+    const accts = feeAccounts(w);
+    warp(w.ctx, SECONDS_PER_YEAR);
+    await send(w.ctx, [await accrueIx(w, accts).instruction(), await policyIx(w, 10)], [w.creator]);
+    const yearAt20 = (SEED_SHARES * 20n) / 10_000n;
+    assert.equal(balance(w.ctx, accts.creatorShares), SEED_SHARES + yearAt20);
+
+    // The new rate only counts from the change.
+    warp(w.ctx, SECONDS_PER_YEAR);
+    await rpc(w.ctx, accrueIx(w, accts));
+    const yearAt10 = ((SEED_SHARES + yearAt20) * 10n) / 10_000n;
+    assert.equal(balance(w.ctx, accts.creatorShares), SEED_SHARES + yearAt20 + yearAt10);
+  });
+
+  test("a policy change that keeps the fee doesn't touch the fee clock", async () => {
+    const w = await world({ creatorFeeBps: 20 });
+    const before: any = await w.ctx.vault.account.basket.fetch(w.basket);
+    warp(w.ctx, 1_000);
+    await send(w.ctx, [await policyIx(w, 20)], [w.creator]);
+    const after: any = await w.ctx.vault.account.basket.fetch(w.basket);
+    assert.equal(after.lastFeeAccrual.toString(), before.lastFeeAccrual.toString());
   });
 
   test("burn-earmarked shares cannot be pulled out through the treasury", async () => {

@@ -1,5 +1,7 @@
 use anchor_lang::prelude::*;
 
+use crate::errors::VaultError;
+
 /// Fixed-size constituent array keeps the Basket account a constant size, which
 /// avoids realloc paths and makes rent predictable for basket creators.
 pub const MAX_CONSTITUENTS: usize = 16;
@@ -10,6 +12,19 @@ pub const MAX_CONSTITUENTS: usize = 16;
 /// basket's lookup table 14 fit with room to spare (tests/_capacity.ts measures them), 16 do
 /// not without trimming. Storage keeps room for 16, so raising this later needs no migration.
 pub const MAX_LAUNCH_CONSTITUENTS: usize = 14;
+
+/// Hard ceilings on the two fees: the creator's, in bps per year, streamed while shares are
+/// held; and the protocol's, in bps of the shares on every mint and every redeem. Holding
+/// pays the protocol nothing.
+///
+/// Governance moves fees *within* these bounds; only a program upgrade can move the
+/// bounds themselves. That makes the price a property of the code rather than a promise a
+/// future vote could quietly break.
+pub const MAX_CREATOR_FEE_BPS: u16 = 20;
+pub const MAX_PROTOCOL_FEE_BPS: u16 = 50;
+/// The least of every protocol fee that goes to buying GRAVI and burning it: half. The
+/// authority can raise it, never lower it.
+pub const MIN_BURN_SHARE_BPS: u16 = 5_000;
 
 pub const SHARE_DECIMALS: u8 = 9;
 /// Base units in one whole share.
@@ -172,6 +187,17 @@ pub struct AssetEntry {
     pub delisted_at: i64,
 }
 
+/// Reads an AssetEntry from an arbitrary account.
+///
+/// Owner plus discriminator is sufficient provenance: only `register_asset` creates
+/// AssetEntry accounts, always at `[ASSET_SEED, mint]`, so there is exactly one per mint
+/// and callers additionally check `entry.mint` against the mint they expect.
+pub fn load_asset_entry(ai: &AccountInfo) -> Result<AssetEntry> {
+    require_keys_eq!(*ai.owner, crate::ID, VaultError::AssetNotListed);
+    let data = ai.try_borrow_data()?;
+    AssetEntry::try_deserialize(&mut &data[..])
+}
+
 // ---------------------------------------------------------------------------- rebalancing
 
 pub const KEEPERS_SEED: &[u8] = b"keepers";
@@ -208,6 +234,9 @@ pub const EMPTYING_BPS: i64 = 50;
 pub const MAX_TRANSFER_FEE_BPS: u16 = 300;
 /// A rebalance session ends once every sleeve is this close to target.
 pub const SESSION_END_DRIFT_BPS: i64 = 25;
+/// A session that hasn't traded for about a day (at ~400 ms a slot) lapses: the basket goes
+/// back to trading only when its policy says it's due.
+pub const SESSION_IDLE_SLOTS: u64 = 216_000;
 /// At most one split (direct or reverse) per basket in any 30 days.
 pub const SPLIT_COOLDOWN_SECS: i64 = 30 * 86_400;
 

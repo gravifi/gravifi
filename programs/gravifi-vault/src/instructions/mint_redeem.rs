@@ -1,0 +1,371 @@
+//! Minting and redeeming: units of every token in, shares out, and back. No price is involved.
+
+use anchor_lang::prelude::*;
+use anchor_spl::token_interface::{self, Mint as MintI, TokenAccount as TokenAccountI, TokenInterface};
+
+use crate::errors::VaultError;
+use crate::state::*;
+use crate::token_util::*;
+
+/// First deposit. Fixes `units_per_share` for every sleeve and mints the opening shares.
+/// Callable once, by the creator, regardless of access mode.
+pub fn seed_basket<'info>(
+    ctx: Context<'_, '_, 'info, 'info, MintInKind<'info>>,
+    shares: u64,
+    units_per_share: Vec<u64>,
+) -> Result<()> {
+    require!(!ctx.accounts.basket.seeded, VaultError::AlreadySeeded);
+    require!(!ctx.accounts.basket.mint_paused, VaultError::MintPaused);
+    require!(shares > 0, VaultError::ZeroShares);
+    require_keys_eq!(
+        ctx.accounts.payer.key(),
+        ctx.accounts.basket.creator,
+        VaultError::MintNotPermitted
+    );
+    require!(
+        units_per_share.len() == ctx.accounts.basket.constituent_count as usize,
+        VaultError::BadRemainingAccounts
+    );
+    require!(units_per_share.iter().all(|u| *u > 0), VaultError::ZeroShares);
+
+    for (i, u) in units_per_share.iter().enumerate() {
+        ctx.accounts.basket.constituents[i].units_per_share = *u;
+    }
+    ctx.accounts.basket.seeded = true;
+
+    // The opening deposit pays the fee like any other: fee-free, a basket of one's own
+    // would be the way to buy in without it.
+    collect_and_mint(ctx, shares)
+}
+
+/// Deposit the exact underlying basket for up to `shares`, receive them less the
+/// protocol's mint fee. No oracle is consulted.
+///
+/// With `min_shares` below `shares`, mints as many as the payer's token balances cover,
+/// but never fewer than `min_shares`. That is how a wallet buys with swaps whose output
+/// isn't known to the unit when it signs: it pre-signs this with the quoted amount and
+/// its slippage floor, and nothing is left over except what legs filled unevenly.
+pub fn mint_in_kind<'info>(
+    ctx: Context<'_, '_, 'info, 'info, MintInKind<'info>>,
+    shares: u64,
+    min_shares: u64,
+) -> Result<()> {
+    require!(ctx.accounts.basket.seeded, VaultError::NotSeeded);
+    require!(!ctx.accounts.basket.mint_paused, VaultError::MintPaused);
+    require!(min_shares <= shares, VaultError::BadParameter);
+    let shares = if min_shares < shares { affordable_shares(&ctx, shares)? } else { shares };
+    require!(shares > 0, VaultError::ZeroShares);
+    require!(shares >= min_shares, VaultError::BelowMinShares);
+
+    let basket = &ctx.accounts.basket;
+    let payer = ctx.accounts.payer.key();
+    match basket.access {
+        AccessMode::Public => {}
+        AccessMode::Private => {
+            require_keys_eq!(payer, basket.creator, VaultError::MintNotPermitted);
+        }
+        AccessMode::Allowlist => {
+            let entry = ctx
+                .accounts
+                .allow_entry
+                .as_ref()
+                .ok_or(VaultError::MintNotPermitted)?;
+            require_keys_eq!(entry.basket, basket.key(), VaultError::MintNotPermitted);
+            require_keys_eq!(entry.wallet, payer, VaultError::MintNotPermitted);
+        }
+    }
+
+    collect_and_mint(ctx, shares)
+}
+
+/// Hand in `shares`: the protocol's redeem fee is kept in shares, the rest are burned
+/// and their underlying paid out pro-rata. Never gated — not by access mode, not
+/// by a delisting. A holder who cannot redeem holds a promise, not a claim.
+///
+/// `forfeit_mask` (bit i = sleeve i, normally 0) is the way out when an issuer has
+/// paused or frozen one token: the redeemer leaves those sleeves behind and takes the
+/// rest. What they leave stays in the vault for the remaining holders (`sync_units`
+/// credits it), so no one else is short.
+pub fn redeem_in_kind<'info>(
+    ctx: Context<'_, '_, 'info, 'info, RedeemInKind<'info>>,
+    shares: u64,
+    forfeit_mask: u16,
+) -> Result<()> {
+    require!(ctx.accounts.basket.seeded, VaultError::NotSeeded);
+    require!(shares > 0, VaultError::ZeroShares);
+
+    let count = ctx.accounts.basket.constituent_count as usize;
+    require!((forfeit_mask as u32) < (1u32 << count), VaultError::BadParameter);
+    require!(
+        ctx.remaining_accounts.len() == count * 4,
+        VaultError::BadRemainingAccounts
+    );
+
+    let fee = flow_fee(shares, ctx.accounts.protocol.protocol_fee_bps)?;
+    require!(shares > fee, VaultError::BelowFee);
+    let (burn_fee, treasury_fee) = split_protocol_fee(fee, ctx.accounts.protocol.burn_share_bps)?;
+    for (to, amount) in [
+        (ctx.accounts.burn_shares.to_account_info(), burn_fee),
+        (ctx.accounts.treasury_shares.to_account_info(), treasury_fee),
+    ] {
+        if amount > 0 {
+            token_interface::transfer_checked(
+                CpiContext::new(
+                    ctx.accounts.share_token_program.to_account_info(),
+                    token_interface::TransferChecked {
+                        from: ctx.accounts.payer_shares.to_account_info(),
+                        mint: ctx.accounts.share_mint.to_account_info(),
+                        to,
+                        authority: ctx.accounts.payer.to_account_info(),
+                    },
+                ),
+                amount,
+                ctx.accounts.share_mint.decimals,
+            )?;
+        }
+    }
+    let shares = shares - fee;
+
+    // Burn first: a reentrant token program cannot be handed a vault that still
+    // counts the shares it is about to destroy.
+    token_interface::burn(
+        CpiContext::new(
+            ctx.accounts.share_token_program.to_account_info(),
+            token_interface::Burn {
+                mint: ctx.accounts.share_mint.to_account_info(),
+                from: ctx.accounts.payer_shares.to_account_info(),
+                authority: ctx.accounts.payer.to_account_info(),
+            },
+        ),
+        shares,
+    )?;
+
+    let basket_key = ctx.accounts.basket.key();
+    let creator = ctx.accounts.basket.creator;
+    let basket_id = ctx.accounts.basket.basket_id;
+    let bump = [ctx.accounts.basket.bump];
+    let seeds: [&[u8]; 4] = [b"basket", creator.as_ref(), basket_id.as_ref(), &bump];
+    let signer: &[&[&[u8]]] = &[&seeds];
+
+    for i in 0..count {
+        if forfeit_mask & (1 << i) != 0 {
+            continue;
+        }
+        let c = ctx.accounts.basket.constituents[i];
+        let vault_ata = &ctx.remaining_accounts[i * 4];
+        let user_ata = &ctx.remaining_accounts[i * 4 + 1];
+        let mint_ai = &ctx.remaining_accounts[i * 4 + 2];
+        let token_program = &ctx.remaining_accounts[i * 4 + 3];
+
+        require_keys_eq!(*mint_ai.key, c.mint, VaultError::ConstituentMismatch);
+        // The mint's owner *is* its token program; anything else would let a caller
+        // route the transfer through a program of their choosing.
+        require_keys_eq!(*token_program.key, *mint_ai.owner, VaultError::ConstituentMismatch);
+
+        let vault_view = read_vault(vault_ata, &basket_key, &c.mint)?;
+
+        let amount = Basket::amount_for(c.units_per_share, shares, false)?;
+        // The units promise can exceed reality if an issuer's permanent delegate clawed
+        // tokens back. Fail loudly and point at the fix rather than paying early
+        // redeemers out of later ones.
+        require!(
+            vault_view.amount >= amount,
+            VaultError::VaultUndercollateralised
+        );
+
+        let decimals = mint_decimals(mint_ai)?;
+        transfer_from_vault(
+            mint_ai,
+            vault_ata,
+            user_ata,
+            &ctx.accounts.basket.to_account_info(),
+            token_program,
+            amount,
+            decimals,
+            signer,
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Shared body of `seed_basket` and `mint_in_kind`: pull every sleeve in, then mint.
+/// Remaining accounts are one `[vault_ata, user_ata, mint, token_program]` quad per
+/// constituent.
+pub(crate) fn collect_and_mint<'info>(ctx: Context<'_, '_, 'info, 'info, MintInKind<'info>>, shares: u64) -> Result<()> {
+    let count = ctx.accounts.basket.constituent_count as usize;
+    require!(
+        ctx.remaining_accounts.len() == count * 4,
+        VaultError::BadRemainingAccounts
+    );
+
+    let basket_key = ctx.accounts.basket.key();
+    let payer_key = ctx.accounts.payer.key();
+
+    for i in 0..count {
+        let c = ctx.accounts.basket.constituents[i];
+        let vault_ata = &ctx.remaining_accounts[i * 4];
+        let user_ata = &ctx.remaining_accounts[i * 4 + 1];
+        let mint_ai = &ctx.remaining_accounts[i * 4 + 2];
+        let token_program = &ctx.remaining_accounts[i * 4 + 3];
+
+        require_keys_eq!(*mint_ai.key, c.mint, VaultError::ConstituentMismatch);
+        require_keys_eq!(*token_program.key, *mint_ai.owner, VaultError::ConstituentMismatch);
+
+        let vault_before = read_vault(vault_ata, &basket_key, &c.mint)?.amount;
+
+        let user_view = read_token_account(user_ata)?;
+        require_keys_eq!(user_view.mint, c.mint, VaultError::ConstituentMismatch);
+        require_keys_eq!(user_view.owner, payer_key, VaultError::ConstituentMismatch);
+
+        let amount = Basket::amount_for(c.units_per_share, shares, true)?;
+        let decimals = mint_decimals(mint_ai)?;
+        // A Token-2022 transfer fee is the payer's to bear: they send enough that the vault
+        // is credited the full amount. New money stops if the fee is raised past the cap.
+        let fee = TransferFee::of(mint_ai)?;
+        if amount > 0 {
+            fee.assert_within_cap()?;
+        }
+        transfer_from_user(
+            mint_ai,
+            user_ata,
+            vault_ata,
+            &ctx.accounts.payer.to_account_info(),
+            token_program,
+            fee.gross(amount)?,
+            decimals,
+        )?;
+        // Measured, not assumed: whatever the fee did, the vault must hold the full amount.
+        let received = read_token_account(vault_ata)?.amount.saturating_sub(vault_before);
+        require!(received >= amount, VaultError::DepositShort);
+    }
+
+    let creator = ctx.accounts.basket.creator;
+    let basket_id = ctx.accounts.basket.basket_id;
+    let bump = [ctx.accounts.basket.bump];
+    let seeds: [&[u8]; 4] = [b"basket", creator.as_ref(), basket_id.as_ref(), &bump];
+    let signer: &[&[&[u8]]] = &[&seeds];
+
+    // The deposit covers all `shares`; the protocol's cut of them goes to the burn PDA
+    // and the treasury, so units and collateral are untouched.
+    let fee = flow_fee(shares, ctx.accounts.protocol.protocol_fee_bps)?;
+    require!(shares > fee, VaultError::BelowFee);
+    let (burn_fee, treasury_fee) = split_protocol_fee(fee, ctx.accounts.protocol.burn_share_bps)?;
+    let program = ctx.accounts.share_token_program.to_account_info();
+    let mint = ctx.accounts.share_mint.to_account_info();
+    let authority = ctx.accounts.basket.to_account_info();
+    for (to, amount) in [
+        (ctx.accounts.payer_shares.to_account_info(), shares - fee),
+        (ctx.accounts.burn_shares.to_account_info(), burn_fee),
+        (ctx.accounts.treasury_shares.to_account_info(), treasury_fee),
+    ] {
+        if amount > 0 {
+            mint_shares(&program, &mint, &to, &authority, signer, amount)?;
+        }
+    }
+    Ok(())
+}
+
+/// The most shares (up to `cap`) the payer's balances cover. A deposit for `s` shares
+/// takes `ceil(units * s / ONE_SHARE)` of a sleeve, which a balance `b` covers exactly
+/// when `s <= b * ONE_SHARE / units`. Remaining accounts are the mint quads.
+pub(crate) fn affordable_shares<'info>(ctx: &Context<'_, '_, 'info, 'info, MintInKind<'info>>, cap: u64) -> Result<u64> {
+    let count = ctx.accounts.basket.constituent_count as usize;
+    require!(ctx.remaining_accounts.len() == count * 4, VaultError::BadRemainingAccounts);
+    let payer = ctx.accounts.payer.key();
+    let mut shares = cap as u128;
+    for i in 0..count {
+        let c = ctx.accounts.basket.constituents[i];
+        if c.units_per_share == 0 {
+            continue;
+        }
+        let user = read_token_account(&ctx.remaining_accounts[i * 4 + 1])?;
+        require_keys_eq!(user.mint, c.mint, VaultError::ConstituentMismatch);
+        require_keys_eq!(user.owner, payer, VaultError::ConstituentMismatch);
+        let mint_ai = &ctx.remaining_accounts[i * 4 + 2];
+        require_keys_eq!(*mint_ai.key, c.mint, VaultError::ConstituentMismatch);
+        let usable = TransferFee::of(mint_ai)?.net(user.amount)?;
+        shares = shares.min(usable as u128 * ONE_SHARE / c.units_per_share as u128);
+    }
+    Ok(shares as u64)
+}
+
+/// The protocol's cut of a seed, mint or redeem, rounded up. Rounded down, any flow under
+/// 10,000 / fee_bps raw units paid nothing, and a basket seeded with few raw units for a lot
+/// of tokens made such a flow worth thousands: minted and redeemed in small enough pieces,
+/// it never paid the fee at all.
+pub(crate) fn flow_fee(shares: u64, fee_bps: u16) -> Result<u64> {
+    let fee = ((shares as u128) * (fee_bps as u128)).div_ceil(BPS_DENOM);
+    u64::try_from(fee).map_err(|_| VaultError::MathOverflow.into())
+}
+
+/// Splits a protocol fee between the burn PDA (for buying and burning GRAVI) and the treasury.
+pub(crate) fn split_protocol_fee(fee: u64, burn_share_bps: u16) -> Result<(u64, u64)> {
+    let burn = u64::try_from((fee as u128) * (burn_share_bps as u128) / BPS_DENOM).map_err(|_| VaultError::MathOverflow)?;
+    Ok((burn, fee - burn))
+}
+
+// ---------------------------------------------------------------------------- accounts
+
+#[derive(Accounts)]
+pub struct MintInKind<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    #[account(mut, has_one = share_mint)]
+    pub basket: Account<'info, Basket>,
+
+    #[account(mut)]
+    pub share_mint: InterfaceAccount<'info, MintI>,
+
+    #[account(mut, token::mint = share_mint, token::authority = payer)]
+    pub payer_shares: InterfaceAccount<'info, TokenAccountI>,
+
+    #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump)]
+    pub protocol: Account<'info, Protocol>,
+
+    #[account(mut, token::mint = share_mint, token::authority = burn_authority)]
+    pub burn_shares: InterfaceAccount<'info, TokenAccountI>,
+
+    /// CHECK: address-only PDA; only the buyback instructions sign for it.
+    #[account(seeds = [BURN_SEED], bump)]
+    pub burn_authority: UncheckedAccount<'info>,
+
+    #[account(mut, token::mint = share_mint, token::authority = protocol)]
+    pub treasury_shares: InterfaceAccount<'info, TokenAccountI>,
+
+    /// Required only when access == Allowlist.
+    pub allow_entry: Option<Account<'info, AllowEntry>>,
+
+    pub share_token_program: Interface<'info, TokenInterface>,
+}
+
+#[derive(Accounts)]
+pub struct RedeemInKind<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    #[account(mut, has_one = share_mint)]
+    pub basket: Account<'info, Basket>,
+
+    #[account(mut)]
+    pub share_mint: InterfaceAccount<'info, MintI>,
+
+    #[account(mut, token::mint = share_mint, token::authority = payer)]
+    pub payer_shares: InterfaceAccount<'info, TokenAccountI>,
+
+    #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump)]
+    pub protocol: Account<'info, Protocol>,
+
+    #[account(mut, token::mint = share_mint, token::authority = burn_authority)]
+    pub burn_shares: InterfaceAccount<'info, TokenAccountI>,
+
+    /// CHECK: address-only PDA; only the buyback instructions sign for it.
+    #[account(seeds = [BURN_SEED], bump)]
+    pub burn_authority: UncheckedAccount<'info>,
+
+    #[account(mut, token::mint = share_mint, token::authority = protocol)]
+    pub treasury_shares: InterfaceAccount<'info, TokenAccountI>,
+
+    pub share_token_program: Interface<'info, TokenInterface>,
+}

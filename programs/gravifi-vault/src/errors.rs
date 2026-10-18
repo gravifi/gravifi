@@ -98,4 +98,10 @@ pub enum VaultError {
     TransferFeeTooHigh,
     #[msg("Too few shares: the protocol fee would take all of them")]
     BelowFee,
+    #[msg("The burn's share of the protocol fee can't be under 50%")]
+    BurnShareTooLow,
+    #[msg("Slice too small: the least the vault would accept back rounds to zero")]
+    SliceTooSmall,
+    #[msg("This token is one of the basket's own: rebalance it, don't sweep it")]
+    NotStray,
 }

@@ -22,17 +22,22 @@ test suite. How it all works is in the [whitepaper](WHITEPAPER.md)
   from swapping shares back for the tokens they represent.
 - **Every share is fully backed.** Deposits round up, payouts round down, and value leaves a
   vault only through a redemption, a checked rebalance slice or the buyback.
-- **Fee ceilings are code.** The protocol fee can't exceed 0.50% per mint or redeem, a creator
-  fee can't exceed 0.20% a year.
-- **The burn address has no key.** Half of every protocol fee can only be spent buying GRAVI
-  and burning it.
+- **Fee limits are code.** The protocol fee can't exceed 0.50% per mint or redeem, a creator
+  fee can't exceed 0.20% a year, and a change to a creator fee never applies to time already
+  passed.
+- **The burn address has no key.** At least half of every protocol fee goes to it, a floor in
+  the code, and it can only be spent buying GRAVI and burning it.
 
 ## Layout
 
 ```
-programs/gravifi-vault/   the vault program (Rust, Anchor 0.31.1)
-tests/                    the test suite, run against the compiled program in LiteSVM
-WHITEPAPER.md             how GraviFi works
+programs/gravifi-vault/        the vault program (Rust, Anchor 0.31.1)
+  src/lib.rs                   the index of every instruction
+  src/instructions/            their code and accounts, by area: protocol, basket,
+                               mint_redeem, upkeep, rebalance, buyback
+  src/state.rs                 the accounts, and the limits the program enforces
+tests/                         the test suite, run against the compiled program in LiteSVM
+WHITEPAPER.md                  how GraviFi works
 ```
 
 ## Build and test
@@ -47,7 +52,8 @@ npm test
 
 The tests load `target/deploy/gravifi_vault.so` from the build and exercise it end to end:
 baskets, minting and redemption, rounding, fees, access modes, rebalancing and its price
-floor, splits, Token-2022 transfer fees, and the buyback and burn.
+floor, sweeps of tokens a basket is sent, splits, Token-2022 transfer fees, and the buyback
+and burn.
 
 ## Verify it's the program on mainnet
 
@@ -61,7 +67,7 @@ head -c "$(wc -c < target/deploy/gravifi_vault.so)" onchain.so | shasum -a 256
 shasum -a 256 target/deploy/gravifi_vault.so
 ```
 
-Both hashes start with `2f5354c663602580`. A reproducible verified build (`solana-verify`)
+Both hashes start with `0a292b7eda8c23ad`. A reproducible verified build (`solana-verify`)
 comes with the move to a multisig.
 
 ## Status

@@ -1,6 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
 use anchor_lang::solana_program::program::{invoke, invoke_signed};
+use anchor_spl::token_interface;
 use anchor_spl::token_2022::spl_token_2022;
 use spl_token_2022::extension::{transfer_fee::TransferFeeConfig, transfer_hook::TransferHook, BaseStateWithExtensions, StateWithExtensions};
 
@@ -234,4 +235,29 @@ pub fn read_vault(ai: &AccountInfo, basket: &Pubkey, mint: &Pubkey) -> Result<To
     require_keys_eq!(view.mint, *mint, VaultError::ConstituentMismatch);
     require_keys_eq!(view.owner, *basket, VaultError::ConstituentMismatch);
     Ok(view)
+}
+
+pub fn mint_shares<'info>(
+    token_program: &AccountInfo<'info>,
+    mint: &AccountInfo<'info>,
+    to: &AccountInfo<'info>,
+    authority: &AccountInfo<'info>,
+    signer: &[&[&[u8]]],
+    amount: u64,
+) -> Result<()> {
+    if amount == 0 {
+        return Ok(());
+    }
+    token_interface::mint_to(
+        CpiContext::new_with_signer(
+            token_program.clone(),
+            token_interface::MintTo {
+                mint: mint.clone(),
+                to: to.clone(),
+                authority: authority.clone(),
+            },
+            signer,
+        ),
+        amount,
+    )
 }

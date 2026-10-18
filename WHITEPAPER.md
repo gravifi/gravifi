@@ -95,7 +95,8 @@ once every 30 days). Every holder's balance and the price per share change toget
 transaction; nobody's slice changes.
 
 **The creator fee** is streamed as new shares, so a creator earns more only if the basket
-grows. It is the only cost of holding: the protocol charges nothing while shares are held.
+grows. It is the only cost of holding: the protocol charges nothing while shares are held. A
+change to it counts from the moment it's made, never for the time before.
 
 ## 4. Rebalancing
 
@@ -111,6 +112,11 @@ comes round, or it drifts past its tolerance, a keeper trades it back:
 A rebalance can't take value out of a basket: the program checks every slice and the share
 supply can't change in the middle of one.
 
+**Tokens a basket is sent.** Some tokens pay their holders in another token (a stonkfun token
+can pay ZEC), and anyone can send a basket an airdrop. Those tokens aren't part of the recipe,
+so the keeper sweeps them: it swaps them into the basket's most underweight token against the
+same oracle floor, and their value goes to the holders.
+
 ## 5. Fees
 
 | Fee | Rate | Who pays, when | Where it goes |
@@ -121,9 +127,9 @@ supply can't change in the middle of one.
 | **Network** | fractions of a cent | Every transaction | Solana validators |
 
 The protocol fee rounds up, so no flow is too small to pay it, and it is kept in shares, so
-the vault stays fully backed. The ceilings are in the program's code: the protocol fee can
-never exceed 0.50% and a creator fee can never exceed 0.20% a year. Raising either would take
-new code, in public.
+the vault stays fully backed. The limits are in the program's code: the protocol fee can never
+exceed 0.50%, a creator fee can never exceed 0.20% a year, and at least half of every protocol
+fee goes to the GRAVI burn. Changing any of them would take new code, in public.
 
 Opening a token account the first time a wallet holds an asset costs about 0.002 SOL of
 Solana rent, refunded when the account is closed. Trading shares wallet to wallet, or in any
@@ -193,7 +199,7 @@ There is no governance and no vote. Control is split so that no role can reach h
 |---|---|---|
 | **Holders** | Redeem at any time, send or trade their shares | |
 | **A basket's creator** | Change their basket's weights, assets, rebalancing, fee (within the caps), split | Touch the vault's tokens; anything at all once the basket is immutable |
-| **The protocol authority** (the team) | List assets, set fees within the ceilings, name the keepers, and upgrade the program | Through any of its settings: move a vault's tokens, block a redemption, exceed the fee ceilings |
+| **The protocol authority** (the team) | List assets, set fees within the ceilings, name the keepers, and upgrade the program | Through any of its settings: move a vault's tokens, block a redemption, exceed the fee ceilings, send less than half of the protocol fee to the burn |
 | **The keeper** | Run rebalance and buyback slices within the program's checks | Take value out of a basket or the burn address |
 | **The burn address** | Buy GRAVI and burn it | Anything else: it has no key |
 
