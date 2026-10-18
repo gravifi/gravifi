@@ -249,4 +249,4 @@ Every address can be checked on [Solscan](https://solscan.io).
 
 ---
 
-*GraviFi · [gravifi.xyz](https://gravifi.xyz) · hello@gravifi.xyz · security reports: security@gravifi.xyz*
+*GraviFi · [gravifi.xyz](https://gravifi.xyz) · team@gravifi.xyz (contact and security reports)*

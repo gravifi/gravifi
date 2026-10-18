@@ -78,7 +78,7 @@ verified build. Until then, only put in what you can afford to lose.
 
 ## Security
 
-Found something? Write to **security@gravifi.xyz**. Please don't open a public issue for a
+Found something? Write to **team@gravifi.xyz**. Please don't open a public issue for a
 vulnerability.
 
 ## License
