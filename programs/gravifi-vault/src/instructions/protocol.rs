@@ -70,17 +70,17 @@ pub fn set_protocol_fees(
     Ok(())
 }
 
-/// Sets the GRAVI, in base units, a creator burns to create a basket: 0 turns it off, and it
-/// can't go over `MAX_CREATION_BURN_TOKENS` whole GRAVI. The first call creates the account.
-pub fn set_creation_burn(ctx: Context<SetCreationBurn>, amount: u64) -> Result<()> {
+/// Sets the GRAVI, in base units, a creator burns per asset in a basket: 0 turns it off, and it
+/// can't go over `MAX_BURN_PER_ASSET_TOKENS` whole GRAVI. The first call creates the account.
+pub fn set_creation_burn(ctx: Context<SetCreationBurn>, per_asset: u64) -> Result<()> {
     let ceiling = 10u64
         .checked_pow(ctx.accounts.gravi_mint.decimals as u32)
-        .and_then(|one| one.checked_mul(MAX_CREATION_BURN_TOKENS))
+        .and_then(|one| one.checked_mul(MAX_BURN_PER_ASSET_TOKENS))
         .ok_or(VaultError::MathOverflow)?;
-    require!(amount <= ceiling, VaultError::CreationBurnTooHigh);
+    require!(per_asset <= ceiling, VaultError::CreationBurnTooHigh);
     let c = &mut ctx.accounts.creation_burn;
     c.bump = ctx.bumps.creation_burn;
-    c.amount = amount;
+    c.per_asset = per_asset;
     Ok(())
 }
 

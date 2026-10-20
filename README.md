@@ -27,9 +27,9 @@ test suite. How it all works is in the [whitepaper](WHITEPAPER.md)
   passed.
 - **The burn address has no key.** At least half of every protocol fee goes to it, a floor in
   the code, and it can only be spent buying GRAVI and burning it.
-- **The creation burn has a ceiling.** Seeding a new basket burns GRAVI from its creator's
-  wallet, in the same instruction as the seed: a seed that fails burns nothing. The amount
-  can't exceed 10,000,000 GRAVI.
+- **The creation burn has a ceiling.** Each asset in a basket burns GRAVI from its creator's
+  wallet: for the assets it's created with, in the instruction that creates it, and for each
+  asset added later. The amount can't exceed 1,000,000 GRAVI per asset.
 
 ## Layout
 
@@ -70,7 +70,7 @@ head -c "$(wc -c < target/deploy/gravifi_vault.so)" onchain.so | shasum -a 256
 shasum -a 256 target/deploy/gravifi_vault.so
 ```
 
-Both hashes start with `955e6b386fd4c94f`. A reproducible verified build (`solana-verify`)
+Both hashes start with `9774be28682cace0`. A reproducible verified build (`solana-verify`)
 comes with the move to a multisig.
 
 ## Status

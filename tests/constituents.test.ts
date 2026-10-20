@@ -20,7 +20,7 @@ import {
   rpc,
   send,
 } from "./helpers.ts";
-import { feeShares, fundHolder, listAsset, mintIx, quads, redeemIx, world, type World } from "./fixtures.ts";
+import { NO_GRAVI, feeShares, fundHolder, listAsset, mintIx, quads, redeemIx, world, type World } from "./fixtures.ts";
 
 // World: 10 shares backed by 20 A ($1) and 5 B ($6): $20 + $30 = $50. C is a $1 token.
 const PRICE = { A: 1_000_000_000_000n, B: 6_000_000_000_000n, C: 1_000_000_000_000n };
@@ -51,7 +51,7 @@ type CW = Awaited<ReturnType<typeof cWorld>>;
 const addIx = (w: CW, signer: Keypair = w.creator, mint: PublicKey = w.mintC, vault: PublicKey = w.vaultC) =>
   w.ctx.vault.methods
     .addConstituent()
-    .accountsPartial({ authority: signer.publicKey, basket: w.basket, mint, assetEntry: pda.asset(mint), vault })
+    .accountsPartial({ ...NO_GRAVI, authority: signer.publicKey, basket: w.basket, mint, assetEntry: pda.asset(mint), vault })
     .instruction();
 const targetsIx = (w: CW, bps: number[]) =>
   w.ctx.vault.methods.setTargets(bps).accountsPartial({ authority: w.creator.publicKey, basket: w.basket }).instruction();

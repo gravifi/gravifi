@@ -126,6 +126,7 @@ export async function world(opts: WorldOpts = {}) {
         targetBps: [6_000, 4_000],
       })
       .accountsPartial({
+        ...NO_GRAVI,
         creator: creator.publicKey,
         basket,
         shareMint,
@@ -158,7 +159,6 @@ export async function world(opts: WorldOpts = {}) {
           shareMint,
           payerShares: holder.shares,
           ...feeShares(shareMint, shareProgram),
-          ...NO_GRAVI,
           shareTokenProgram: shareProgram,
         })
         .remainingAccounts(quads(w, creator.publicKey)),

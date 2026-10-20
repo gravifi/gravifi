@@ -38,12 +38,11 @@ pub const ASSET_SEED: &[u8] = b"asset";
 /// Owner of every burn-earmarked account. It signs only inside the buyback instructions,
 /// so what it holds can only be redeemed into its own accounts, sold for GRAVI and burned.
 pub const BURN_SEED: &[u8] = b"burn";
-/// The GRAVI a creator burns to create a basket: a singleton at `[CREATION_BURN_SEED]`.
+/// The GRAVI a creator burns for each asset in a basket: a singleton at `[CREATION_BURN_SEED]`.
 pub const CREATION_BURN_SEED: &[u8] = b"creation_burn";
-/// The most GRAVI the protocol authority can ask a creator to burn, in whole tokens: 1% of the
-/// billion GRAVI launched with. The authority moves the amount within it; only an upgrade
-/// moves the ceiling.
-pub const MAX_CREATION_BURN_TOKENS: u64 = 10_000_000;
+/// The most GRAVI the protocol authority can ask a creator to burn per asset, in whole tokens.
+/// The authority moves the amount within it; only an upgrade moves the ceiling.
+pub const MAX_BURN_PER_ASSET_TOKENS: u64 = 1_000_000;
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug, InitSpace)]
 pub enum AccessMode {
@@ -136,21 +135,37 @@ impl Basket {
         [b"basket", creator.as_ref(), self.basket_id.as_ref(), bump]
     }
 
-    /// Units one share of a sleeve is worth right now: what its vault holds over the share
-    /// supply, rounded down. With no shares out there is nothing to divide, and the stored
-    /// units stand (a seed sets them). Mint, redeem and the buyback's redeem price from this,
-    /// never from units that may predate a balance change: priced from stale units, a
-    /// surplus could be minted into, booked by `sync_units` and redeemed, all in one
-    /// transaction, taking the holders' share of it.
+    /// Units one share of a sleeve is worth right now, to store: what its vault holds over the
+    /// share supply, rounded down. With no shares out there is nothing to divide, and the
+    /// stored units stand (a seed sets them). Past u64 (a dust supply and a vault that isn't)
+    /// it holds at u64::MAX rather than fail, so nothing that stores units can be stopped by a
+    /// donation; nothing prices from it then (see `slice_of`).
     pub fn live_units(vault_amount: u64, supply: u64, stored: u64) -> Result<u64> {
         if supply == 0 {
             return Ok(stored);
         }
-        let units = (vault_amount as u128)
-            .checked_mul(ONE_SHARE)
-            .ok_or(crate::errors::VaultError::MathOverflow)?
-            / supply as u128;
-        u64::try_from(units).map_err(|_| crate::errors::VaultError::MathOverflow.into())
+        let units = (vault_amount as u128) * ONE_SHARE / supply as u128;
+        Ok(u64::try_from(units).unwrap_or(u64::MAX))
+    }
+
+    /// The slice of a vault holding `vault_amount` that `shares` share base units are worth
+    /// with `supply` out, rounded up for a deposit and down for a payout. Mint, redeem and the
+    /// buyback's redeem price from this, never from stored units that may predate a balance
+    /// change (priced from stale units, a surplus could be minted into, booked by `sync_units`
+    /// and redeemed in one transaction, taking the holders' share of it).
+    ///
+    /// It goes through the vault's units per share, as the app quotes them, while those fit in
+    /// u64. Past it (a dust supply and a vault that isn't) it's vault × shares ÷ supply straight,
+    /// so a redeem can't fail there: a payout is never more than the vault holds.
+    pub fn slice_of(vault_amount: u64, shares: u64, supply: u64, round_up: bool) -> Result<u64> {
+        require!(supply > 0, crate::errors::VaultError::ZeroSupply);
+        let units = (vault_amount as u128) * ONE_SHARE / supply as u128;
+        if let Ok(units) = u64::try_from(units) {
+            return Self::amount_for(units, shares, round_up);
+        }
+        let n = (vault_amount as u128) * (shares as u128);
+        let q = if round_up { n.div_ceil(supply as u128) } else { n / supply as u128 };
+        u64::try_from(q).map_err(|_| crate::errors::VaultError::MathOverflow.into())
     }
 
     /// Base units of a constituent required to back `shares` share base units.
@@ -202,19 +217,20 @@ pub enum AssetStatus {
     Delisted,
 }
 
-/// GRAVI burned to create a basket, at `[CREATION_BURN_SEED]`. The protocol authority sets the
-/// amount (`set_creation_burn`), up to `MAX_CREATION_BURN_TOKENS`; 0 turns it off. Paid with
-/// the seed, so only a basket that goes live pays it. Every `seed_basket` names it, so a cluster
-/// needs it set once before baskets can be seeded.
+/// GRAVI burned for each asset a basket holds, at `[CREATION_BURN_SEED]`: `initialize_basket`
+/// burns it for every asset the basket starts with, `add_constituent` for each one added later.
+/// The protocol authority sets it (`set_creation_burn`), up to `MAX_BURN_PER_ASSET_TOKENS`; 0
+/// turns it off. Paid on creating, so a basket that's never seeded has still paid it. Both
+/// instructions name it, so a cluster needs it set once before baskets can be created.
 #[account]
 #[derive(InitSpace)]
 pub struct CreationBurn {
     pub bump: u8,
-    /// GRAVI base units burned from the creator's account by each `seed_basket`.
-    pub amount: u64,
+    /// GRAVI base units burned from the creator's account per asset.
+    pub per_asset: u64,
     /// GRAVI burned this way, all time, in base units.
     pub total_burned: u64,
-    /// Baskets seeded that paid it.
+    /// Baskets that paid it.
     pub baskets: u32,
 }
 

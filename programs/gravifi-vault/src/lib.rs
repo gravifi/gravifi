@@ -60,10 +60,10 @@ pub mod gravifi_vault {
         instructions::protocol::set_protocol_fees(ctx, protocol_fee_bps, burn_share_bps)
     }
 
-    /// Sets the GRAVI a creator burns to create a basket, in base units; 0 turns it off. Capped
-    /// at `MAX_CREATION_BURN_TOKENS` whole GRAVI. Protocol authority only.
-    pub fn set_creation_burn(ctx: Context<SetCreationBurn>, amount: u64) -> Result<()> {
-        instructions::protocol::set_creation_burn(ctx, amount)
+    /// Sets the GRAVI a creator burns per asset in a basket, in base units; 0 turns it off.
+    /// Capped at `MAX_BURN_PER_ASSET_TOKENS` whole GRAVI. Protocol authority only.
+    pub fn set_creation_burn(ctx: Context<SetCreationBurn>, per_asset: u64) -> Result<()> {
+        instructions::protocol::set_creation_burn(ctx, per_asset)
     }
 
     /// Adds a mint to the set of assets baskets may be built from.
@@ -89,8 +89,9 @@ pub mod gravifi_vault {
 
     // ------------------------------------------------------------------------------- baskets
 
-    /// Creates the basket and its share mint. Remaining accounts are one
-    /// `[mint, asset_entry]` pair per constituent, in the order of `args.mints`.
+    /// Creates the basket and its share mint, burning the creator's GRAVI for each of its assets
+    /// if the protocol asks for it (`set_creation_burn`). Remaining accounts are one `[mint, asset_entry]` pair per
+    /// constituent, in the order of `args.mints`.
     pub fn initialize_basket<'info>(
         ctx: Context<'_, '_, 'info, 'info, InitializeBasket<'info>>,
         args: InitBasketArgs,
@@ -100,8 +101,7 @@ pub mod gravifi_vault {
 
     // ----------------------------------------------------------------------- mint and redeem
 
-    /// First deposit. Fixes `units_per_share` for every sleeve and mints the opening shares,
-    /// burning the creator's GRAVI if the protocol asks for it (`set_creation_burn`).
+    /// First deposit. Fixes `units_per_share` for every sleeve and mints the opening shares.
     /// Callable once, by the creator, regardless of access mode.
     pub fn seed_basket<'info>(
         ctx: Context<'_, '_, 'info, 'info, SeedBasket<'info>>,
@@ -165,8 +165,9 @@ pub mod gravifi_vault {
     }
 
     /// Adds a listed asset to a creator-managed basket at a 0% target and no units: nothing is
-    /// deposited or moved. A `set_targets` (normally in the same transaction) gives it a weight,
-    /// and rebalancing then buys it in, slice by slice, like any underweight sleeve.
+    /// deposited or moved, but the asset's GRAVI burn is paid, as at creation. A `set_targets`
+    /// (normally in the same transaction) gives it a weight, and rebalancing then buys it in,
+    /// slice by slice, like any underweight sleeve.
     pub fn add_constituent(ctx: Context<AddConstituent>) -> Result<()> {
         instructions::basket::add_constituent(ctx)
     }

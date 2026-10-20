@@ -13,7 +13,7 @@ GraviFi turns a mix of tokenized stocks, crypto and memecoins into a single toke
 share is always worth its exact slice of what the vault holds, and can always be swapped back
 for that slice. Anyone can buy a basket with USDC or SOL, or build one from 133 listed assets.
 Every basket mint and redeem pays a 0.40% protocol fee; half of it buys **GRAVI** on the open
-market and burns it.
+market and burns it. Creating a basket burns GRAVI too.
 
 GraviFi has been live on Solana mainnet since 14 October 2026.
 
@@ -90,9 +90,10 @@ Anyone can create a basket in the app:
 | **Control** | Creator-managed, or immutable: locked forever, nobody can change it again |
 | **Starting price** | $1 to $10,000 a share |
 
-The creator seeds the basket with at least $20, and its shares go live on the app's explore
-page. A creator-managed basket can later change its weights, add or remove assets, change its
-rebalancing policy and fee within the caps, and split its shares.
+Creating the basket burns the GRAVI the protocol asks for (section 6.3); the creator then seeds
+it with at least $20, and its shares go live on the app's explore page. A creator-managed basket can later
+change its weights, add or remove assets, change its rebalancing policy and fee within the
+caps, and split its shares.
 
 **Splits.** A creator can split or reverse-split a basket's shares (1:100 to 100:1, at most
 once every 30 days). Every holder's balance and the price per share change together in one
@@ -129,13 +130,15 @@ same oracle floor, and their value goes to the holders.
 |---|---|---|---|
 | **Protocol fee** | 0.40% | On every mint and redeem, including a creator's first deposit | Half to the GRAVI burn, half to the treasury |
 | **Creator fee** | 0% to 0.20% a year | Holders, as share dilution while held | The basket's creator |
+| **Creation burn** | 100,000 GRAVI per asset | The creator, for each asset a basket is created with or gets added | Burned |
 | **App fee** | 0.05% | On buys and sells through the app's USDC/SOL route | The treasury |
 | **Network** | fractions of a cent | Every transaction | Solana validators |
 
 The protocol fee rounds up, so no flow is too small to pay it, and it is kept in shares, so
 the vault stays fully backed. The limits are in the program's code: the protocol fee can never
-exceed 0.50%, a creator fee can never exceed 0.20% a year, and at least half of every protocol
-fee goes to the GRAVI burn. Changing any of them would take new code, in public.
+exceed 0.50%, a creator fee can never exceed 0.20% a year, the creation burn can never exceed
+1,000,000 GRAVI per asset, and at least half of every protocol fee goes to the GRAVI burn. Changing
+any of them would take new code, in public.
 
 Opening a token account the first time a wallet holds an asset costs about 0.002 SOL of
 Solana rent, refunded when the account is closed. Trading shares wallet to wallet, or in any
@@ -178,6 +181,18 @@ GRAVI and burns it, half goes to the treasury.
 **Burn #1** (15 October 2026): 3.80 SOL of creator fees claimed; 1.90 SOL bought and burned
 **10,611,685 GRAVI**, 1.06% of supply. Supply after: 989,388,314.
 
+### 6.3 Creation burn
+
+Every asset in a basket burns GRAVI from the creator's wallet: creating a basket burns it for
+each asset the basket starts with, in the instruction that creates it (a basket created and
+never seeded has still paid it), and adding an asset later burns it for that asset. It is a
+real burn, so supply falls; nobody receives it. The amount is **100,000 GRAVI per asset**
+today, so a five-asset basket burns 500,000. The protocol authority sets it (section 8), and 0
+turns it off; the program refuses anything above **1,000,000 GRAVI per asset**, and only a
+program upgrade could raise that ceiling. A creator doesn't need to hold GRAVI first: the app
+buys whatever is missing with SOL as part of creating or adding, and shows the cost before
+signing.
+
 ## 7. Assets
 
 133 assets are listed today:
@@ -205,7 +220,7 @@ There is no governance and no vote. Control is split so that no role can reach h
 |---|---|---|
 | **Holders** | Redeem at any time, send or trade their shares | |
 | **A basket's creator** | Change their basket's weights, assets, rebalancing, fee (within the caps), split | Touch the vault's tokens; anything at all once the basket is immutable |
-| **The protocol authority** (the team) | List assets, set fees within the ceilings, name the keepers, and upgrade the program | Through any of its settings: move a vault's tokens, block a redemption, exceed the fee ceilings, send less than half of the protocol fee to the burn |
+| **The protocol authority** (the team) | List assets, set fees and the creation burn within the ceilings, name the keepers, and upgrade the program | Through any of its settings: move a vault's tokens, block a redemption, exceed the fee or creation-burn ceilings, send less than half of the protocol fee to the burn |
 | **The keeper** | Post the prices rebalances and buybacks are checked against; run rebalance and buyback slices within the program's checks | Move a vault's tokens outside a slice, or accept less back than the posted price allows |
 | **The burn address** | Buy GRAVI and burn it | Anything else: it has no key |
 

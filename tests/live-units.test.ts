@@ -23,7 +23,7 @@ import {
   send,
   warp,
 } from "./helpers.ts";
-import { NO_GRAVI, SEED_SHARES, UNITS_A, UNITS_B, feeShares, fundHolder, mintIx, quads, redeemIx, world, type World } from "./fixtures.ts";
+import { SEED_SHARES, UNITS_A, UNITS_B, feeShares, fundHolder, mintIx, quads, redeemIx, world, type World } from "./fixtures.ts";
 
 const TEN = 10n * ONE_SHARE;
 
@@ -138,7 +138,7 @@ describe("the creator fee is owed from the seed, not from creation", () => {
       w.ctx,
       w.ctx.vault.methods
         .seedBasket(new BN(SEED_SHARES.toString()), [new BN(UNITS_A.toString()), new BN(UNITS_B.toString())])
-        .accountsPartial({ payer: w.creator.publicKey, basket: w.basket, shareMint: w.shareMint, payerShares: holder.shares, ...feeShares(w.shareMint, w.shareProgram), ...NO_GRAVI, shareTokenProgram: w.shareProgram })
+        .accountsPartial({ payer: w.creator.publicKey, basket: w.basket, shareMint: w.shareMint, payerShares: holder.shares, ...feeShares(w.shareMint, w.shareProgram), shareTokenProgram: w.shareProgram })
         .remainingAccounts(quads(w, w.creator.publicKey)),
       [w.creator],
     );
@@ -183,5 +183,36 @@ describe("an asset entry is only the one at its own address", () => {
       ),
       "AssetNotListed",
     );
+  });
+});
+
+// A vault far bigger than its share supply (the supply redeemed down to dust, then a donation)
+// puts units per share past u64. Nothing prices from units, so mint and redeem still work, and
+// what stores units holds them at u64::MAX instead of failing.
+describe("units past u64", () => {
+  it("a dust supply and a large donation stop neither redeeming, minting nor syncing", async () => {
+    const w = await world();
+    const creatorA = ata(w.mintA, w.creator.publicKey);
+    await rpc(w.ctx, redeemIx(w, w.creator, SEED_SHARES - 1n), [w.creator]);
+    // 2e10 A over 1 raw share is 2e19 units a share: past u64.
+    await mintTo(w.ctx, w.mintA, w.vaultA, 20_000_000_000n, TOKEN_PROGRAM_ID);
+    await rpc(w.ctx, syncIx(w));
+    const b: any = await (w.ctx.vault.account as any).basket.fetch(w.basket);
+    assert.equal(BigInt(b.constituents[0].unitsPerShare.toString()), 2n ** 64n - 1n);
+
+    // A new raw share costs a full slice of the vault: no discount for the capped units.
+    const minter = Keypair.generate();
+    const acct = await fundHolder(w, minter);
+    const vaultA = balance(w.ctx, w.vaultA);
+    const a0 = balance(w.ctx, acct.a);
+    await rpc(w.ctx, mintIx(w, minter, 1n), [minter]);
+    assert.equal(a0 - balance(w.ctx, acct.a), vaultA);
+
+    // Both raw shares redeem, half the vault each.
+    const c0 = balance(w.ctx, creatorA);
+    await rpc(w.ctx, redeemIx(w, w.creator, 1n), [w.creator]);
+    assert.equal(balance(w.ctx, creatorA) - c0, vaultA);
+    await rpc(w.ctx, redeemIx(w, minter, 1n), [minter]);
+    assert.equal(balance(w.ctx, w.vaultA), 0n);
   });
 });

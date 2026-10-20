@@ -62,8 +62,7 @@ pub fn buyback_redeem<'info>(
         require_keys_eq!(burn_view.owner, burn_key, VaultError::ConstituentMismatch);
 
         // As redeem_in_kind: a slice of what the vault holds, not of stored units.
-        let units = Basket::live_units(vault_view.amount, supply_before, c.units_per_share)?;
-        let amount = Basket::amount_for(units, shares, false)?;
+        let amount = Basket::slice_of(vault_view.amount, shares, supply_before, false)?;
         require!(vault_view.amount >= amount, VaultError::VaultUndercollateralised);
         transfer_from_vault(
             mint_ai,

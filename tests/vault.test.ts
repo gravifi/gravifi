@@ -133,7 +133,7 @@ describe("asset registry", () => {
         w.ctx,
         w.ctx.vault.methods
           .initializeBasket(basketArgs(id, [w.mintA, unlisted], [5_000, 5_000]))
-          .accountsPartial({ creator: w.creator.publicKey, basket, shareMint: pda.share(basket), shareTokenProgram: TOKEN_PROGRAM_ID })
+          .accountsPartial({ ...NO_GRAVI, creator: w.creator.publicKey, basket, shareMint: pda.share(basket), shareTokenProgram: TOKEN_PROGRAM_ID })
           .remainingAccounts(entries([w.mintA, unlisted])),
         [w.creator],
       ),
@@ -222,7 +222,7 @@ describe("basket creation", () => {
         w.ctx,
         w.ctx.vault.methods
           .initializeBasket(basketArgs(id, mints, weights))
-          .accountsPartial({ creator: w.creator.publicKey, basket, shareMint: pda.share(basket), shareTokenProgram: TOKEN_PROGRAM_ID }),
+          .accountsPartial({ ...NO_GRAVI, creator: w.creator.publicKey, basket, shareMint: pda.share(basket), shareTokenProgram: TOKEN_PROGRAM_ID }),
         [w.creator],
       ),
       "TooManyConstituents",
@@ -244,7 +244,7 @@ describe("basket creation", () => {
           w.ctx,
           w.ctx.vault.methods
             .initializeBasket(basketArgs(id, mints, [...weights], fee))
-            .accountsPartial({ creator: w.creator.publicKey, basket, shareMint: pda.share(basket), shareTokenProgram: TOKEN_PROGRAM_ID })
+            .accountsPartial({ ...NO_GRAVI, creator: w.creator.publicKey, basket, shareMint: pda.share(basket), shareTokenProgram: TOKEN_PROGRAM_ID })
             .remainingAccounts(entries(mints)),
           [w.creator],
         ),
@@ -265,7 +265,7 @@ describe("basket creation", () => {
         w.ctx,
         w.ctx.vault.methods
           .initializeBasket(basketArgs(id, [w.mintA, w.mintB], [5_000, 5_000]))
-          .accountsPartial({ creator: w.creator.publicKey, basket, shareMint, shareTokenProgram: program })
+          .accountsPartial({ ...NO_GRAVI, creator: w.creator.publicKey, basket, shareMint, shareTokenProgram: program })
           .remainingAccounts(entries([w.mintA, w.mintB])),
         [w.creator],
       );
@@ -342,7 +342,7 @@ describe("mint and redeem", () => {
       w.ctx,
       w.ctx.vault.methods
         .initializeBasket(basketArgs(id, [w.mintA, mintC], [5_000, 5_000]))
-        .accountsPartial({ creator: w.creator.publicKey, basket, shareMint, shareTokenProgram: TOKEN_PROGRAM_ID })
+        .accountsPartial({ ...NO_GRAVI, creator: w.creator.publicKey, basket, shareMint, shareTokenProgram: TOKEN_PROGRAM_ID })
         .remainingAccounts(entries([w.mintA, mintC])),
       [w.creator],
     );
@@ -361,11 +361,10 @@ describe("mint and redeem", () => {
       { pubkey: m, isSigner: false, isWritable: false },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
     ]);
-    const accts = { payer: w.creator.publicKey, basket, shareMint, payerShares: shares, ...fees, ...NO_GRAVI, shareTokenProgram: TOKEN_PROGRAM_ID };
+    const accts = { payer: w.creator.publicKey, basket, shareMint, payerShares: shares, ...fees, shareTokenProgram: TOKEN_PROGRAM_ID };
     await rpc(w.ctx, w.ctx.vault.methods.seedBasket(new BN(ONE_SHARE.toString()), [new BN(1_000_000), new BN(3_000_000)]).accountsPartial(accts).remainingAccounts(rem), [w.creator]);
     assert.equal(balance(w.ctx, vC), 3_000_000n);
-    const { graviMint, creatorGravi, graviTokenProgram, ...redeemAccts } = accts;
-    await rpc(w.ctx, w.ctx.vault.methods.redeemInKind(new BN(ONE_SHARE.toString()), 0).accountsPartial(redeemAccts).remainingAccounts(rem), [w.creator]);
+    await rpc(w.ctx, w.ctx.vault.methods.redeemInKind(new BN(ONE_SHARE.toString()), 0).accountsPartial(accts).remainingAccounts(rem), [w.creator]);
     assert.equal(balance(w.ctx, vA), 0n);
     assert.equal(balance(w.ctx, vC), 0n);
   });

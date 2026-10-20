@@ -104,8 +104,8 @@ pub enum VaultError {
     SliceTooSmall,
     #[msg("This token is one of the basket's own: rebalance it, don't sweep it")]
     NotStray,
-    #[msg("The GRAVI burned to create a basket can't be over 10,000,000 GRAVI")]
+    #[msg("The GRAVI burned per asset can't be over 1,000,000 GRAVI")]
     CreationBurnTooHigh,
-    #[msg("Seeding a basket burns GRAVI: pass the GRAVI mint, your GRAVI account and its token program")]
+    #[msg("Each asset in a basket burns GRAVI: pass the GRAVI mint, your GRAVI account and its token program")]
     CreationBurnAccountsMissing,
 }

@@ -31,6 +31,11 @@ pub struct InitBasketArgs {
 
 /// Creates the basket and its share mint. Remaining accounts are one
 /// `[mint, asset_entry]` pair per constituent, in the order of `args.mints`.
+///
+/// While the protocol asks for a creation burn, the creator burns that much GRAVI per asset from
+/// their own account here: a real burn, so GRAVI's supply falls. It's paid on creating, not on
+/// seeding: a basket created and never seeded has still paid it. With the amount at 0 the GRAVI
+/// accounts may be left out.
 pub fn initialize_basket<'info>(
     ctx: Context<'_, '_, 'info, 'info, InitializeBasket<'info>>,
     args: InitBasketArgs,
@@ -78,6 +83,15 @@ pub fn initialize_basket<'info>(
         });
     }
 
+    let a = &mut *ctx.accounts;
+    burn_per_asset(
+        &mut a.creation_burn,
+        &a.protocol,
+        GraviAccounts { mint: a.gravi_mint.as_ref(), from: a.creator_gravi.as_ref(), program: a.gravi_token_program.as_ref() },
+        a.creator.to_account_info(),
+        n as u64,
+        true,
+    )?;
     create_share_mint(&ctx)?;
 
     let now = Clock::get()?.unix_timestamp;
@@ -104,6 +118,46 @@ pub fn initialize_basket<'info>(
     Ok(())
 }
 
+/// The creator's GRAVI accounts, named only while the creation burn is on.
+struct GraviAccounts<'a, 'info> {
+    mint: Option<&'a UncheckedAccount<'info>>,
+    from: Option<&'a UncheckedAccount<'info>>,
+    program: Option<&'a Interface<'info, TokenInterface>>,
+}
+
+/// Burns the per-asset GRAVI for `assets` assets from `owner`'s account and counts it.
+fn burn_per_asset<'info>(
+    c: &mut CreationBurn,
+    protocol: &Protocol,
+    gravi: GraviAccounts<'_, 'info>,
+    owner: AccountInfo<'info>,
+    assets: u64,
+    new_basket: bool,
+) -> Result<()> {
+    let amount = c.per_asset.checked_mul(assets).ok_or(VaultError::MathOverflow)?;
+    if amount == 0 {
+        return Ok(());
+    }
+    let (Some(mint), Some(from), Some(program)) = (gravi.mint, gravi.from, gravi.program) else {
+        return err!(VaultError::CreationBurnAccountsMissing);
+    };
+    // The mint is GRAVI; the token program checks the rest as it burns: that it owns the mint
+    // and the account, that the account holds GRAVI, and that the owner signing owns it.
+    require_keys_eq!(mint.key(), protocol.gravi_mint, VaultError::GraviMintNotSet);
+    anchor_spl::token_interface::burn(
+        CpiContext::new(
+            program.to_account_info(),
+            anchor_spl::token_interface::Burn { mint: mint.to_account_info(), from: from.to_account_info(), authority: owner },
+        ),
+        amount,
+    )?;
+    c.total_burned = c.total_burned.checked_add(amount).ok_or(VaultError::MathOverflow)?;
+    if new_basket {
+        c.baskets = c.baskets.saturating_add(1);
+    }
+    Ok(())
+}
+
 /// Replace the target weights. `Immutable` rejects unconditionally, which is the whole
 /// promise of that mode.
 pub fn set_targets(ctx: Context<Reconfigure>, target_bps: Vec<u16>) -> Result<()> {
@@ -125,7 +179,8 @@ pub fn set_targets(ctx: Context<Reconfigure>, target_bps: Vec<u16>) -> Result<()
 /// and rebalancing then buys it in, slice by slice, like any underweight sleeve.
 ///
 /// The basket's vault for the asset (its associated token account) must already exist,
-/// so every instruction that reads all the vaults keeps working.
+/// so every instruction that reads all the vaults keeps working. The asset's GRAVI burn is
+/// paid here, as if the basket had been created with it.
 pub fn add_constituent(ctx: Context<AddConstituent>) -> Result<()> {
     authorise_mandate(&ctx.accounts.basket, &ctx.accounts.authority)?;
     let basket_key = ctx.accounts.basket.key();
@@ -141,6 +196,17 @@ pub fn add_constituent(ctx: Context<AddConstituent>) -> Result<()> {
     assert_no_active_transfer_hook(&mint_ai)?;
     TransferFee::of(&mint_ai)?.assert_within_cap()?;
     read_vault(&ctx.accounts.vault.to_account_info(), &basket_key, &mint_key)?;
+
+    // An added asset pays its GRAVI burn as if the basket had started with it.
+    let a = &mut *ctx.accounts;
+    burn_per_asset(
+        &mut a.creation_burn,
+        &a.protocol,
+        GraviAccounts { mint: a.gravi_mint.as_ref(), from: a.creator_gravi.as_ref(), program: a.gravi_token_program.as_ref() },
+        a.authority.to_account_info(),
+        1,
+        false,
+    )?;
 
     let basket = &mut ctx.accounts.basket;
     basket.constituents.push(Constituent { mint: mint_key, target_bps: 0, units_per_share: 0 });
@@ -337,6 +403,19 @@ pub struct InitializeBasket<'info> {
 
     pub share_token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
+
+    #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump)]
+    pub protocol: Box<Account<'info, Protocol>>,
+    #[account(mut, seeds = [CREATION_BURN_SEED], bump = creation_burn.bump)]
+    pub creation_burn: Box<Account<'info, CreationBurn>>,
+    /// CHECK: GRAVI, matched against the protocol's mint in `burn_per_asset`. Needed only
+    /// while the creation burn is on.
+    #[account(mut)]
+    pub gravi_mint: Option<UncheckedAccount<'info>>,
+    /// CHECK: the creator's GRAVI account; the token program checks it as it burns.
+    #[account(mut)]
+    pub creator_gravi: Option<UncheckedAccount<'info>>,
+    pub gravi_token_program: Option<Interface<'info, TokenInterface>>,
 }
 
 #[derive(Accounts)]
@@ -357,6 +436,19 @@ pub struct AddConstituent<'info> {
     pub asset_entry: UncheckedAccount<'info>,
     /// CHECK: the basket's vault for the asset, checked by `read_vault` (canonical ATA).
     pub vault: UncheckedAccount<'info>,
+
+    #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump)]
+    pub protocol: Box<Account<'info, Protocol>>,
+    #[account(mut, seeds = [CREATION_BURN_SEED], bump = creation_burn.bump)]
+    pub creation_burn: Box<Account<'info, CreationBurn>>,
+    /// CHECK: GRAVI, matched against the protocol's mint in `burn_per_asset`. Needed only while
+    /// the creation burn is on.
+    #[account(mut)]
+    pub gravi_mint: Option<UncheckedAccount<'info>>,
+    /// CHECK: the creator's GRAVI account; the token program checks it as it burns.
+    #[account(mut)]
+    pub creator_gravi: Option<UncheckedAccount<'info>>,
+    pub gravi_token_program: Option<Interface<'info, TokenInterface>>,
 }
 
 #[derive(Accounts)]

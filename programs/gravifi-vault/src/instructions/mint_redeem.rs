@@ -9,11 +9,6 @@ use crate::token_util::*;
 
 /// First deposit. Fixes `units_per_share` for every sleeve and mints the opening shares.
 /// Callable once, by the creator, regardless of access mode.
-///
-/// While the protocol asks for a creation burn, the creator burns that much GRAVI from their
-/// own account here: a real burn, so GRAVI's supply falls. It's paid with the seed rather than
-/// at `initialize_basket`, so a basket that's never seeded never burned anything: the two land
-/// or fail together. With the amount at 0 the GRAVI accounts may be left out.
 pub fn seed_basket<'info>(
     ctx: Context<'_, '_, 'info, 'info, SeedBasket<'info>>,
     shares: u64,
@@ -41,13 +36,6 @@ pub fn seed_basket<'info>(
     // a basket left unseeded for months would otherwise charge its first holders for them.
     ctx.accounts.basket.last_fee_accrual = Clock::get()?.unix_timestamp;
 
-    burn_for_creation(&ctx)?;
-    let c = &mut ctx.accounts.creation_burn;
-    if c.amount > 0 {
-        c.total_burned = c.total_burned.checked_add(c.amount).ok_or(VaultError::MathOverflow)?;
-        c.baskets = c.baskets.saturating_add(1);
-    }
-
     // The opening deposit pays the fee like any other: fee-free, a basket of one's own
     // would be the way to buy in without it.
     let a = &mut *ctx.accounts;
@@ -62,34 +50,6 @@ pub fn seed_basket<'info>(
         share_token_program: &a.share_token_program,
     };
     collect_and_mint(deposit, ctx.remaining_accounts, shares)
-}
-
-fn burn_for_creation(ctx: &Context<SeedBasket>) -> Result<()> {
-    let amount = ctx.accounts.creation_burn.amount;
-    if amount == 0 {
-        return Ok(());
-    }
-    let (Some(mint), Some(from), Some(program)) = (
-        ctx.accounts.gravi_mint.as_ref(),
-        ctx.accounts.creator_gravi.as_ref(),
-        ctx.accounts.gravi_token_program.as_ref(),
-    ) else {
-        return err!(VaultError::CreationBurnAccountsMissing);
-    };
-    // The mint is GRAVI; the token program checks the rest as it burns: that it owns the mint
-    // and the account, that the account holds GRAVI, and that the creator owns it.
-    require_keys_eq!(mint.key(), ctx.accounts.protocol.gravi_mint, VaultError::GraviMintNotSet);
-    token_interface::burn(
-        CpiContext::new(
-            program.to_account_info(),
-            token_interface::Burn {
-                mint: mint.to_account_info(),
-                from: from.to_account_info(),
-                authority: ctx.accounts.payer.to_account_info(),
-            },
-        ),
-        amount,
-    )
 }
 
 /// Deposit the exact underlying basket for up to `shares`, receive them less the
@@ -234,9 +194,8 @@ pub fn redeem_in_kind<'info>(
 
         let vault_view = read_vault(vault_ata, &basket_key, &c.mint)?;
 
-        let units = Basket::live_units(vault_view.amount, supply_before, c.units_per_share)?;
-        let amount = Basket::amount_for(units, shares, false)?;
-        // Can't happen with live units (a slice of the balance, rounded down); kept as the
+        let amount = Basket::slice_of(vault_view.amount, shares, supply_before, false)?;
+        // Can't happen with a slice of the balance, rounded down; kept as the
         // last line between a mistake and paying early redeemers out of later ones.
         require!(
             vault_view.amount >= amount,
@@ -319,9 +278,13 @@ pub(crate) fn collect_and_mint<'info>(d: Deposit<'_, 'info>, remaining: &[Accoun
 
         // Priced from the vault, not stored units: tokens that arrived outside the program
         // already belong to the holders, and the deposit pays for its slice of them.
-        let units = Basket::live_units(vault_before, supply, c.units_per_share)?;
-        d.basket.constituents[i].units_per_share = units;
-        let amount = Basket::amount_for(units, shares, true)?;
+        d.basket.constituents[i].units_per_share = Basket::live_units(vault_before, supply, c.units_per_share)?;
+        // A seed (no shares out yet) pays the units it set.
+        let amount = if supply == 0 {
+            Basket::amount_for(c.units_per_share, shares, true)?
+        } else {
+            Basket::slice_of(vault_before, shares, supply, true)?
+        };
         let decimals = mint_decimals(mint_ai)?;
         // A Token-2022 transfer fee is the payer's to bear: they send enough that the vault
         // is credited the full amount. New money stops if the fee is raised past the cap.
@@ -381,7 +344,7 @@ pub(crate) fn affordable_shares<'info>(ctx: &Context<'_, '_, 'info, 'info, MintI
     let mut shares = cap as u128;
     for i in 0..count {
         let c = ctx.accounts.basket.constituents[i];
-        // The same live units `collect_and_mint` will charge.
+        // The same slice of the vault `collect_and_mint` will charge.
         let held = read_vault(&ctx.remaining_accounts[i * 4], &basket_key, &c.mint)?.amount;
         let units = Basket::live_units(held, supply, c.units_per_share)?;
         if units == 0 {
@@ -393,7 +356,10 @@ pub(crate) fn affordable_shares<'info>(ctx: &Context<'_, '_, 'info, 'info, MintI
         let mint_ai = &ctx.remaining_accounts[i * 4 + 2];
         require_keys_eq!(*mint_ai.key, c.mint, VaultError::ConstituentMismatch);
         let usable = TransferFee::of(mint_ai)?.net(user.amount)?;
-        shares = shares.min(usable as u128 * ONE_SHARE / units as u128);
+        // The most shares whose deposit fits in `usable`: through units while they fit (as
+        // `slice_of` prices), straight from the vault past them.
+        let most = if units < u64::MAX { usable as u128 * ONE_SHARE / units as u128 } else { usable as u128 * supply as u128 / held as u128 };
+        shares = shares.min(most);
     }
     Ok(shares as u64)
 }
@@ -449,17 +415,6 @@ pub struct SeedBasket<'info> {
     pub treasury_shares: Box<InterfaceAccount<'info, TokenAccountI>>,
 
     pub share_token_program: Interface<'info, TokenInterface>,
-
-    #[account(mut, seeds = [CREATION_BURN_SEED], bump = creation_burn.bump)]
-    pub creation_burn: Box<Account<'info, CreationBurn>>,
-    /// CHECK: GRAVI, matched against the protocol's mint in `burn_for_creation`. Needed only
-    /// while the creation burn is on.
-    #[account(mut)]
-    pub gravi_mint: Option<UncheckedAccount<'info>>,
-    /// CHECK: the creator's GRAVI account; the token program checks it as it burns.
-    #[account(mut)]
-    pub creator_gravi: Option<UncheckedAccount<'info>>,
-    pub gravi_token_program: Option<Interface<'info, TokenInterface>>,
 }
 
 #[derive(Accounts)]

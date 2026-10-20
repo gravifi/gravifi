@@ -283,7 +283,7 @@ async function fourWorld() {
         mints,
         targetBps: [2_500, 2_500, 2_500, 2_500],
       })
-      .accountsPartial({ creator: creator.publicKey, basket, shareMint, shareTokenProgram: TOKEN_PROGRAM_ID })
+      .accountsPartial({ ...NO_GRAVI, creator: creator.publicKey, basket, shareMint, shareTokenProgram: TOKEN_PROGRAM_ID })
       .remainingAccounts(mints.flatMap((m) => [
         { pubkey: m, isSigner: false, isWritable: false },
         { pubkey: pda.asset(m), isSigner: false, isWritable: false },
@@ -310,7 +310,7 @@ async function fourWorld() {
     ctx,
     ctx.vault.methods
       .seedBasket(new BN((10n * ONE_SHARE).toString()), [2_600_000, 2_418_000, 2_491_000, 2_491_000].map((u) => new BN(u)))
-      .accountsPartial({ payer: creator.publicKey, basket, shareMint, payerShares: shares, ...feeShares(shareMint), ...NO_GRAVI, shareTokenProgram: TOKEN_PROGRAM_ID })
+      .accountsPartial({ payer: creator.publicKey, basket, shareMint, payerShares: shares, ...feeShares(shareMint), shareTokenProgram: TOKEN_PROGRAM_ID })
       .remainingAccounts(quads),
     [creator],
   );

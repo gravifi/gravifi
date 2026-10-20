@@ -69,11 +69,7 @@ pub fn accrue_fees<'info>(ctx: Context<'_, '_, 'info, 'info, AccrueFees<'info>>)
     let basket = &mut ctx.accounts.basket;
     for i in 0..count {
         let held = read_vault(&ctx.remaining_accounts[i], &basket_key, &basket.constituents[i].mint)?.amount;
-        let units = (held as u128)
-            .checked_mul(ONE_SHARE)
-            .ok_or(VaultError::MathOverflow)?
-            / new_supply as u128;
-        basket.constituents[i].units_per_share = u64::try_from(units).map_err(|_| VaultError::MathOverflow)?;
+        basket.constituents[i].units_per_share = Basket::live_units(held, new_supply, basket.constituents[i].units_per_share)?;
     }
     basket.last_fee_accrual = now;
 
@@ -103,12 +99,8 @@ pub fn sync_units<'info>(
     for i in 0..count {
         let view = read_vault(&ctx.remaining_accounts[i], &basket_key, &ctx.accounts.basket.constituents[i].mint)?;
 
-        let units = (view.amount as u128)
-            .checked_mul(ONE_SHARE)
-            .and_then(|v| v.checked_div(supply as u128))
-            .ok_or(VaultError::MathOverflow)?;
-        ctx.accounts.basket.constituents[i].units_per_share =
-            u64::try_from(units).map_err(|_| VaultError::MathOverflow)?;
+        let stored = ctx.accounts.basket.constituents[i].units_per_share;
+        ctx.accounts.basket.constituents[i].units_per_share = Basket::live_units(view.amount, supply, stored)?;
     }
 
     Ok(())

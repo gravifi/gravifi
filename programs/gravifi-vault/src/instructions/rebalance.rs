@@ -161,11 +161,7 @@ pub fn rebalance_finish<'info>(ctx: Context<'_, '_, 'info, 'info, RebalanceFinis
     let basket = &mut ctx.accounts.basket;
     let traded: &[usize] = if sweep { &[b] } else { &[s, b] };
     for &i in traded {
-        let units = (book.rows[i].balance as u128)
-            .checked_mul(ONE_SHARE)
-            .ok_or(VaultError::MathOverflow)?
-            / supply as u128;
-        basket.constituents[i].units_per_share = u64::try_from(units).map_err(|_| VaultError::MathOverflow)?;
+        basket.constituents[i].units_per_share = Basket::live_units(book.rows[i].balance, supply, basket.constituents[i].units_per_share)?;
     }
 
     let st = &mut ctx.accounts.rebalance_state;
