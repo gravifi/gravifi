@@ -24,7 +24,7 @@ import {
   supply,
   warp,
 } from "./helpers.ts";
-import {
+import { NO_GRAVI,
   SEED_SHARES,
   UNITS_A,
   UNITS_B,
@@ -361,10 +361,10 @@ describe("mint and redeem", () => {
       { pubkey: m, isSigner: false, isWritable: false },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
     ]);
-    const accts = { payer: w.creator.publicKey, basket, shareMint, payerShares: shares, ...fees, allowEntry: null, shareTokenProgram: TOKEN_PROGRAM_ID };
+    const accts = { payer: w.creator.publicKey, basket, shareMint, payerShares: shares, ...fees, ...NO_GRAVI, shareTokenProgram: TOKEN_PROGRAM_ID };
     await rpc(w.ctx, w.ctx.vault.methods.seedBasket(new BN(ONE_SHARE.toString()), [new BN(1_000_000), new BN(3_000_000)]).accountsPartial(accts).remainingAccounts(rem), [w.creator]);
     assert.equal(balance(w.ctx, vC), 3_000_000n);
-    const { allowEntry, ...redeemAccts } = accts;
+    const { graviMint, creatorGravi, graviTokenProgram, ...redeemAccts } = accts;
     await rpc(w.ctx, w.ctx.vault.methods.redeemInKind(new BN(ONE_SHARE.toString()), 0).accountsPartial(redeemAccts).remainingAccounts(rem), [w.creator]);
     assert.equal(balance(w.ctx, vA), 0n);
     assert.equal(balance(w.ctx, vC), 0n);
@@ -400,24 +400,22 @@ describe("mint and redeem", () => {
     await rpc(w.ctx, mintIx(w, user, ONE_SHARE, entry), [user]);
   });
 
-  test("redemption fails loudly when the vault is short, and sync_units repairs it", async () => {
+  test("a vault left short (an issuer clawback) pays every redeemer pro rata, with no sync first", async () => {
     const w = await world();
     // An issuer clawback takes half of token B out of the vault.
     const before = balance(w.ctx, w.vaultB);
     setTokenAmount(w, w.vaultB, before / 2n);
 
-    await expectError(rpc(w.ctx, redeemIx(w, w.creator, SEED_SHARES), [w.creator]), "VaultUndercollateralised");
-
-    await rpc(
-      w.ctx,
-      w.ctx.vault.methods
-        .syncUnits()
-        .accountsPartial({ basket: w.basket, shareMint: w.shareMint })
-        .remainingAccounts([w.vaultA, w.vaultB].map((pubkey) => ({ pubkey, isSigner: false, isWritable: false }))),
-    );
+    // Half the holder's shares get half of what's there now, not the stale promise: an early
+    // redeemer can't be paid out of later ones.
+    const alice = w.creator;
+    const b0 = balance(w.ctx, ata(w.mintB, alice.publicKey, TOKEN_2022_PROGRAM_ID));
+    await rpc(w.ctx, redeemIx(w, alice, SEED_SHARES / 2n), [alice]);
+    const paid = balance(w.ctx, ata(w.mintB, alice.publicKey, TOKEN_2022_PROGRAM_ID)) - b0;
+    assert.equal(paid, before / 4n);
     const [, ub] = await units(w);
-    assert.equal(ub, UNITS_B / 2n);
-    await rpc(w.ctx, redeemIx(w, w.creator, SEED_SHARES), [w.creator]);
+    assert.equal(ub, UNITS_B / 2n, "the units now match the vault");
+    await rpc(w.ctx, redeemIx(w, alice, SEED_SHARES / 2n), [alice]);
     assert.equal(balance(w.ctx, w.vaultB), 0n);
   });
 

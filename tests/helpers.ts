@@ -203,6 +203,7 @@ export const pda = {
   price: (mint: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("price"), mint.toBuffer()], VAULT_ID)[0],
   rebalance: (basket: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("rebalance"), basket.toBuffer()], VAULT_ID)[0],
   buyback: () => PublicKey.findProgramAddressSync([Buffer.from("buyback")], VAULT_ID)[0],
+  creationBurn: () => PublicKey.findProgramAddressSync([Buffer.from("creation_burn")], VAULT_ID)[0],
 };
 
 export { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, Keypair, PublicKey, SystemProgram };

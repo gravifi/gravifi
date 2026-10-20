@@ -160,7 +160,8 @@ describe("buyback and burn", () => {
     assert.equal(balance(w.ctx, w.burnGravi), 0n, "nothing left unburned");
     assert.equal(supply(w.ctx, w.graviMint), graviSupply - fair);
     const b = await w.ctx.vault.account.buyback.fetch(pda.buyback());
-    assert.equal(b.totalBurned.toString(), fair.toString());
+    // Compared as numbers: on some Node versions a BN's toString() here came out "…NaN".
+    assert.ok(b.totalBurned.eq(new BN(fair.toString())), `total burned ${b.totalBurned}`);
     assert.equal(b.slices, 1);
     assert.equal(b.pending, false);
   });

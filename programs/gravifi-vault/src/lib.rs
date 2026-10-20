@@ -60,6 +60,12 @@ pub mod gravifi_vault {
         instructions::protocol::set_protocol_fees(ctx, protocol_fee_bps, burn_share_bps)
     }
 
+    /// Sets the GRAVI a creator burns to create a basket, in base units; 0 turns it off. Capped
+    /// at `MAX_CREATION_BURN_TOKENS` whole GRAVI. Protocol authority only.
+    pub fn set_creation_burn(ctx: Context<SetCreationBurn>, amount: u64) -> Result<()> {
+        instructions::protocol::set_creation_burn(ctx, amount)
+    }
+
     /// Adds a mint to the set of assets baskets may be built from.
     pub fn register_asset(ctx: Context<RegisterAsset>) -> Result<()> {
         instructions::protocol::register_asset(ctx)
@@ -94,10 +100,11 @@ pub mod gravifi_vault {
 
     // ----------------------------------------------------------------------- mint and redeem
 
-    /// First deposit. Fixes `units_per_share` for every sleeve and mints the opening shares.
+    /// First deposit. Fixes `units_per_share` for every sleeve and mints the opening shares,
+    /// burning the creator's GRAVI if the protocol asks for it (`set_creation_burn`).
     /// Callable once, by the creator, regardless of access mode.
     pub fn seed_basket<'info>(
-        ctx: Context<'_, '_, 'info, 'info, MintInKind<'info>>,
+        ctx: Context<'_, '_, 'info, 'info, SeedBasket<'info>>,
         shares: u64,
         units_per_share: Vec<u64>,
     ) -> Result<()> {

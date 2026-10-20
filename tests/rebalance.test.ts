@@ -25,7 +25,7 @@ import {
   setup,
   warp,
 } from "./helpers.ts";
-import { createFeeAccounts, feeShares, initProtocol, listAsset, world, type World } from "./fixtures.ts";
+import { NO_GRAVI, createFeeAccounts, feeShares, initProtocol, listAsset, world, type World } from "./fixtures.ts";
 
 // World: 10 shares backed by 20 A ($1, 6 decimals) and 5 B ($6, 9 decimals): $20 / $30,
 // so 40% A / 60% B against targets of 60 / 40. B must be sold for A.
@@ -310,7 +310,7 @@ async function fourWorld() {
     ctx,
     ctx.vault.methods
       .seedBasket(new BN((10n * ONE_SHARE).toString()), [2_600_000, 2_418_000, 2_491_000, 2_491_000].map((u) => new BN(u)))
-      .accountsPartial({ payer: creator.publicKey, basket, shareMint, payerShares: shares, ...feeShares(shareMint), allowEntry: null, shareTokenProgram: TOKEN_PROGRAM_ID })
+      .accountsPartial({ payer: creator.publicKey, basket, shareMint, payerShares: shares, ...feeShares(shareMint), ...NO_GRAVI, shareTokenProgram: TOKEN_PROGRAM_ID })
       .remainingAccounts(quads),
     [creator],
   );

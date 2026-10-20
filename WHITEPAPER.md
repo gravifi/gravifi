@@ -48,6 +48,10 @@ shares, less the protocol fee. **Redeeming** hands shares back and receives each
 exact slice, also less the fee. No price is involved in either: the vault swaps units for
 units, so a share can never be issued for less than it is worth, or paid out for more.
 
+Both are priced from what the vault holds at that moment, not from a figure stored earlier,
+so tokens that reach a vault any other way (an airdrop, a donation, a token a redeemer left
+behind) belong to the holders already there: nobody can mint into them at the old price.
+
 The vault always rounds in its own favour: deposits round up, payouts round down. Every
 token a share promises is in the vault.
 

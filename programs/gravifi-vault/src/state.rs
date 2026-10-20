@@ -38,6 +38,12 @@ pub const ASSET_SEED: &[u8] = b"asset";
 /// Owner of every burn-earmarked account. It signs only inside the buyback instructions,
 /// so what it holds can only be redeemed into its own accounts, sold for GRAVI and burned.
 pub const BURN_SEED: &[u8] = b"burn";
+/// The GRAVI a creator burns to create a basket: a singleton at `[CREATION_BURN_SEED]`.
+pub const CREATION_BURN_SEED: &[u8] = b"creation_burn";
+/// The most GRAVI the protocol authority can ask a creator to burn, in whole tokens: 1% of the
+/// billion GRAVI launched with. The authority moves the amount within it; only an upgrade
+/// moves the ceiling.
+pub const MAX_CREATION_BURN_TOKENS: u64 = 10_000_000;
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug, InitSpace)]
 pub enum AccessMode {
@@ -78,7 +84,10 @@ pub struct Constituent {
     /// This is the entire mint/redeem contract: deposit `units_per_share * n / ONE_SHARE`
     /// of every constituent and receive `n` share base units, and vice versa. No price
     /// feed is consulted, so minting and redeeming cannot be manipulated by moving an
-    /// oracle. Rebalancing changes these units while supply stays constant.
+    /// oracle. Mint and redeem re-derive these units from the vault's balance and the
+    /// share supply before using them (`Basket::live_units`), so tokens that reached the
+    /// vault outside the program (an airdrop, a donation, a sleeve a redeemer left
+    /// behind) belong to the holders at that moment and can't be bought at the old price.
     pub units_per_share: u64,
 }
 
@@ -125,6 +134,23 @@ impl Basket {
 
     pub fn signer_seeds<'a>(&'a self, creator: &'a Pubkey, bump: &'a [u8; 1]) -> [&'a [u8]; 4] {
         [b"basket", creator.as_ref(), self.basket_id.as_ref(), bump]
+    }
+
+    /// Units one share of a sleeve is worth right now: what its vault holds over the share
+    /// supply, rounded down. With no shares out there is nothing to divide, and the stored
+    /// units stand (a seed sets them). Mint, redeem and the buyback's redeem price from this,
+    /// never from units that may predate a balance change: priced from stale units, a
+    /// surplus could be minted into, booked by `sync_units` and redeemed, all in one
+    /// transaction, taking the holders' share of it.
+    pub fn live_units(vault_amount: u64, supply: u64, stored: u64) -> Result<u64> {
+        if supply == 0 {
+            return Ok(stored);
+        }
+        let units = (vault_amount as u128)
+            .checked_mul(ONE_SHARE)
+            .ok_or(crate::errors::VaultError::MathOverflow)?
+            / supply as u128;
+        u64::try_from(units).map_err(|_| crate::errors::VaultError::MathOverflow.into())
     }
 
     /// Base units of a constituent required to back `shares` share base units.
@@ -176,6 +202,22 @@ pub enum AssetStatus {
     Delisted,
 }
 
+/// GRAVI burned to create a basket, at `[CREATION_BURN_SEED]`. The protocol authority sets the
+/// amount (`set_creation_burn`), up to `MAX_CREATION_BURN_TOKENS`; 0 turns it off. Paid with
+/// the seed, so only a basket that goes live pays it. Every `seed_basket` names it, so a cluster
+/// needs it set once before baskets can be seeded.
+#[account]
+#[derive(InitSpace)]
+pub struct CreationBurn {
+    pub bump: u8,
+    /// GRAVI base units burned from the creator's account by each `seed_basket`.
+    pub amount: u64,
+    /// GRAVI burned this way, all time, in base units.
+    pub total_burned: u64,
+    /// Baskets seeded that paid it.
+    pub baskets: u32,
+}
+
 /// One per mint at `[ASSET_SEED, mint]`. Baskets may only be built from Listed assets.
 #[account]
 #[derive(InitSpace)]
@@ -189,13 +231,18 @@ pub struct AssetEntry {
 
 /// Reads an AssetEntry from an arbitrary account.
 ///
-/// Owner plus discriminator is sufficient provenance: only `register_asset` creates
-/// AssetEntry accounts, always at `[ASSET_SEED, mint]`, so there is exactly one per mint
-/// and callers additionally check `entry.mint` against the mint they expect.
+/// Only `register_asset` writes AssetEntry accounts (only this program can write data to an
+/// account it owns), always at `[ASSET_SEED, mint]`, and callers check `entry.mint` against
+/// the mint they expect. The address is pinned to that PDA as well, with the stored bump,
+/// so provenance doesn't rest on that reasoning alone.
 pub fn load_asset_entry(ai: &AccountInfo) -> Result<AssetEntry> {
     require_keys_eq!(*ai.owner, crate::ID, VaultError::AssetNotListed);
     let data = ai.try_borrow_data()?;
-    AssetEntry::try_deserialize(&mut &data[..])
+    let entry = AssetEntry::try_deserialize(&mut &data[..])?;
+    let expected = Pubkey::create_program_address(&[ASSET_SEED, entry.mint.as_ref(), &[entry.bump]], &crate::ID)
+        .map_err(|_| VaultError::AssetNotListed)?;
+    require_keys_eq!(*ai.key, expected, VaultError::AssetNotListed);
+    Ok(entry)
 }
 
 // ---------------------------------------------------------------------------- rebalancing

@@ -41,6 +41,8 @@ export interface WorldOpts {
   feeBpsB?: number;
   /** Token B's issuer can freeze accounts and pause the mint, as tokenized stocks' can. */
   issuerB?: { freezable?: boolean; pausable?: boolean };
+  /** GRAVI's token program and decimals: mainnet's GRAVI is Token-2022 with 6. */
+  gravi?: { program: PublicKey; decimals: number };
 }
 
 export async function listAsset(ctx: Ctx, mint: PublicKey) {
@@ -56,8 +58,11 @@ export async function listAsset(ctx: Ctx, mint: PublicKey) {
   );
 }
 
-export async function initProtocol(ctx: Ctx, protocolFeeBps = 10, burnShareBps = 5_000) {
-  const graviMint = await createMint(ctx, 9);
+/** Leaves the GRAVI accounts out of a basket's seed, while the creation burn is off. */
+export const NO_GRAVI = { graviMint: null, creatorGravi: null, graviTokenProgram: null };
+
+export async function initProtocol(ctx: Ctx, protocolFeeBps = 10, burnShareBps = 5_000, gravi = { program: TOKEN_PROGRAM_ID, decimals: 9 }) {
+  const graviMint = await createMint(ctx, gravi.decimals, gravi.program);
   fakeProgramData(ctx, ctx.payer.publicKey);
   await rpc(
     ctx,
@@ -70,13 +75,29 @@ export async function initProtocol(ctx: Ctx, protocolFeeBps = 10, burnShareBps =
       )[0],
     }),
   );
+  // Every basket's seed names the creation-burn account, so it exists from the start (off).
+  await setCreationBurn(ctx, graviMint, 0n);
   return graviMint;
+}
+
+/** Sets the GRAVI burned to create a basket, as the protocol authority (the payer). */
+export async function setCreationBurn(ctx: Ctx, graviMint: PublicKey, amount: bigint, authority = ctx.payer) {
+  await rpc(
+    ctx,
+    ctx.vault.methods.setCreationBurn(new BN(amount.toString())).accountsPartial({
+      authority: authority.publicKey,
+      protocol: pda.protocol(),
+      creationBurn: pda.creationBurn(),
+      graviMint,
+    }),
+    [authority],
+  );
 }
 
 export async function world(opts: WorldOpts = {}) {
   const ctx = setup();
   // No mint/redeem fee unless a test asks for one, so share arithmetic elsewhere stays exact.
-  const graviMint = await initProtocol(ctx, opts.protocolFeeBps ?? 0, opts.burnShareBps ?? 5_000);
+  const graviMint = await initProtocol(ctx, opts.protocolFeeBps ?? 0, opts.burnShareBps ?? 5_000, opts.gravi);
 
   const mintA = await createMint(ctx, 6, TOKEN_PROGRAM_ID);
   const mintB = await createMint(ctx, 9, TOKEN_2022_PROGRAM_ID, undefined, opts.feeBpsB, opts.issuerB);
@@ -137,7 +158,7 @@ export async function world(opts: WorldOpts = {}) {
           shareMint,
           payerShares: holder.shares,
           ...feeShares(shareMint, shareProgram),
-          allowEntry: null,
+          ...NO_GRAVI,
           shareTokenProgram: shareProgram,
         })
         .remainingAccounts(quads(w, creator.publicKey)),

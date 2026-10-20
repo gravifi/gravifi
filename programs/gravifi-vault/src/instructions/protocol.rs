@@ -70,6 +70,20 @@ pub fn set_protocol_fees(
     Ok(())
 }
 
+/// Sets the GRAVI, in base units, a creator burns to create a basket: 0 turns it off, and it
+/// can't go over `MAX_CREATION_BURN_TOKENS` whole GRAVI. The first call creates the account.
+pub fn set_creation_burn(ctx: Context<SetCreationBurn>, amount: u64) -> Result<()> {
+    let ceiling = 10u64
+        .checked_pow(ctx.accounts.gravi_mint.decimals as u32)
+        .and_then(|one| one.checked_mul(MAX_CREATION_BURN_TOKENS))
+        .ok_or(VaultError::MathOverflow)?;
+    require!(amount <= ceiling, VaultError::CreationBurnTooHigh);
+    let c = &mut ctx.accounts.creation_burn;
+    c.bump = ctx.bumps.creation_burn;
+    c.amount = amount;
+    Ok(())
+}
+
 /// Adds a mint to the set of assets baskets may be built from.
 pub fn register_asset(ctx: Context<RegisterAsset>) -> Result<()> {
     assert_no_active_transfer_hook(&ctx.accounts.mint.to_account_info())?;
@@ -270,6 +284,30 @@ pub struct ProtocolAdmin<'info> {
         has_one = authority @ VaultError::NotProtocolAuthority
     )]
     pub protocol: Account<'info, Protocol>,
+}
+
+#[derive(Accounts)]
+pub struct SetCreationBurn<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    #[account(
+        seeds = [PROTOCOL_SEED],
+        bump = protocol.bump,
+        has_one = authority @ VaultError::NotProtocolAuthority
+    )]
+    pub protocol: Account<'info, Protocol>,
+    #[account(
+        init_if_needed,
+        payer = authority,
+        space = 8 + CreationBurn::INIT_SPACE,
+        seeds = [CREATION_BURN_SEED],
+        bump
+    )]
+    pub creation_burn: Account<'info, CreationBurn>,
+    /// Read for its decimals, to set the ceiling in whole GRAVI. Fails until the mint is set.
+    #[account(address = protocol.gravi_mint @ VaultError::GraviMintNotSet)]
+    pub gravi_mint: InterfaceAccount<'info, MintI>,
+    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]

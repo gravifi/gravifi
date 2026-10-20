@@ -1,5 +1,7 @@
-//! Creating a basket and changing it: its recipe, policy, allowlist and splits. Every change
-//! goes through `authorise_mandate`, so an immutable basket refuses all of them.
+//! Creating a basket and changing it: its recipe, policy, allowlist and splits. Every change to
+//! what the basket is (recipe, policy, splits) goes through `authorise_mandate`, so an
+//! immutable basket refuses all of them. The allowlist is who may buy into an allowlist
+//! basket, not what it holds: it stays with the creator, immutable or not, and moves no funds.
 
 use anchor_lang::prelude::*;
 use anchor_spl::token_interface::TokenInterface;
