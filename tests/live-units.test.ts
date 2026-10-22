@@ -21,6 +21,7 @@ import {
   pda,
   rpc,
   send,
+  supply,
   warp,
 } from "./helpers.ts";
 import { SEED_SHARES, UNITS_A, UNITS_B, feeShares, fundHolder, mintIx, quads, redeemIx, world, type World } from "./fixtures.ts";
@@ -214,5 +215,40 @@ describe("units past u64", () => {
     assert.equal(balance(w.ctx, creatorA) - c0, vaultA);
     await rpc(w.ctx, redeemIx(w, minter, 1n), [minter]);
     assert.equal(balance(w.ctx, w.vaultA), 0n);
+  });
+});
+
+describe("a basket with no shares out", () => {
+  // Reported through the bug bounty (October 2026): with the supply at 0 after the seed, a mint
+  // charged the stored units, not a slice of the vaults, so anyone could mint one raw share into
+  // an emptied basket, own all of it and redeem whatever was left behind.
+  async function emptied() {
+    const w = await world();
+    // The only holder leaves everything, giving up sleeve B (as when its token is frozen).
+    await rpc(w.ctx, redeemIx(w, w.creator, SEED_SHARES, 0b10), [w.creator]);
+    assert.equal(supply(w.ctx, w.shareMint), 0n);
+    const left = balance(w.ctx, w.vaultB);
+    assert.ok(left > 0n, "sleeve B stays behind");
+    return { w, left };
+  }
+
+  it("a stranger can't mint into it and take what was left behind", async () => {
+    const { w, left } = await emptied();
+    const stranger = fund(w.ctx);
+    const holder = await fundHolder(w, stranger);
+    const before = balance(w.ctx, holder.b);
+    await expectError(rpc(w.ctx, mintIx(w, stranger, 1n), [stranger]), "BasketEmpty");
+    assert.equal(balance(w.ctx, w.vaultB), left);
+    assert.equal(balance(w.ctx, holder.b), before);
+  });
+
+  it("its creator can open it again", async () => {
+    const { w } = await emptied();
+    await rpc(w.ctx, mintIx(w, w.creator, ONE_SHARE), [w.creator]);
+    assert.equal(supply(w.ctx, w.shareMint), ONE_SHARE);
+    // Once shares are out again, anyone mints at a slice of the vaults, as usual.
+    const other = fund(w.ctx);
+    await fundHolder(w, other);
+    await rpc(w.ctx, mintIx(w, other, ONE_SHARE), [other]);
   });
 });

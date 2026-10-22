@@ -24,6 +24,7 @@ import {
   send,
   setup,
   warp,
+  postPrices,
 } from "./helpers.ts";
 import { NO_GRAVI, createFeeAccounts, feeShares, initProtocol, listAsset, world, type World } from "./fixtures.ts";
 
@@ -53,18 +54,7 @@ async function keeperWorld() {
 type KW = Awaited<ReturnType<typeof keeperWorld>>;
 
 async function setPrices(w: World, keeper: Keypair, a: bigint, b: bigint) {
-  for (const [mint, price] of [[w.mintA, a], [w.mintB, b]] as const) {
-    await rpc(
-      w.ctx,
-      w.ctx.vault.methods.setPrice(new BN(price.toString())).accountsPartial({
-        priceAuthority: keeper.publicKey,
-        keepers: pda.keepers(),
-        mint,
-        assetPrice: pda.price(mint),
-      }),
-      [keeper],
-    );
-  }
+  await postPrices(w.ctx, keeper, [[w.mintA, a], [w.mintB, b]]);
 }
 
 const book = (w: World) => [
@@ -320,7 +310,7 @@ async function fourWorld() {
   for (const m of mints) {
     await rpc(
       ctx,
-      ctx.vault.methods.setPrice(new BN(PRICE_A.toString())).accountsPartial({ priceAuthority: keeper.publicKey, keepers: pda.keepers(), mint: m, assetPrice: pda.price(m) }),
+      ctx.vault.methods.setPrice(new BN(PRICE_A.toString())).accountsPartial({ priceAuthority: keeper.publicKey, keepers: pda.keepers(), mint: m, assetPrice: pda.price(m), pythPrice: null }),
       [keeper],
     );
     const k = await createAta(ctx, m, keeper.publicKey, TOKEN_PROGRAM_ID);
@@ -375,7 +365,7 @@ async function strayWorld() {
   await mintTo(w.ctx, stray, strayVault, 3n * ONE_A, TOKEN_PROGRAM_ID);
   await rpc(
     w.ctx,
-    w.ctx.vault.methods.setPrice(new BN(PRICE_S.toString())).accountsPartial({ priceAuthority: w.keeper.publicKey, keepers: pda.keepers(), mint: stray, assetPrice: pda.price(stray) }),
+    w.ctx.vault.methods.setPrice(new BN(PRICE_S.toString())).accountsPartial({ priceAuthority: w.keeper.publicKey, keepers: pda.keepers(), mint: stray, assetPrice: pda.price(stray), pythPrice: null }),
     [w.keeper],
   );
   const keeperStray = await createAta(w.ctx, stray, w.keeper.publicKey, TOKEN_PROGRAM_ID);
@@ -442,7 +432,7 @@ describe("sweeping stray tokens", () => {
     const sharesHeld = await createAta(w.ctx, w.shareMint, w.basket, TOKEN_PROGRAM_ID);
     await rpc(
       w.ctx,
-      w.ctx.vault.methods.setPrice(new BN(PRICE_A.toString())).accountsPartial({ priceAuthority: w.keeper.publicKey, keepers: pda.keepers(), mint: w.shareMint, assetPrice: pda.price(w.shareMint) }),
+      w.ctx.vault.methods.setPrice(new BN(PRICE_A.toString())).accountsPartial({ priceAuthority: w.keeper.publicKey, keepers: pda.keepers(), mint: w.shareMint, assetPrice: pda.price(w.shareMint), pythPrice: null }),
       [w.keeper],
     );
     const keeperShares = await createAta(w.ctx, w.shareMint, w.keeper.publicKey, TOKEN_PROGRAM_ID);

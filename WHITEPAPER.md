@@ -86,7 +86,7 @@ Anyone can create a basket in the app:
 | **Weights** | Any split adding up to 100% |
 | **Rebalancing** | On a schedule, when it drifts past a tolerance, or both (at least a day apart, at least 0.5% drift) |
 | **Creator fee** | 0% to 0.20% a year |
-| **Access** | Public, or private (only the creator can mint; anyone holding shares can always redeem) |
+| **Access** | Public; allowlist (only wallets the creator approves can mint); or private (only the creator can mint). Anyone holding shares can always redeem |
 | **Control** | Creator-managed, or immutable: locked forever, nobody can change it again |
 | **Starting price** | $1 to $10,000 a share |
 
@@ -115,9 +115,13 @@ comes round, or it drifts past its tolerance, a keeper trades it back:
   checks what comes back to the vault in the same transaction.
 
 The program checks every slice, and the share supply can't change in the middle of one. The
-floor is only as good as the price it's checked against: today the keeper's price authority
-posts those prices (from Jupiter), so a rebalance can't take value out of a basket as long as
-the prices posted are honest. Section 8 says who holds that key, and the roadmap bounds it.
+floor is only as good as the price it's checked against: the keeper's price authority posts
+those prices (from Jupiter), and the program bounds what it may post. Where an asset has a Pyth
+feed (about 20 of them today: SOL, ETH, BTC, JUP, BONK, WIF and others), a posted price must be
+within 3-5% of a fresh, fully verified Pyth price. Any other asset's price may move at most 20%
+from the last accepted one per hour, so a false price can't appear at once. Within those bounds
+a rebalance can't take value out of a basket as long as the prices posted are honest. Section 8
+says who holds that key.
 
 **Tokens a basket is sent.** Some tokens pay their holders in another token (a stonkfun token
 can pay ZEC), and anyone can send a basket an airdrop. Those tokens aren't part of the recipe,
@@ -193,6 +197,11 @@ program upgrade could raise that ceiling. A creator doesn't need to hold GRAVI f
 buys whatever is missing with SOL as part of creating or adding, and shows the cost before
 signing.
 
+One wallet can be exempt: the protocol authority can name a single team wallet whose baskets
+burn nothing, so the team can launch its own promotional baskets without spending GRAVI it
+doesn't have. Which wallet it is, if any, is public on-chain (right after the protocol
+account's fields), and the exemption applies to that wallet's baskets only.
+
 ## 7. Assets
 
 133 assets are listed today:
@@ -219,15 +228,15 @@ There is no governance and no vote. Control is split so that no role can reach h
 | Role | Can | Can't |
 |---|---|---|
 | **Holders** | Redeem at any time, send or trade their shares | |
-| **A basket's creator** | Change their basket's weights, assets, rebalancing, fee (within the caps), split | Touch the vault's tokens; anything at all once the basket is immutable |
-| **The protocol authority** (the team) | List assets, set fees and the creation burn within the ceilings, name the keepers, and upgrade the program | Through any of its settings: move a vault's tokens, block a redemption, exceed the fee or creation-burn ceilings, send less than half of the protocol fee to the burn |
+| **A basket's creator** | Change their basket's weights, assets, rebalancing, fee (within the caps), split; set how wallets show its shares (name, ticker, picture) | Touch the vault's tokens; once the basket is immutable, anything but how wallets show its shares |
+| **The protocol authority** (the team) | List assets, set fees and the creation burn within the ceilings, name the one burn-exempt team wallet, match assets to Pyth feeds, name the keepers, set how wallets show any basket's shares, and upgrade the program | Through any of its settings: move a vault's tokens, block a redemption, exceed the fee or creation-burn ceilings, send less than half of the protocol fee to the burn |
 | **The keeper** | Post the prices rebalances and buybacks are checked against; run rebalance and buyback slices within the program's checks | Move a vault's tokens outside a slice, or accept less back than the posted price allows |
 | **The burn address** | Buy GRAVI and burn it | Anything else: it has no key |
 
 The program and protocol authority are held today by one team key, and upgrading a program
 can change what it does. The keeper's price authority and rebalancer are one more key, held by
-the app's server: whoever held it could post false prices and trade baskets at a loss, a slice
-at a time. Holders trust the team with both keys today. That is why the next steps (section 10) are a multisig, so no single
+the app's server: whoever held it could post false prices, within the bounds above, and trade
+baskets at a loss, a slice at a time. Holders trust the team with both keys today. That is why the next steps (section 10) are a multisig, so no single
 key can upgrade it, and a verified build, so anyone can check that what runs on-chain is the
 published code.
 
@@ -238,8 +247,9 @@ GraviFi is new software. Before using it, know that:
 - **No independent audit yet.** The program has passed an internal security review and its
   test suite; an independent audit is next. Only put in what you can afford to lose.
 - **Key risk.** The team holds the keys that upgrade the program and post the prices
-  rebalances are checked against (section 8). Until the multisig and on-chain price limits
-  land, a lost or misused key could cost basket holders money.
+  rebalances are checked against (section 8). Posted prices are bounded (section 6), but until
+  the multisig lands and prices and trading use separate keys, a lost or misused key could cost
+  basket holders money.
 - **Issuer risk.** Tokenized stocks and pre-IPO tokens depend on their issuers, who can pause,
   freeze or claw back their tokens. A holder can still redeem everything else and leave such a
   token in the basket (section 2.2).
@@ -256,11 +266,9 @@ Nothing in this paper is investment advice, or an offer to sell GRAVI or any oth
 1. **Independent security audit.**
 2. **Multisig** for the program and protocol authority, and a **verified build**, so anyone can
    check that the program on-chain is exactly this code.
-3. **Bounded prices** for rebalances and buybacks: limits in the program on how far and how fast
-   a posted price can move, separate keys for prices and trading, and Pyth prices where feeds
-   exist.
-4. **Allowlisted baskets**, where a creator chooses who can mint.
-5. **Baskets of up to 16 assets.**
+3. **Separate keys** for posting prices and for trading, and Pyth checks for more assets (the
+   tokenized stocks' feeds) as Pyth keeps them updated on chain.
+4. **Baskets of up to 16 assets.**
 
 ## Addresses
 

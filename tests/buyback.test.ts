@@ -53,7 +53,7 @@ async function buybackWorld() {
 type BW = Awaited<ReturnType<typeof buybackWorld>>;
 
 async function setPrice(w: BW, mint: PublicKey, price: bigint) {
-  await rpc(w.ctx, w.ctx.vault.methods.setPrice(new BN(price.toString())).accountsPartial({ priceAuthority: w.keeper.publicKey, keepers: pda.keepers(), mint, assetPrice: pda.price(mint) }), [w.keeper]);
+  await rpc(w.ctx, w.ctx.vault.methods.setPrice(new BN(price.toString())).accountsPartial({ priceAuthority: w.keeper.publicKey, keepers: pda.keepers(), mint, assetPrice: pda.price(mint), pythPrice: null }), [w.keeper]);
 }
 
 const burnShares = (w: BW) => feeShares(w.shareMint).burnShares;

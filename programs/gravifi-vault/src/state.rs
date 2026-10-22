@@ -234,6 +234,19 @@ pub struct CreationBurn {
     pub baskets: u32,
 }
 
+/// The protocol account may carry, after its fields, one wallet whose baskets burn no GRAVI (the
+/// team's, for its own baskets: `set_burn_exempt`). Kept outside the struct so the account, and
+/// every instruction naming it, reads as before: Anchor writes back only the struct's bytes, and
+/// the account is only ever created once (`init_protocol`), so nothing checks its size.
+pub const BURN_EXEMPT_OFFSET: usize = 8 + Protocol::INIT_SPACE;
+
+pub fn burn_exempt(protocol: &AccountInfo) -> Option<Pubkey> {
+    let data = protocol.try_borrow_data().ok()?;
+    let bytes: [u8; 32] = data.get(BURN_EXEMPT_OFFSET..BURN_EXEMPT_OFFSET + 32)?.try_into().ok()?;
+    let wallet = Pubkey::new_from_array(bytes);
+    (wallet != Pubkey::default()).then_some(wallet)
+}
+
 /// One per mint at `[ASSET_SEED, mint]`. Baskets may only be built from Listed assets.
 #[account]
 #[derive(InitSpace)]
@@ -303,14 +316,45 @@ pub const SESSION_IDLE_SLOTS: u64 = 216_000;
 /// At most one split (direct or reverse) per basket in any 30 days.
 pub const SPLIT_COOLDOWN_SECS: i64 = 30 * 86_400;
 
-/// Who may post prices and run rebalances. On the testnet both are the app's keeper; on
-/// mainnet prices come from Pyth and the rebalancer role can be opened up.
+/// Who may post prices and run rebalances: the app's keeper today, on every cluster. What a
+/// posted price may be is bounded by its `PriceGuard`.
 #[account]
 #[derive(InitSpace)]
 pub struct Keepers {
     pub bump: u8,
     pub price_authority: Pubkey,
     pub rebalancer: Pubkey,
+}
+
+pub const GUARD_SEED: &[u8] = b"guard";
+/// An asset without a Pyth feed: a posted price may differ from its guard's reference by at most
+/// this. With the reference rolling forward once an hour, a price can move about this much an
+/// hour and no faster, so a leaked price key can't jump a price at once: it takes hours, time to
+/// replace the key.
+pub const MAX_PRICE_MOVE_BPS: u128 = 2_000;
+/// How often the reference rolls forward to the newest accepted price.
+pub const PRICE_REFERENCE_SECS: i64 = 3_600;
+/// An asset with a Pyth feed: its price may be at most this many seconds old when a price is
+/// posted against it (the sponsored feeds update at least every few minutes).
+pub const MAX_PYTH_AGE_SECS: i64 = 300;
+/// ...and the posted price must be within three times Pyth's confidence of it, but at least
+/// 3% and at most 5%: room for the difference between Pyth and the pools the keeper trades.
+pub const PYTH_TOLERANCE_MIN_BPS: u128 = 300;
+pub const PYTH_TOLERANCE_MAX_BPS: u128 = 500;
+pub const PYTH_CONF_MULTIPLE: u128 = 3;
+
+/// What `set_price` checks a posted price against, at `[GUARD_SEED, mint]`: a reference that
+/// rolls forward hourly, and the asset's Pyth feed if the protocol authority named one.
+#[account]
+#[derive(InitSpace)]
+pub struct PriceGuard {
+    pub bump: u8,
+    pub mint: Pubkey,
+    /// The price a new one is held to, and when it was accepted; 0 until the first price.
+    pub reference_e12: u64,
+    pub reference_at: i64,
+    /// Pyth feed id; all zeros for none.
+    pub pyth_feed: [u8; 32],
 }
 
 /// Oracle price of one listed asset, at `[PRICE_SEED, mint]`.

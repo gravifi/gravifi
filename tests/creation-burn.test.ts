@@ -179,6 +179,54 @@ describe("creation burn", () => {
   });
 });
 
+describe("burn-exempt wallet", () => {
+  const exemptIx = (w: World, wallet: PublicKey, authority = w.ctx.payer) =>
+    w.ctx.vault.methods.setBurnExempt(wallet).accountsPartial({ authority: authority.publicKey, protocol: pda.protocol() });
+
+  it("only the protocol authority names it", async () => {
+    const w = await world();
+    const stranger = fund(w.ctx);
+    await expectError(rpc(w.ctx, exemptIx(w, stranger.publicKey, stranger), [stranger]), "NotProtocolAuthority");
+  });
+
+  it("its baskets burn nothing, and aren't counted; everyone else's still burn", async () => {
+    const w = await world();
+    const perAsset = 100_000n * GRAVI;
+    await setCreationBurn(w.ctx, w.graviMint, perAsset);
+    const team = fund(w.ctx);
+    await rpc(w.ctx, exemptIx(w, team.publicKey));
+    // The creation burn's own fields are untouched.
+    assert.equal((await creationBurn(w.ctx)).perAsset, perAsset);
+
+    await rpc(w.ctx, createIx(w, team, null), [team]);
+    assert.deepEqual(await creationBurn(w.ctx), { perAsset, totalBurned: 0n, baskets: 0 });
+
+    const other = fund(w.ctx);
+    await expectError(rpc(w.ctx, createIx(w, other, null), [other]), "CreationBurnAccountsMissing");
+    const { creator, account } = await graviHolder(w, 2n * perAsset);
+    await rpc(w.ctx, createIx(w, creator, { mint: w.graviMint, account }), [creator]);
+    assert.equal((await creationBurn(w.ctx)).totalBurned, 2n * perAsset);
+  });
+
+  it("survives a change of the burn, and can be moved or removed", async () => {
+    const w = await world();
+    const team = fund(w.ctx);
+    await rpc(w.ctx, exemptIx(w, team.publicKey));
+    await setCreationBurn(w.ctx, w.graviMint, GRAVI);
+    // A protocol setting written after it leaves the wallet in place.
+    await rpc(w.ctx, w.ctx.vault.methods.setProtocolFees(10, 5_000).accountsPartial({ authority: w.ctx.payer.publicKey, protocol: pda.protocol() }));
+    await rpc(w.ctx, createIx(w, team, null), [team]);
+
+    const next = fund(w.ctx);
+    await rpc(w.ctx, exemptIx(w, next.publicKey));
+    await expectError(rpc(w.ctx, createIx(w, team, null), [team]), "CreationBurnAccountsMissing");
+    await rpc(w.ctx, createIx(w, next, null), [next]);
+
+    await rpc(w.ctx, exemptIx(w, PublicKey.default));
+    await expectError(rpc(w.ctx, createIx(w, next, null), [next]), "CreationBurnAccountsMissing");
+  });
+});
+
 describe("adding an asset", () => {
   /** A third listed asset, with the world basket's vault for it. */
   async function assetC(w: World) {
@@ -216,6 +264,17 @@ describe("adding an asset", () => {
     const c = await creationBurn(w.ctx);
     assert.equal(c.totalBurned, perAsset);
     assert.equal(c.baskets, 0);
+  });
+
+  it("the burn-exempt wallet adds assets without burning", async () => {
+    const w = await world();
+    await setCreationBurn(w.ctx, w.graviMint, GRAVI);
+    await rpc(
+      w.ctx,
+      w.ctx.vault.methods.setBurnExempt(w.creator.publicKey).accountsPartial({ authority: w.ctx.payer.publicKey, protocol: pda.protocol() }),
+    );
+    await rpc(w.ctx, addIx(w, await assetC(w), null), [w.creator]);
+    assert.equal((await creationBurn(w.ctx)).totalBurned, 0n);
   });
 
   it("refuses an added asset without its GRAVI while the burn is on", async () => {

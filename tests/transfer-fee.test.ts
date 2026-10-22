@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { SYSVAR_INSTRUCTIONS_PUBKEY, type Keypair, type PublicKey } from "@solana/web3.js";
 import { createSetTransferFeeInstruction, createTransferCheckedInstruction } from "@solana/spl-token";
 import { Clock } from "litesvm";
-import { BN, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, ata, balance, createAta, createMint, expectError, fund, mintTo, pda, rpc, send } from "./helpers.ts";
+import { BN, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, ata, balance, createAta, createMint, expectError, fund, mintTo, pda, postPrices, rpc, send } from "./helpers.ts";
 import { SEED_SHARES, UNITS_A, UNITS_B, fundHolder, listAsset, mintIx, redeemIx, world, type World } from "./fixtures.ts";
 
 const FEE_BPS = 100; // 1%, as most stonkfun tokens and PreStocks
@@ -118,13 +118,7 @@ async function keeperWorld() {
 type KW = Awaited<ReturnType<typeof keeperWorld>>;
 
 async function setPrices(w: World, keeper: Keypair, a: bigint, b: bigint) {
-  for (const [mint, price] of [[w.mintA, a], [w.mintB, b]] as const) {
-    await rpc(
-      w.ctx,
-      w.ctx.vault.methods.setPrice(new BN(price.toString())).accountsPartial({ priceAuthority: keeper.publicKey, keepers: pda.keepers(), mint, assetPrice: pda.price(mint) }),
-      [keeper],
-    );
-  }
+  await postPrices(w.ctx, keeper, [[w.mintA, a], [w.mintB, b]]);
 }
 
 const book = (w: KW) =>

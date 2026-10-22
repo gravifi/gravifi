@@ -73,6 +73,12 @@ pub fn mint_in_kind<'info>(
 
     let basket = &ctx.accounts.basket;
     let payer = ctx.accounts.payer.key();
+    // With no shares out, a mint isn't buying a slice of anything: it would own the vaults
+    // outright, whatever was left behind in them (a forfeited sleeve, tokens sent there). Only
+    // the creator can open an emptied basket again, as they opened it with the seed.
+    if ctx.accounts.share_mint.supply == 0 {
+        require_keys_eq!(payer, basket.creator, VaultError::BasketEmpty);
+    }
     match basket.access {
         AccessMode::Public => {}
         AccessMode::Private => {

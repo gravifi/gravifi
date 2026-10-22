@@ -9,6 +9,8 @@ use anchor_lang::prelude::*;
 pub mod errors;
 pub mod extensions;
 pub mod instructions;
+pub mod metaplex;
+pub mod pyth;
 pub mod state;
 pub mod token_util;
 pub mod valuation;
@@ -195,6 +197,12 @@ pub mod gravifi_vault {
         instructions::basket::allow_wallet(ctx)
     }
 
+    /// Takes a wallet off an allowlisted basket (its approval closes, rent to the creator).
+    /// Creator-only.
+    pub fn disallow_wallet(ctx: Context<DisallowWallet>) -> Result<()> {
+        instructions::basket::disallow_wallet(ctx)
+    }
+
     // -------------------------------------------------------------------- keepers and prices
 
     /// Names who may post prices and who may run rebalances. Protocol authority only.
@@ -206,10 +214,23 @@ pub mod gravifi_vault {
         instructions::protocol::set_keepers(ctx, price_authority, rebalancer)
     }
 
-    /// Posts an asset's USD price (per whole token, x1e12). Testnet oracle; on mainnet the
-    /// rebalancer reads Pyth instead.
+    /// Posts an asset's USD price (per whole token, x1e12). Bounded by its guard: within Pyth's
+    /// confidence of a fresh Pyth price where the asset has a feed, else within 20% of an hourly
+    /// reference.
     pub fn set_price(ctx: Context<SetPrice>, price_e12: u64) -> Result<()> {
         instructions::protocol::set_price(ctx, price_e12)
+    }
+
+    /// Names the Pyth feed an asset's prices are checked against (all zeros for none).
+    /// Protocol authority only.
+    pub fn set_price_feed(ctx: Context<SetPriceFeed>, feed_id: [u8; 32]) -> Result<()> {
+        instructions::protocol::set_price_feed(ctx, feed_id)
+    }
+
+    /// Names the one wallet whose baskets burn no GRAVI (the team's); `Pubkey::default()`
+    /// removes it. Protocol authority only.
+    pub fn set_burn_exempt(ctx: Context<SetBurnExempt>, wallet: Pubkey) -> Result<()> {
+        instructions::protocol::set_burn_exempt(ctx, wallet)
     }
 
     // --------------------------------------------------------------------------- rebalancing
@@ -269,6 +290,15 @@ pub mod gravifi_vault {
     /// floor, then burns every GRAVI the burn PDA holds.
     pub fn buyback_finish(ctx: Context<BuybackFinish>) -> Result<()> {
         instructions::buyback::buyback_finish(ctx)
+    }
+
+    // ------------------------------------------------------------------------- share token
+
+    /// Names the share token in wallets: creates its Metaplex metadata the first time (`payer`
+    /// pays Metaplex's fee and the rent), replaces its name, symbol and URI after. The
+    /// basket's creator or the protocol authority; display only, so immutable baskets too.
+    pub fn set_share_metadata(ctx: Context<SetShareMetadata>, name: String, symbol: String, uri: String) -> Result<()> {
+        instructions::metadata::set_share_metadata(ctx, name, symbol, uri)
     }
 
     // --------------------------------------------------------------------- legacy and splits

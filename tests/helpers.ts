@@ -204,6 +204,32 @@ export const pda = {
   rebalance: (basket: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("rebalance"), basket.toBuffer()], VAULT_ID)[0],
   buyback: () => PublicKey.findProgramAddressSync([Buffer.from("buyback")], VAULT_ID)[0],
   creationBurn: () => PublicKey.findProgramAddressSync([Buffer.from("creation_burn")], VAULT_ID)[0],
+  guard: (mint: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("guard"), mint.toBuffer()], VAULT_ID)[0],
 };
+
+/** Posts prices as the keeper does once they're bounded: a price more than 20% from its
+ *  guard's reference is approached in steps of 20%, an hour apart, then every price is posted
+ *  again at the end so all are fresh together. */
+export async function postPrices(ctx: Ctx, keeper: Keypair, prices: [PublicKey, bigint][]) {
+  const post = (mint: PublicKey, price: bigint) =>
+    rpc(
+      ctx,
+      ctx.vault.methods.setPrice(new BN(price.toString())).accountsPartial({ priceAuthority: keeper.publicKey, keepers: pda.keepers(), mint, assetPrice: pda.price(mint), pythPrice: null }),
+      [keeper],
+    );
+  for (;;) {
+    let stepped = false;
+    for (const [mint, target] of prices) {
+      const acc = ctx.svm.getAccount(pda.guard(mint));
+      const ref = acc ? BigInt(ctx.vault.coder.accounts.decode("priceGuard", Buffer.from(acc.data)).referenceE12.toString()) : 0n;
+      if (ref === 0n || (target > ref ? target - ref : ref - target) * 10_000n <= ref * 2_000n) continue;
+      await post(mint, target > ref ? (ref * 12_000n) / 10_000n : (ref * 8_000n) / 10_000n);
+      stepped = true;
+    }
+    if (!stepped) break;
+    warp(ctx, 3_601);
+  }
+  for (const [mint, price] of prices) await post(mint, price);
+}
 
 export { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, Keypair, PublicKey, SystemProgram };

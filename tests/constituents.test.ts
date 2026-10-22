@@ -65,7 +65,7 @@ async function setPrices(w: CW, mints: PublicKey[]) {
       w.ctx,
       w.ctx.vault.methods
         .setPrice(new BN(by.get(mint.toBase58())!.toString()))
-        .accountsPartial({ priceAuthority: w.keeper.publicKey, keepers: pda.keepers(), mint, assetPrice: pda.price(mint) }),
+        .accountsPartial({ priceAuthority: w.keeper.publicKey, keepers: pda.keepers(), mint, assetPrice: pda.price(mint), pythPrice: null }),
       [w.keeper],
     );
   }

@@ -5,6 +5,8 @@ use anchor_lang::prelude::*;
 use anchor_spl::token_interface::{self, Mint as MintI, TokenAccount as TokenAccountI, TokenInterface};
 
 use crate::errors::VaultError;
+use crate::extensions;
+use crate::pyth;
 use crate::state::*;
 use crate::token_util::*;
 
@@ -201,17 +203,86 @@ pub fn set_keepers(ctx: Context<SetKeepers>, price_authority: Pubkey, rebalancer
     Ok(())
 }
 
-/// Posts an asset's USD price (per whole token, x1e12). Testnet oracle; on mainnet the
-/// rebalancer reads Pyth instead.
+/// Posts an asset's USD price (per whole token, x1e12), which rebalance and buyback floors are
+/// checked against. Bounded by the asset's guard: for an asset with a Pyth feed, within Pyth's
+/// confidence (3-5%) of a fresh Pyth price; for any other, within 20% of a reference that rolls
+/// forward hourly. Pyth replaces the band where there is one: it's the tighter bound, and
+/// independent of the keeper, so an asset whose last price is far from the market (unposted
+/// for days) can be posted at once instead of never fitting both.
 pub fn set_price(ctx: Context<SetPrice>, price_e12: u64) -> Result<()> {
     require!(price_e12 > 0, VaultError::BadPrice);
-    let decimals = mint_decimals(&ctx.accounts.mint.to_account_info())?;
+    let now = Clock::get()?.unix_timestamp;
+    let mint_ai = ctx.accounts.mint.to_account_info();
+    let decimals = mint_decimals(&mint_ai)?;
     let p = &mut ctx.accounts.asset_price;
+    let g = &mut ctx.accounts.price_guard;
+    g.bump = ctx.bumps.price_guard;
+    g.mint = ctx.accounts.mint.key();
+    // A guard created after prices were already posted starts from the last one.
+    if g.reference_e12 == 0 && p.price_e12 > 0 {
+        g.reference_e12 = p.price_e12;
+        g.reference_at = p.updated_at;
+    }
+    if g.pyth_feed == [0u8; 32] {
+        if g.reference_e12 > 0 {
+            require!(within(price_e12 as u128, g.reference_e12 as u128, MAX_PRICE_MOVE_BPS), VaultError::PriceMoveTooLarge);
+        }
+    } else {
+        let ai = ctx.accounts.pyth_price.as_ref().ok_or(VaultError::PythPriceMissing)?;
+        let pp = pyth::read(ai, &g.pyth_feed, now, MAX_PYTH_AGE_SECS)?;
+        let multiplier = extensions::current_multiplier(&mint_ai.try_borrow_data()?, now).unwrap_or(1.0);
+        let pyth_e12 = pp.e12(pp.price as u64, multiplier).ok_or(VaultError::PythPriceInvalid)?;
+        let conf_bps = (pp.conf as u128 * BPS_DENOM) / pp.price as u128;
+        let tolerance = (conf_bps * PYTH_CONF_MULTIPLE).clamp(PYTH_TOLERANCE_MIN_BPS, PYTH_TOLERANCE_MAX_BPS);
+        require!(pyth_e12 > 0 && within(price_e12 as u128, pyth_e12, tolerance), VaultError::PriceOffPyth);
+    }
+    if g.reference_e12 == 0 || now - g.reference_at >= PRICE_REFERENCE_SECS {
+        g.reference_e12 = price_e12;
+        g.reference_at = now;
+    }
     p.bump = ctx.bumps.asset_price;
     p.mint = ctx.accounts.mint.key();
     p.decimals = decimals;
     p.price_e12 = price_e12;
-    p.updated_at = Clock::get()?.unix_timestamp;
+    p.updated_at = now;
+    Ok(())
+}
+
+/// Whether `price` is within `bps` of `reference`, either way.
+fn within(price: u128, reference: u128, bps: u128) -> bool {
+    price.abs_diff(reference) * BPS_DENOM <= reference * bps
+}
+
+/// Names the Pyth feed an asset's posted prices are checked against; all zeros removes it.
+/// Pyth's feeds name no mint, so each one is matched to its token by hand. Protocol authority.
+pub fn set_price_feed(ctx: Context<SetPriceFeed>, feed_id: [u8; 32]) -> Result<()> {
+    let g = &mut ctx.accounts.price_guard;
+    g.bump = ctx.bumps.price_guard;
+    g.mint = ctx.accounts.mint.key();
+    g.pyth_feed = feed_id;
+    Ok(())
+}
+
+/// Names the one wallet whose baskets burn no GRAVI as they're created or gain assets (the
+/// team's, for its own baskets); `Pubkey::default()` removes it. Protocol authority. The wallet
+/// sits after the protocol's fields, which the account grows to hold the first time.
+pub fn set_burn_exempt(ctx: Context<SetBurnExempt>, wallet: Pubkey) -> Result<()> {
+    let ai = ctx.accounts.protocol.to_account_info();
+    let need = BURN_EXEMPT_OFFSET + 32;
+    if ai.data_len() < need {
+        let short = Rent::get()?.minimum_balance(need).saturating_sub(ai.lamports());
+        if short > 0 {
+            anchor_lang::system_program::transfer(
+                CpiContext::new(
+                    ctx.accounts.system_program.to_account_info(),
+                    anchor_lang::system_program::Transfer { from: ctx.accounts.authority.to_account_info(), to: ai.clone() },
+                ),
+                short,
+            )?;
+        }
+        ai.resize(need)?;
+    }
+    ai.try_borrow_mut_data()?[BURN_EXEMPT_OFFSET..need].copy_from_slice(wallet.as_ref());
     Ok(())
 }
 
@@ -409,5 +480,32 @@ pub struct SetPrice<'info> {
     pub mint: InterfaceAccount<'info, MintI>,
     #[account(init_if_needed, payer = price_authority, space = 8 + AssetPrice::INIT_SPACE, seeds = [PRICE_SEED, mint.key().as_ref()], bump)]
     pub asset_price: Account<'info, AssetPrice>,
+    #[account(init_if_needed, payer = price_authority, space = 8 + PriceGuard::INIT_SPACE, seeds = [GUARD_SEED, mint.key().as_ref()], bump)]
+    pub price_guard: Account<'info, PriceGuard>,
+    /// CHECK: the asset's Pyth price update, read by `pyth::read` (owner, feed, verification,
+    /// age). Needed only when its guard names a feed.
+    pub pyth_price: Option<UncheckedAccount<'info>>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct SetPriceFeed<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump, has_one = authority @ VaultError::NotProtocolAuthority)]
+    pub protocol: Account<'info, Protocol>,
+    pub mint: InterfaceAccount<'info, MintI>,
+    #[account(init_if_needed, payer = authority, space = 8 + PriceGuard::INIT_SPACE, seeds = [GUARD_SEED, mint.key().as_ref()], bump)]
+    pub price_guard: Account<'info, PriceGuard>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct SetBurnExempt<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    /// Grown by hand to hold the wallet after its fields (see BURN_EXEMPT_OFFSET).
+    #[account(mut, seeds = [PROTOCOL_SEED], bump = protocol.bump, has_one = authority @ VaultError::NotProtocolAuthority)]
+    pub protocol: Account<'info, Protocol>,
     pub system_program: Program<'info, System>,
 }

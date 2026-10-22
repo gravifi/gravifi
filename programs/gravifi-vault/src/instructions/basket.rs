@@ -84,6 +84,7 @@ pub fn initialize_basket<'info>(
     }
 
     let a = &mut *ctx.accounts;
+    let exempt = burn_exempt(&a.protocol.to_account_info());
     burn_per_asset(
         &mut a.creation_burn,
         &a.protocol,
@@ -91,6 +92,7 @@ pub fn initialize_basket<'info>(
         a.creator.to_account_info(),
         n as u64,
         true,
+        exempt,
     )?;
     create_share_mint(&ctx)?;
 
@@ -125,7 +127,8 @@ struct GraviAccounts<'a, 'info> {
     program: Option<&'a Interface<'info, TokenInterface>>,
 }
 
-/// Burns the per-asset GRAVI for `assets` assets from `owner`'s account and counts it.
+/// Burns the per-asset GRAVI for `assets` assets from `owner`'s account and counts it. The
+/// burn-exempt wallet (`set_burn_exempt`), if `owner` is it, burns nothing.
 fn burn_per_asset<'info>(
     c: &mut CreationBurn,
     protocol: &Protocol,
@@ -133,9 +136,10 @@ fn burn_per_asset<'info>(
     owner: AccountInfo<'info>,
     assets: u64,
     new_basket: bool,
+    exempt: Option<Pubkey>,
 ) -> Result<()> {
     let amount = c.per_asset.checked_mul(assets).ok_or(VaultError::MathOverflow)?;
-    if amount == 0 {
+    if amount == 0 || exempt == Some(owner.key()) {
         return Ok(());
     }
     let (Some(mint), Some(from), Some(program)) = (gravi.mint, gravi.from, gravi.program) else {
@@ -199,6 +203,7 @@ pub fn add_constituent(ctx: Context<AddConstituent>) -> Result<()> {
 
     // An added asset pays its GRAVI burn as if the basket had started with it.
     let a = &mut *ctx.accounts;
+    let exempt = burn_exempt(&a.protocol.to_account_info());
     burn_per_asset(
         &mut a.creation_burn,
         &a.protocol,
@@ -206,6 +211,7 @@ pub fn add_constituent(ctx: Context<AddConstituent>) -> Result<()> {
         a.authority.to_account_info(),
         1,
         false,
+        exempt,
     )?;
 
     let basket = &mut ctx.accounts.basket;
@@ -263,6 +269,12 @@ pub fn allow_wallet(ctx: Context<AllowWallet>) -> Result<()> {
     entry.bump = ctx.bumps.allow_entry;
     entry.basket = ctx.accounts.basket.key();
     entry.wallet = ctx.accounts.wallet.key();
+    Ok(())
+}
+
+/// Takes a wallet off an allowlisted basket: its approval account closes, the rent back to the
+/// creator. Creator-only, immutable or not, like adding one. Shares it holds stay its own.
+pub fn disallow_wallet(_ctx: Context<DisallowWallet>) -> Result<()> {
     Ok(())
 }
 
@@ -472,6 +484,25 @@ pub struct AllowWallet<'info> {
     pub allow_entry: Account<'info, AllowEntry>,
 
     pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct DisallowWallet<'info> {
+    #[account(mut)]
+    pub creator: Signer<'info>,
+    #[account(has_one = creator)]
+    pub basket: Account<'info, Basket>,
+    /// CHECK: the wallet being taken off; only its address is used, for the entry's seeds.
+    pub wallet: UncheckedAccount<'info>,
+    #[account(
+        mut,
+        close = creator,
+        seeds = [b"allow", basket.key().as_ref(), wallet.key().as_ref()],
+        bump = allow_entry.bump,
+        has_one = basket,
+        has_one = wallet
+    )]
+    pub allow_entry: Account<'info, AllowEntry>,
 }
 
 #[derive(Accounts)]

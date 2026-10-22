@@ -108,4 +108,20 @@ pub enum VaultError {
     CreationBurnTooHigh,
     #[msg("Each asset in a basket burns GRAVI: pass the GRAVI mint, your GRAVI account and its token program")]
     CreationBurnAccountsMissing,
+    #[msg("Only the basket's creator or the protocol authority can name its share token")]
+    NotMetadataAuthority,
+    #[msg("The share's name must be 1 to 32 bytes, its symbol 1 to 10 and its URI at most 200")]
+    BadMetadata,
+    #[msg("That price moved too far from the last accepted one: at most 20% an hour")]
+    PriceMoveTooLarge,
+    #[msg("This asset has a Pyth feed: pass its price update account")]
+    PythPriceMissing,
+    #[msg("That isn't a fully verified Pyth price update for this asset's feed")]
+    PythPriceInvalid,
+    #[msg("Pyth's price for this asset is too old to post against")]
+    PythPriceStale,
+    #[msg("That price is too far from Pyth's")]
+    PriceOffPyth,
+    #[msg("This basket has no shares out: only its creator can open it again")]
+    BasketEmpty,
 }

@@ -29,7 +29,11 @@ test suite. How it all works is in the [whitepaper](WHITEPAPER.md)
   the code, and it can only be spent buying GRAVI and burning it.
 - **The creation burn has a ceiling.** Each asset in a basket burns GRAVI from its creator's
   wallet: for the assets it's created with, in the instruction that creates it, and for each
-  asset added later. The amount can't exceed 1,000,000 GRAVI per asset.
+  asset added later. The amount can't exceed 1,000,000 GRAVI per asset. One team wallet, named
+  on-chain by the protocol authority, can be exempt for its own baskets.
+- **Posted prices are bounded.** The prices rebalances and buybacks are checked against must be
+  within 3-5% of a fresh, fully verified Pyth price where an asset has a feed, and otherwise can
+  move at most 20% an hour from the last accepted one.
 
 ## Layout
 
@@ -37,7 +41,8 @@ test suite. How it all works is in the [whitepaper](WHITEPAPER.md)
 programs/gravifi-vault/        the vault program (Rust, Anchor 0.31.1)
   src/lib.rs                   the index of every instruction
   src/instructions/            their code and accounts, by area: protocol, basket,
-                               mint_redeem, upkeep, rebalance, buyback
+                               mint_redeem, upkeep, rebalance, buyback, metadata
+                               (the share token's name and logo in wallets)
   src/state.rs                 the accounts, and the limits the program enforces
 tests/                         the test suite, run against the compiled program in LiteSVM
 WHITEPAPER.md                  how GraviFi works
@@ -49,6 +54,7 @@ Requires the Solana CLI 2.1 and Anchor 0.31.1.
 
 ```bash
 anchor build
+solana program dump -u m metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s target/deploy/mpl_token_metadata.so
 npm ci
 npm test
 ```
@@ -56,12 +62,17 @@ npm test
 The tests load `target/deploy/gravifi_vault.so` from the build and exercise it end to end:
 baskets, minting and redemption, rounding, fees, access modes, rebalancing and its price
 floor, sweeps of tokens a basket is sent, splits, Token-2022 transfer fees, the buyback and burn,
-and the creation burn.
+the creation burn and its exemption, allowlists, bounded and Pyth-checked prices, and the share
+token's metadata, against the real Metaplex Token Metadata
+program dumped from mainnet (it can no longer be upgraded).
 
 ## Verify it's the program on mainnet
 
-The program built from this repository is byte-for-byte the one deployed. Build it, download
-the deployed one, and compare (the on-chain copy is zero-padded to its allocated size):
+Built in our environment (Solana CLI 2.1, Anchor 0.31.1, macOS), the program from this
+repository is byte-for-byte the one deployed. A plain `anchor build` isn't byte-reproducible
+across machines, though: the build toolchain ends up in the binary, so another setup gives
+another hash. To compare, build it, download the deployed one, and hash both (the on-chain copy
+is zero-padded to its allocated size):
 
 ```bash
 anchor build
@@ -70,8 +81,8 @@ head -c "$(wc -c < target/deploy/gravifi_vault.so)" onchain.so | shasum -a 256
 shasum -a 256 target/deploy/gravifi_vault.so
 ```
 
-Both hashes start with `9774be28682cace0`. A reproducible verified build (`solana-verify`)
-comes with the move to a multisig.
+Both hashes start with `96b86b4f7a7e2344`. A verified build (`solana-verify`), reproducible
+on any machine, comes with the move to a multisig.
 
 ## Status
 

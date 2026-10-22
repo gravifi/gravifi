@@ -399,6 +399,31 @@ describe("mint and redeem", () => {
     await rpc(w.ctx, mintIx(w, user, ONE_SHARE, entry), [user]);
   });
 
+  test("the creator can take a wallet off the allowlist: it can't mint, still redeems, and can be added again", async () => {
+    const w = await world({ access: "allowlist" });
+    const user = fund(w.ctx);
+    await fundHolder(w, user);
+    const entry = pda.allow(w.basket, user.publicKey);
+    const allow = w.ctx.vault.methods.allowWallet().accountsPartial({ creator: w.creator.publicKey, basket: w.basket, wallet: user.publicKey, allowEntry: entry });
+    const disallow = (by: Keypair) =>
+      w.ctx.vault.methods.disallowWallet().accountsPartial({ creator: by.publicKey, basket: w.basket, wallet: user.publicKey, allowEntry: entry });
+    await rpc(w.ctx, allow, [w.creator]);
+    await rpc(w.ctx, mintIx(w, user, ONE_SHARE, entry), [user]);
+
+    const stranger = fund(w.ctx);
+    await expectError(rpc(w.ctx, disallow(stranger), [stranger]), "ConstraintHasOne");
+    const rent = BigInt(w.ctx.svm.getBalance(entry) ?? 0n);
+    const before = BigInt(w.ctx.svm.getBalance(w.creator.publicKey) ?? 0n);
+    await rpc(w.ctx, disallow(w.creator), [w.creator]);
+    assert.equal(w.ctx.svm.getAccount(entry), null);
+    assert.equal(BigInt(w.ctx.svm.getBalance(w.creator.publicKey) ?? 0n), before + rent);
+
+    await expectError(rpc(w.ctx, mintIx(w, user, ONE_SHARE), [user]), "MintNotPermitted");
+    await rpc(w.ctx, redeemIx(w, user, ONE_SHARE / 2n), [user]);
+    await rpc(w.ctx, allow, [w.creator]);
+    await rpc(w.ctx, mintIx(w, user, ONE_SHARE, entry), [user]);
+  });
+
   test("a vault left short (an issuer clawback) pays every redeemer pro rata, with no sync first", async () => {
     const w = await world();
     // An issuer clawback takes half of token B out of the vault.
