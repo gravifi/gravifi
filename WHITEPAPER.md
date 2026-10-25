@@ -84,7 +84,7 @@ Anyone can create a basket in the app:
 |---|---|
 | **Assets** | 2 to 14, from the 133 listed |
 | **Weights** | Any split adding up to 100% |
-| **Rebalancing** | On a schedule, when it drifts past a tolerance, or both (at least a day apart, at least 0.5% drift) |
+| **Rebalancing** | On a schedule, when it drifts past a tolerance, or both (at least a day apart, at least 0.5% drift). Rebalancing starts once the basket holds $50 (section 4) |
 | **Creator fee** | 0% to 0.20% a year |
 | **Access** | Public; allowlist (only wallets the creator approves can mint); or private (only the creator can mint). Anyone holding shares can always redeem |
 | **Control** | Creator-managed, or immutable: locked forever, nobody can change it again |
@@ -111,7 +111,8 @@ comes round, or it drifts past its tolerance, a keeper trades it back:
 - **In slices** of at most 5% of the basket's value, so no single trade moves a thin market.
 - **At unpredictable times**, so nobody can trade ahead of a known schedule.
 - **Against a price floor.** Each slice must fetch at least the oracle price, less a small
-  tolerance, or the whole slice reverts. The keeper is lent the tokens to sell, and the program
+  tolerance (1% for stocks and crypto; up to 3%, the program's ceiling, when a memecoin is
+  involved, whose pool fees alone can pass 1.5%), or the whole slice reverts. The keeper is lent the tokens to sell, and the program
   checks what comes back to the vault in the same transaction.
 
 The program checks every slice, and the share supply can't change in the middle of one. The
@@ -122,6 +123,18 @@ within 3-5% of a fresh, fully verified Pyth price. Any other asset's price may m
 from the last accepted one per hour, so a false price can't appear at once. Within those bounds
 a rebalance can't take value out of a basket as long as the prices posted are honest. Section 8
 says who holds that key.
+
+**Only baskets holding at least $50.** The keeper doesn't rebalance a basket worth less than
+$50: nothing is traded, not for drift, not on schedule, not even an asset its creator is adding
+or removing. Its holdings drift with the market until it grows past $50; minting and redeeming
+work as usual. Below that a slice is a few cents, and hundreds of small baskets would take
+turns from the real ones. Each basket's page says when it's below the line. The keeper pays
+the network fees of every rebalance itself; holders and creators pay none.
+
+**Taking turns.** The keeper runs a few slices an hour, shared by every basket. The baskets that
+want a slice go in order of how long they've waited since their last one: a basket goes to the
+back of the queue each time it's served, or when its slice fails. So a volatile basket that's
+due every hour can't take the turns of the others, and every basket gets one in its turn.
 
 **Tokens a basket is sent.** Some tokens pay their holders in another token (a stonkfun token
 can pay ZEC), and anyone can send a basket an airdrop. Those tokens aren't part of the recipe,
@@ -134,7 +147,7 @@ same oracle floor, and their value goes to the holders.
 |---|---|---|---|
 | **Protocol fee** | 0.40% | On every mint and redeem, including a creator's first deposit | Half to the GRAVI burn, half to the treasury |
 | **Creator fee** | 0% to 0.20% a year | Holders, as share dilution while held | The basket's creator |
-| **Creation burn** | 100,000 GRAVI per asset | The creator, for each asset a basket is created with or gets added | Burned |
+| **Creation burn** | 10,000 GRAVI per asset | The creator, for each asset a basket is created with or gets added | Burned |
 | **App fee** | 0.05% | On buys and sells through the app's USDC/SOL route | The treasury |
 | **Network** | fractions of a cent | Every transaction | Solana validators |
 
@@ -190,8 +203,8 @@ GRAVI and burns it, half goes to the treasury.
 Every asset in a basket burns GRAVI from the creator's wallet: creating a basket burns it for
 each asset the basket starts with, in the instruction that creates it (a basket created and
 never seeded has still paid it), and adding an asset later burns it for that asset. It is a
-real burn, so supply falls; nobody receives it. The amount is **100,000 GRAVI per asset**
-today, so a five-asset basket burns 500,000. The protocol authority sets it (section 8), and 0
+real burn, so supply falls; nobody receives it. The amount is **10,000 GRAVI per asset**
+today (100,000 until 25 October 2026), so a five-asset basket burns 50,000. The protocol authority sets it (section 8), and 0
 turns it off; the program refuses anything above **1,000,000 GRAVI per asset**, and only a
 program upgrade could raise that ceiling. A creator doesn't need to hold GRAVI first: the app
 buys whatever is missing with SOL as part of creating or adding, and shows the cost before

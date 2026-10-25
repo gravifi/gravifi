@@ -286,8 +286,11 @@ pub const PRICE_SCALE: u128 = 1_000_000_000_000;
 /// A rebalance may only use prices this fresh.
 pub const MAX_PRICE_AGE_SECS: i64 = 120;
 /// Ceiling on the tolerance a rebalance slice may accept against the oracle price. The
-/// vault can never be filled worse than this, however the swap is routed or attacked.
-pub const MAX_REBALANCE_SLIPPAGE_BPS: u16 = 150;
+/// vault can never be filled worse than this, however the swap is routed or attacked. 3%: a
+/// memecoin trading only in a Pump.fun pool costs more than 1.5% in pool fees alone (NTRNDM
+/// 1.62% from SOL), so at 1.5% the keeper could never buy one into a basket. The keeper asks
+/// for 1% on slices of stocks and crypto, and up to this only on slices touching a memecoin.
+pub const MAX_REBALANCE_SLIPPAGE_BPS: u16 = 300;
 /// Ceiling on a buyback slice's tolerance. Wider than a rebalance's: GRAVI first trades on
 /// pump.fun's bonding curve, whose fee alone is about 1%, and a buyback spends protocol fees
 /// a small slice at a time, never a holder's deposit.

@@ -81,7 +81,7 @@ head -c "$(wc -c < target/deploy/gravifi_vault.so)" onchain.so | shasum -a 256
 shasum -a 256 target/deploy/gravifi_vault.so
 ```
 
-Both hashes start with `96b86b4f7a7e2344`. A verified build (`solana-verify`), reproducible
+Both hashes start with `c45f81f2278f273d`. A verified build (`solana-verify`), reproducible
 on any machine, comes with the move to a multisig.
 
 ## Status

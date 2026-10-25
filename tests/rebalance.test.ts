@@ -133,6 +133,16 @@ describe("rebalancing", () => {
     assert.equal(balance(w.ctx, w.vaultB), vB, "nothing left the vault");
   });
 
+  it("a tolerance up to the 3% ceiling fills, and one above it is refused", async () => {
+    // A memecoin slice through a Pump.fun pool: 2.5% short of fair value, its pool fees alone.
+    const w = await keeperWorld();
+    const vA = balance(w.ctx, w.vaultA);
+    await send(w.ctx, [await startIx(w, SLICE_B, { slippage: 300 }), deliverA(w, 2_437_500n), await finishIx(w)], [w.keeper]);
+    assert.equal(balance(w.ctx, w.vaultA), vA + 2_437_500n, "the slice filled");
+    const w2 = await keeperWorld();
+    await expectError(send(w2.ctx, [await startIx(w2, SLICE_B, { slippage: 301 }), deliverA(w2, FAIR_A), await finishIx(w2)], [w2.keeper]), "BadParameter");
+  });
+
   it("a start without a finish in the same transaction is refused", async () => {
     const w = await keeperWorld();
     await expectError(send(w.ctx, [await startIx(w, SLICE_B)], [w.keeper]), "FinishMissing");
