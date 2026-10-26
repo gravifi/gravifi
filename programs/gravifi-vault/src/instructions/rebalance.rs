@@ -17,7 +17,8 @@ pub const SWEEP_INDEX: u8 = u8::MAX;
 /// First half of one rebalance slice: lends `sell_amount` of an overweight sleeve to
 /// the rebalancer, who swaps it on the market in the same transaction. The matching
 /// `rebalance_finish` must follow in that transaction and checks the vault got back at
-/// least the oracle value minus `max_slippage_bps` of the underweight sleeve.
+/// least the oracle value minus `max_slippage_bps` of the underweight sleeve. `refund` more
+/// of the sold token goes to the rebalancer, for what the slice cost it (`keeper_refund`).
 ///
 /// Remaining accounts: [vault_ata, asset_price] per constituent, in basket order.
 pub fn rebalance_start<'info>(
@@ -26,6 +27,7 @@ pub fn rebalance_start<'info>(
     buy_index: u8,
     sell_amount: u64,
     max_slippage_bps: u16,
+    refund: u64,
 ) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     let basket = &ctx.accounts.basket;
@@ -77,7 +79,8 @@ pub fn rebalance_start<'info>(
         + total / BPS_DENOM;
     let cap = room.min(total * MAX_SLICE_BPS / BPS_DENOM);
     require!(sell_value <= cap, VaultError::SliceTooLarge);
-    require!(sell_amount <= book.rows[s].balance, VaultError::SliceTooLarge);
+    keeper_refund(refund, book.rows[s].price_e12, book.rows[s].decimals)?;
+    require!(sell_amount.checked_add(refund).ok_or(VaultError::MathOverflow)? <= book.rows[s].balance, VaultError::SliceTooLarge);
 
     // The oracle floor: the least the vault accepts back, in the bought token's units.
     // Transfer fees aren't slippage: the lent tokens reach the rebalancer less the sold
@@ -107,7 +110,7 @@ pub fn rebalance_start<'info>(
         &ctx.accounts.rebalancer_sell.to_account_info(),
         &ctx.accounts.basket.to_account_info(),
         &ctx.accounts.sell_token_program.to_account_info(),
-        sell_amount,
+        sell_amount + refund,
         decimals,
         &[&seeds],
     )?;
@@ -180,12 +183,15 @@ pub fn rebalance_finish<'info>(ctx: Context<'_, '_, 'info, 'info, RebalanceFinis
 /// the oracle floor and raises that sleeve's units. Every holder's slice grows; nothing else
 /// moves, and no rebalance session starts or ends.
 ///
+/// `refund`: as in `rebalance_start`, in the stray token.
+///
 /// Remaining accounts: [vault_ata, asset_price] per constituent, in basket order.
 pub fn sweep_start<'info>(
     ctx: Context<'_, '_, 'info, 'info, SweepStart<'info>>,
     buy_index: u8,
     sell_amount: u64,
     max_slippage_bps: u16,
+    refund: u64,
 ) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     let basket = &ctx.accounts.basket;
@@ -201,10 +207,11 @@ pub fn sweep_start<'info>(
     require!(stray != basket.share_mint && basket.active().iter().all(|c| c.mint != stray), VaultError::NotStray);
     let basket_key = basket.key();
     let held = read_vault(&ctx.accounts.stray_vault.to_account_info(), &basket_key, &stray)?.amount;
-    require!(sell_amount <= held, VaultError::SliceTooLarge);
+    require!(sell_amount.checked_add(refund).ok_or(VaultError::MathOverflow)? <= held, VaultError::SliceTooLarge);
 
     let price = &ctx.accounts.stray_price;
     require!(price.price_e12 > 0 && now - price.updated_at <= MAX_PRICE_AGE_SECS, VaultError::BadPrice);
+    keeper_refund(refund, price.price_e12, ctx.accounts.stray_mint.decimals)?;
     let book = value_book(basket, ctx.remaining_accounts, now)?;
     require_keys_eq!(ctx.accounts.buy_mint.key(), basket.constituents[b].mint, VaultError::ConstituentMismatch);
     let sell_value = token_value(sell_amount, price.price_e12, ctx.accounts.stray_mint.decimals)?;
@@ -223,7 +230,7 @@ pub fn sweep_start<'info>(
         &ctx.accounts.rebalancer_sell.to_account_info(),
         &ctx.accounts.basket.to_account_info(),
         &ctx.accounts.stray_token_program.to_account_info(),
-        sell_amount,
+        sell_amount + refund,
         ctx.accounts.stray_mint.decimals,
         &[&seeds],
     )?;
@@ -263,6 +270,14 @@ fn oracle_floor(sell_value: u128, max_slippage_bps: u16, sell_fee_bps: u16, buy_
     .map_err(|_| VaultError::MathOverflow)?;
     require!(min_buy > 0, VaultError::SliceTooSmall);
     Ok(min_buy)
+}
+
+/// What a slice pays the rebalancer back for running it: `refund` of the sold token, at its
+/// oracle price, worth at most `MAX_KEEPER_REFUND_E12`. The keeper asks only for what it spent;
+/// the cap is what holds if its key leaks.
+pub(crate) fn keeper_refund(refund: u64, price_e12: u64, decimals: u8) -> Result<()> {
+    require!(token_value(refund, price_e12, decimals)? <= MAX_KEEPER_REFUND_E12, VaultError::RefundTooLarge);
+    Ok(())
 }
 
 /// The finish must come later in this very transaction, for this basket.

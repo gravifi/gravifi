@@ -175,8 +175,10 @@ pub mod gravifi_vault {
     }
 
     /// Drops an asset the basket no longer holds: its target must be 0% and rebalancing must
-    /// have sold it out (no units per share), so no holder's claim changes. Any dust left in
-    /// its vault, worth less than one base unit a share, stays there.
+    /// have sold it out (no units per share), so no holder's claim changes. Whatever is still in
+    /// its vault, rounding dust or tokens sent to it since, becomes a token the basket holds but
+    /// doesn't count: the keeper's sweep (`sweep_start`) swaps it into one of the basket's own
+    /// assets, for the holders, as it does with airdrops.
     pub fn remove_constituent(ctx: Context<Reconfigure>, index: u8) -> Result<()> {
         instructions::basket::remove_constituent(ctx, index)
     }
@@ -233,20 +235,35 @@ pub mod gravifi_vault {
         instructions::protocol::set_burn_exempt(ctx, wallet)
     }
 
+    /// Gives a referred wallet half the protocol fee, all to the treasury, until `until` (at
+    /// most a month and a day ahead). Once per wallet while the record exists. The wallet signs
+    /// and pays the rent; the rebalancer co-signs.
+    pub fn set_invite(ctx: Context<SetInvite>, until: i64) -> Result<()> {
+        instructions::invite::set_invite(ctx, until)
+    }
+
+    /// Closes an invite that has run out, its rent back to the wallet. Permissionless.
+    pub fn close_invite(ctx: Context<CloseInvite>) -> Result<()> {
+        instructions::invite::close_invite(ctx)
+    }
+
     // --------------------------------------------------------------------------- rebalancing
 
     /// First half of one rebalance slice: lends `sell_amount` of an overweight sleeve to
     /// the rebalancer, who swaps it on the market in the same transaction. The matching
     /// `rebalance_finish` must follow in that transaction and checks the vault got back at
-    /// least the oracle value minus `max_slippage_bps` of the underweight sleeve.
+    /// least the oracle value minus `max_slippage_bps` of the underweight sleeve. `refund` more
+    /// of the sold token goes to the rebalancer for what the slice cost it, worth at most
+    /// `MAX_KEEPER_REFUND_E12`.
     pub fn rebalance_start<'info>(
         ctx: Context<'_, '_, 'info, 'info, RebalanceStart<'info>>,
         sell_index: u8,
         buy_index: u8,
         sell_amount: u64,
         max_slippage_bps: u16,
+        refund: u64,
     ) -> Result<()> {
-        instructions::rebalance::rebalance_start(ctx, sell_index, buy_index, sell_amount, max_slippage_bps)
+        instructions::rebalance::rebalance_start(ctx, sell_index, buy_index, sell_amount, max_slippage_bps, refund)
     }
 
     /// Second half of a slice: checks the oracle floor, re-derives units for the two
@@ -257,13 +274,15 @@ pub mod gravifi_vault {
 
     /// Swaps a token the basket was sent but doesn't hold (holder rewards, airdrops) into one
     /// of its own, against the oracle; `rebalance_finish` must follow in the same transaction.
+    /// `refund`: as in `rebalance_start`, in the stray token.
     pub fn sweep_start<'info>(
         ctx: Context<'_, '_, 'info, 'info, SweepStart<'info>>,
         buy_index: u8,
         sell_amount: u64,
         max_slippage_bps: u16,
+        refund: u64,
     ) -> Result<()> {
-        instructions::rebalance::sweep_start(ctx, buy_index, sell_amount, max_slippage_bps)
+        instructions::rebalance::sweep_start(ctx, buy_index, sell_amount, max_slippage_bps, refund)
     }
 
     // ---------------------------------------------------------------------- buyback and burn
@@ -281,9 +300,10 @@ pub mod gravifi_vault {
     /// First half of a buyback slice: lends `sell_amount` of a token the burn PDA holds to
     /// the rebalancer, who swaps it for GRAVI in the same transaction. The matching
     /// `buyback_finish` must follow and checks at least the oracle value, less
-    /// `max_slippage_bps`, came back as GRAVI.
-    pub fn buyback_start(ctx: Context<BuybackStart>, sell_amount: u64, max_slippage_bps: u16) -> Result<()> {
-        instructions::buyback::buyback_start(ctx, sell_amount, max_slippage_bps)
+    /// `max_slippage_bps`, came back as GRAVI. `refund`: as in `rebalance_start`, from the
+    /// burn's tokens, for the buyback's network costs.
+    pub fn buyback_start(ctx: Context<BuybackStart>, sell_amount: u64, max_slippage_bps: u16, refund: u64) -> Result<()> {
+        instructions::buyback::buyback_start(ctx, sell_amount, max_slippage_bps, refund)
     }
 
     /// Second half of a buyback slice: checks the GRAVI that came back clears the oracle

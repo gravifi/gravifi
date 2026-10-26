@@ -64,13 +64,13 @@ const book = (w: World) => [
   { pubkey: pda.price(w.mintB), isSigner: false, isWritable: false },
 ];
 
-function startIx(w: KW, sellAmount: bigint, opts: { signer?: PublicKey; sell?: number; buy?: number; slippage?: number } = {}) {
+function startIx(w: KW, sellAmount: bigint, opts: { signer?: PublicKey; sell?: number; buy?: number; slippage?: number; refund?: bigint } = {}) {
   const sell = opts.sell ?? 1;
   const [sellMint, sellVault, sellProgram, receive] =
     sell === 1 ? [w.mintB, w.vaultB, TOKEN_2022_PROGRAM_ID, w.keeperB] : [w.mintA, w.vaultA, TOKEN_PROGRAM_ID, w.keeperA];
   const buy = opts.buy ?? 1 - sell;
   return w.ctx.vault.methods
-    .rebalanceStart(sell, buy, new BN(sellAmount.toString()), opts.slippage ?? 50)
+    .rebalanceStart(sell, buy, new BN(sellAmount.toString()), opts.slippage ?? 50, new BN((opts.refund ?? 0n).toString()))
     .accountsPartial({
       rebalancer: opts.signer ?? w.keeper.publicKey,
       keepers: pda.keepers(),
@@ -141,6 +141,21 @@ describe("rebalancing", () => {
     assert.equal(balance(w.ctx, w.vaultA), vA + 2_437_500n, "the slice filled");
     const w2 = await keeperWorld();
     await expectError(send(w2.ctx, [await startIx(w2, SLICE_B, { slippage: 301 }), deliverA(w2, FAIR_A), await finishIx(w2)], [w2.keeper]), "BadParameter");
+  });
+
+  it("a slice pays the keeper back up to $0.05 of the sold token, and no more", async () => {
+    const w = await keeperWorld();
+    const [vB, kB] = [balance(w.ctx, w.vaultB), balance(w.ctx, w.keeperB)];
+    // $0.05 of B at $6, rounded down: 0.008333333 B.
+    const refund = 8_333_333n;
+    await send(w.ctx, [await startIx(w, SLICE_B, { refund }), deliverA(w, FAIR_A), await finishIx(w)], [w.keeper]);
+    assert.equal(balance(w.ctx, w.vaultB), vB - SLICE_B - refund, "the basket bears the refund");
+    assert.equal(balance(w.ctx, w.keeperB), kB + SLICE_B + refund, "the keeper keeps it after routing the slice");
+    const b = await w.ctx.vault.account.basket.fetch(w.basket);
+    assert.equal(b.constituents[1].unitsPerShare.toString(), ((vB - SLICE_B - refund) / 10n).toString());
+
+    const w2 = await keeperWorld();
+    await expectError(send(w2.ctx, [await startIx(w2, SLICE_B, { refund: refund + 1n }), deliverA(w2, FAIR_A), await finishIx(w2)], [w2.keeper]), "RefundTooLarge");
   });
 
   it("a start without a finish in the same transaction is refused", async () => {
@@ -338,7 +353,7 @@ describe("rebalance sessions", () => {
       { pubkey: pda.price(m), isSigner: false, isWritable: false },
     ]);
     const start = await w.ctx.vault.methods
-      .rebalanceStart(0, 1, new BN(730_000), 50)
+      .rebalanceStart(0, 1, new BN(730_000), 50, new BN(0))
       .accountsPartial({
         rebalancer: w.keeper.publicKey,
         keepers: pda.keepers(),
@@ -383,9 +398,9 @@ async function strayWorld() {
 }
 type SW = Awaited<ReturnType<typeof strayWorld>>;
 
-function sweepIx(w: SW, amount: bigint, opts: { mint?: PublicKey; vault?: PublicKey; receive?: PublicKey; program?: PublicKey } = {}) {
+function sweepIx(w: SW, amount: bigint, opts: { mint?: PublicKey; vault?: PublicKey; receive?: PublicKey; program?: PublicKey; refund?: bigint } = {}) {
   return w.ctx.vault.methods
-    .sweepStart(0, new BN(amount.toString()), 50)
+    .sweepStart(0, new BN(amount.toString()), 50, new BN((opts.refund ?? 0n).toString()))
     .accountsPartial({
       rebalancer: w.keeper.publicKey,
       keepers: pda.keepers(),
@@ -404,6 +419,17 @@ function sweepIx(w: SW, amount: bigint, opts: { mint?: PublicKey; vault?: Public
 }
 
 describe("sweeping stray tokens", () => {
+  it("a sweep pays the keeper back in the stray token, capped like a slice", async () => {
+    const w = await strayWorld();
+    // $0.05 of S at $2: 0.025 S. The other 2.975 S ($5.95) come back as 5.95 A.
+    const refund = 25_000n;
+    await send(w.ctx, [await sweepIx(w, 3n * ONE_A - refund, { refund }), deliverA(w, 5_950_000n), await finishIx(w)], [w.keeper]);
+    assert.equal(balance(w.ctx, w.strayVault), 0n);
+    assert.equal(balance(w.ctx, w.keeperStray), 3n * ONE_A);
+    const w2 = await strayWorld();
+    await expectError(send(w2.ctx, [await sweepIx(w2, 2n * ONE_A, { refund: refund + 1n }), deliverA(w2, 4n * ONE_A), await finishIx(w2)], [w2.keeper]), "RefundTooLarge");
+  });
+
   it("a sweep swaps a token the basket was sent into one of its own, for every holder", async () => {
     const w = await strayWorld();
     const vA = balance(w.ctx, w.vaultA);

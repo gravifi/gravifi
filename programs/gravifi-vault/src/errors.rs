@@ -124,4 +124,10 @@ pub enum VaultError {
     PriceOffPyth,
     #[msg("This basket has no shares out: only its creator can open it again")]
     BasketEmpty,
+    #[msg("That invite is wrong: not this wallet's, or running past a month")]
+    BadInvite,
+    #[msg("This invite hasn't run out yet")]
+    InviteActive,
+    #[msg("A slice pays the keeper back at most $0.05")]
+    RefundTooLarge,
 }

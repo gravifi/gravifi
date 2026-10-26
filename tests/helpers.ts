@@ -205,6 +205,7 @@ export const pda = {
   buyback: () => PublicKey.findProgramAddressSync([Buffer.from("buyback")], VAULT_ID)[0],
   creationBurn: () => PublicKey.findProgramAddressSync([Buffer.from("creation_burn")], VAULT_ID)[0],
   guard: (mint: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("guard"), mint.toBuffer()], VAULT_ID)[0],
+  invite: (wallet: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("invite"), wallet.toBuffer()], VAULT_ID)[0],
 };
 
 /** Posts prices as the keeper does once they're bounded: a price more than 20% from its

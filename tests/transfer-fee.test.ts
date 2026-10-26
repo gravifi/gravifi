@@ -128,7 +128,7 @@ function startIx(w: KW, sell: 0 | 1, amount: bigint) {
   const [sellMint, buyMint, sellVault, receive, program] =
     sell === 1 ? [w.mintB, w.mintA, w.vaultB, w.keeperB, TOKEN_2022_PROGRAM_ID] : [w.mintA, w.mintB, w.vaultA, w.keeperA, TOKEN_PROGRAM_ID];
   return w.ctx.vault.methods
-    .rebalanceStart(sell, 1 - sell, new BN(amount.toString()), 50)
+    .rebalanceStart(sell, 1 - sell, new BN(amount.toString()), 50, new BN(0))
     .accountsPartial({
       rebalancer: w.keeper.publicKey,
       keepers: pda.keepers(),

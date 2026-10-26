@@ -128,8 +128,15 @@ says who holds that key.
 $50: nothing is traded, not for drift, not on schedule, not even an asset its creator is adding
 or removing. Its holdings drift with the market until it grows past $50; minting and redeeming
 work as usual. Below that a slice is a few cents, and hundreds of small baskets would take
-turns from the real ones. Each basket's page says when it's below the line. The keeper pays
-the network fees of every rebalance itself; holders and creators pay none.
+turns from the real ones. Each basket's page says when it's below the line.
+
+**The keeper is paid back, not paid.** Running a basket costs the keeper network fees: each
+slice, the prices posted for it, and once, the basket's rebalance record. Each slice pays it back
+what it spent on that basket so far, in the token the slice sells, and at most $0.05 a slice,
+a limit in the program's code. What isn't covered yet waits for the next slice. The keeper sells
+those tokens for SOL. Holders pay that cost as a sliver of the sold token, and nobody earns
+anything from it. Sweeps and the buyback pay back the same way, the buyback from the tokens it
+sells for GRAVI.
 
 **Taking turns.** The keeper runs a few slices an hour, shared by every basket. The baskets that
 want a slice go in order of how long they've waited since their last one: a basket goes to the
@@ -151,10 +158,20 @@ same oracle floor, and their value goes to the holders.
 | **App fee** | 0.05% | On buys and sells through the app's USDC/SOL route | The treasury |
 | **Network** | fractions of a cent | Every transaction | Solana validators |
 
+**Invited wallets.** A wallet that joins with someone's invite doesn't pay the GRAVI-burn half of
+the protocol fee for its first 30 days: it pays 0.20%, all of it to the treasury. The app fee is
+unchanged. The program reads the wallet's invite record, good for at most 31 days, which the
+wallet writes with its first trade and the keeper co-signs. The wallet puts down the record's
+rent, about 0.0012 SOL, and gets it back with its first trade after the 30 days. For a year, the inviter receives half of the treasury's part of the protocol fee on
+that wallet's basket trades (0.10% of each trade), paid daily in USDC by the app. It is a share
+of fees from someone else's trading, not a return on anything held, and it never pays out more
+than those trades paid in.
+
 The protocol fee rounds up, so no flow is too small to pay it, and it is kept in shares, so
 the vault stays fully backed. The limits are in the program's code: the protocol fee can never
 exceed 0.50%, a creator fee can never exceed 0.20% a year, the creation burn can never exceed
-1,000,000 GRAVI per asset, and at least half of every protocol fee goes to the GRAVI burn. Changing
+1,000,000 GRAVI per asset, and at least half of every protocol fee goes to the GRAVI burn, except
+an invited wallet's half fee in its first month (above). Changing
 any of them would take new code, in public.
 
 Opening a token account the first time a wallet holds an asset costs about 0.002 SOL of
@@ -242,8 +259,8 @@ There is no governance and no vote. Control is split so that no role can reach h
 |---|---|---|
 | **Holders** | Redeem at any time, send or trade their shares | |
 | **A basket's creator** | Change their basket's weights, assets, rebalancing, fee (within the caps), split; set how wallets show its shares (name, ticker, picture) | Touch the vault's tokens; once the basket is immutable, anything but how wallets show its shares |
-| **The protocol authority** (the team) | List assets, set fees and the creation burn within the ceilings, name the one burn-exempt team wallet, match assets to Pyth feeds, name the keepers, set how wallets show any basket's shares, and upgrade the program | Through any of its settings: move a vault's tokens, block a redemption, exceed the fee or creation-burn ceilings, send less than half of the protocol fee to the burn |
-| **The keeper** | Post the prices rebalances and buybacks are checked against; run rebalance and buyback slices within the program's checks | Move a vault's tokens outside a slice, or accept less back than the posted price allows |
+| **The protocol authority** (the team) | List assets, set fees and the creation burn within the ceilings, name the one burn-exempt team wallet, match assets to Pyth feeds, name the keepers, set how wallets show any basket's shares, and upgrade the program | Through any of its settings: move a vault's tokens, block a redemption, exceed the fee or creation-burn ceilings, send less than half of the protocol fee to the burn (outside an invited wallet's half fee) |
+| **The keeper** | Post the prices rebalances and buybacks are checked against; run rebalance and buyback slices within the program's checks, each paying it back at most $0.05 for its network costs; co-sign an invited wallet's invite record | Move a vault's tokens outside a slice, or accept less back than the posted price allows; take more than $0.05 from a slice; give a wallet half fees for more than 31 days at a time |
 | **The burn address** | Buy GRAVI and burn it | Anything else: it has no key |
 
 The program and protocol authority are held today by one team key, and upgrading a program

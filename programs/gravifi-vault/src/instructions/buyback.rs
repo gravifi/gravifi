@@ -81,8 +81,9 @@ pub fn buyback_redeem<'info>(
 /// First half of a buyback slice: lends `sell_amount` of a token the burn PDA holds to
 /// the rebalancer, who swaps it for GRAVI in the same transaction. The matching
 /// `buyback_finish` must follow and checks at least the oracle value, less
-/// `max_slippage_bps`, came back as GRAVI.
-pub fn buyback_start(ctx: Context<BuybackStart>, sell_amount: u64, max_slippage_bps: u16) -> Result<()> {
+/// `max_slippage_bps`, came back as GRAVI. `refund` more of the sold token goes to the
+/// rebalancer for the buyback's network costs, as in a rebalance slice.
+pub fn buyback_start(ctx: Context<BuybackStart>, sell_amount: u64, max_slippage_bps: u16, refund: u64) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     require!(sell_amount > 0, VaultError::BadParameter);
     require!(max_slippage_bps <= MAX_BUYBACK_SLIPPAGE_BPS, VaultError::BadParameter);
@@ -96,6 +97,7 @@ pub fn buyback_start(ctx: Context<BuybackStart>, sell_amount: u64, max_slippage_
     for p in [sell_price, gravi_price] {
         require!(p.price_e12 > 0 && now - p.updated_at <= MAX_PRICE_AGE_SECS, VaultError::BadPrice);
     }
+    crate::instructions::rebalance::keeper_refund(refund, sell_price.price_e12, sell_price.decimals)?;
     // As in rebalancing, the sold token's transfer fee isn't slippage.
     let sell_fee = TransferFee::of(&ctx.accounts.sell_mint.to_account_info())?;
     let floor_value = token_value(sell_amount, sell_price.price_e12, sell_price.decimals)?
@@ -142,7 +144,7 @@ pub fn buyback_start(ctx: Context<BuybackStart>, sell_amount: u64, max_slippage_
             },
             &[&burn_seeds],
         ),
-        sell_amount,
+        sell_amount.checked_add(refund).ok_or(VaultError::MathOverflow)?,
         ctx.accounts.sell_mint.decimals,
     )?;
 

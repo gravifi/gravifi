@@ -5,6 +5,7 @@ pub mod upkeep;
 pub mod rebalance;
 pub mod buyback;
 pub mod metadata;
+pub mod invite;
 
 pub use protocol::*;
 pub use basket::*;
@@ -13,3 +14,4 @@ pub use upkeep::*;
 pub use rebalance::*;
 pub use buyback::*;
 pub use metadata::*;
+pub use invite::*;

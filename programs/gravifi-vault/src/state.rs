@@ -23,7 +23,8 @@ pub const MAX_LAUNCH_CONSTITUENTS: usize = 14;
 pub const MAX_CREATOR_FEE_BPS: u16 = 20;
 pub const MAX_PROTOCOL_FEE_BPS: u16 = 50;
 /// The least of every protocol fee that goes to buying GRAVI and burning it: half. The
-/// authority can raise it, never lower it.
+/// authority can raise it, never lower it. The one exception is a referred wallet's first
+/// month, which pays half the fee and burns none of it (`Invite`).
 pub const MIN_BURN_SHARE_BPS: u16 = 5_000;
 
 pub const SHARE_DECIMALS: u8 = 9;
@@ -155,8 +156,12 @@ impl Basket {
     /// and redeemed in one transaction, taking the holders' share of it).
     ///
     /// It goes through the vault's units per share, as the app quotes them, while those fit in
-    /// u64. Past it (a dust supply and a vault that isn't) it's vault × shares ÷ supply straight,
-    /// so a redeem can't fail there: a payout is never more than the vault holds.
+    /// u64. The units are rounded down first, so a deposit can fall short of vault × shares ÷
+    /// supply by up to one base unit per whole share: next to the protocol fee on every mint
+    /// and redeem, too little to profit from on any basket holding more than a few hundred base
+    /// units of each token per share. Past u64 (a dust supply and a vault that isn't) it's
+    /// vault × shares ÷ supply straight, so a redeem can't fail there: a payout is never more
+    /// than the vault holds.
     pub fn slice_of(vault_amount: u64, shares: u64, supply: u64, round_up: bool) -> Result<u64> {
         require!(supply > 0, crate::errors::VaultError::ZeroSupply);
         let units = (vault_amount as u128) * ONE_SHARE / supply as u128;
@@ -171,8 +176,9 @@ impl Basket {
     /// Base units of a constituent required to back `shares` share base units.
     ///
     /// `round_up` is the asymmetry that keeps the vault solvent: minting rounds the
-    /// deposit up so the vault never under-collects, redeeming rounds the payout down
-    /// so it never over-pays. Both round in the vault's favour by at most one base unit.
+    /// deposit up so the vault never under-collects on these units, redeeming rounds the
+    /// payout down so it never over-pays. Each rounds in the vault's favour by at most one
+    /// base unit, for the units it's given (see `slice_of` for how those are rounded).
     pub fn amount_for(units_per_share: u64, shares: u64, round_up: bool) -> Result<u64> {
         let n = (units_per_share as u128)
             .checked_mul(shares as u128)
@@ -298,6 +304,12 @@ pub const MAX_BUYBACK_SLIPPAGE_BPS: u16 = 300;
 /// One slice may move at most this share of the basket's value, so each trade stays small
 /// against pool depth and a sandwich costs more than it earns.
 pub const MAX_SLICE_BPS: u128 = 500;
+/// The most one rebalance, sweep or buyback slice pays the rebalancer back for what running
+/// it cost (network fees, and the accounts it opened for the basket), in USD x1e12: $0.05. A
+/// slice costs it about 0.00005 SOL; the rest of the room repays an opened account over a few
+/// slices. Paid in the sold token on top of the slice, so the basket (or the burn's budget)
+/// bears it; a leaked keeper key can take at most this per slice.
+pub const MAX_KEEPER_REFUND_E12: u128 = 50_000_000_000;
 /// Sleeves closer than this to target aren't worth trading.
 pub const MIN_TRADE_DRIFT_BPS: i64 = 10;
 /// The least a basket's policy may ask for: a drift tolerance under 0.5%, or a schedule more
@@ -327,6 +339,22 @@ pub struct Keepers {
     pub bump: u8,
     pub price_authority: Pubkey,
     pub rebalancer: Pubkey,
+}
+
+/// A referred wallet's invite: `[INVITE_SEED, wallet]`, written with the rebalancer's signature
+/// and paid for by the wallet (`set_invite`), whose rent goes back to it at `close_invite`.
+pub const INVITE_SEED: &[u8] = b"invite";
+/// The longest an invite can run from when it's written: a month, and a day of room.
+pub const MAX_INVITE_SECS: i64 = 31 * 86_400;
+
+/// Until `until`, `wallet` pays half the protocol fee on its mints and redeems (rounded up), all
+/// of it to the treasury and none to the burn. Passed after the constituent quads.
+#[account]
+#[derive(InitSpace)]
+pub struct Invite {
+    pub bump: u8,
+    pub wallet: Pubkey,
+    pub until: i64,
 }
 
 pub const GUARD_SEED: &[u8] = b"guard";

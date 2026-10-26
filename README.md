@@ -31,6 +31,9 @@ test suite. How it all works is in the [whitepaper](WHITEPAPER.md)
   wallet: for the assets it's created with, in the instruction that creates it, and for each
   asset added later. The amount can't exceed 1,000,000 GRAVI per asset. One team wallet, named
   on-chain by the protocol authority, can be exempt for its own baskets.
+- **The keeper is paid back at most $0.05 a slice.** Each rebalance, sweep or buyback slice may
+  give the keeper up to $0.05 of the token it sells, for the network fees it paid running the
+  basket.
 - **Posted prices are bounded.** The prices rebalances and buybacks are checked against must be
   within 3-5% of a fresh, fully verified Pyth price where an asset has a feed, and otherwise can
   move at most 20% an hour from the last accepted one.
@@ -81,7 +84,7 @@ head -c "$(wc -c < target/deploy/gravifi_vault.so)" onchain.so | shasum -a 256
 shasum -a 256 target/deploy/gravifi_vault.so
 ```
 
-Both hashes start with `c45f81f2278f273d`. A verified build (`solana-verify`), reproducible
+Both hashes start with `d2c8cb8abf417e6a`. A verified build (`solana-verify`), reproducible
 on any machine, comes with the move to a multisig.
 
 ## Status

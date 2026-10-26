@@ -87,7 +87,7 @@ async function slice(w: CW, held: ("A" | "B" | "C")[], sell: "A" | "B" | "C", bu
     { pubkey: pda.price(s[k].mint), isSigner: false, isWritable: false },
   ]);
   const start = await w.ctx.vault.methods
-    .rebalanceStart(held.indexOf(sell), held.indexOf(buy), new BN(amount.toString()), 50)
+    .rebalanceStart(held.indexOf(sell), held.indexOf(buy), new BN(amount.toString()), 50, new BN(0))
     .accountsPartial({
       rebalancer: w.keeper.publicKey,
       keepers: pda.keepers(),

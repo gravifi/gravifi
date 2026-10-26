@@ -4,6 +4,7 @@ use anchor_lang::prelude::*;
 use anchor_spl::token_interface::{self, Mint as MintI, TokenAccount as TokenAccountI, TokenInterface};
 
 use crate::errors::VaultError;
+use crate::instructions::invite::invited;
 use crate::state::*;
 use crate::token_util::*;
 
@@ -48,6 +49,7 @@ pub fn seed_basket<'info>(
         burn_shares: &a.burn_shares,
         treasury_shares: &a.treasury_shares,
         share_token_program: &a.share_token_program,
+        invited: false,
     };
     collect_and_mint(deposit, ctx.remaining_accounts, shares)
 }
@@ -59,12 +61,16 @@ pub fn seed_basket<'info>(
 /// but never fewer than `min_shares`. That is how a wallet buys with swaps whose output
 /// isn't known to the unit when it signs: it pre-signs this with the quoted amount and
 /// its slippage floor, and nothing is left over except what legs filled unevenly.
+///
+/// A referred wallet passes its invite after the quads and pays half the fee (`Invite`).
 pub fn mint_in_kind<'info>(
     ctx: Context<'_, '_, 'info, 'info, MintInKind<'info>>,
     shares: u64,
     min_shares: u64,
 ) -> Result<()> {
     require!(ctx.accounts.basket.seeded, VaultError::NotSeeded);
+    let (quads, extra) = split_quads(ctx.remaining_accounts, ctx.accounts.basket.constituent_count)?;
+    let invited = invited(extra, &ctx.accounts.payer.key())?;
     require!(!ctx.accounts.basket.mint_paused, VaultError::MintPaused);
     require!(min_shares <= shares, VaultError::BadParameter);
     let shares = if min_shares < shares { affordable_shares(&ctx, shares)? } else { shares };
@@ -105,8 +111,9 @@ pub fn mint_in_kind<'info>(
         burn_shares: &a.burn_shares,
         treasury_shares: &a.treasury_shares,
         share_token_program: &a.share_token_program,
+        invited,
     };
-    collect_and_mint(deposit, ctx.remaining_accounts, shares)
+    collect_and_mint(deposit, quads, shares)
 }
 
 /// Hand in `shares`: the protocol's redeem fee is kept in shares, the rest are burned
@@ -120,6 +127,8 @@ pub fn mint_in_kind<'info>(
 ///
 /// Payouts are priced from the vaults' balances (`Basket::live_units`), not from stored
 /// units: a surplus is shared with the redeemer, a clawback's deficit is borne pro rata.
+///
+/// A referred wallet passes its invite after the quads and pays half the fee (`Invite`).
 pub fn redeem_in_kind<'info>(
     ctx: Context<'_, '_, 'info, 'info, RedeemInKind<'info>>,
     shares: u64,
@@ -132,14 +141,11 @@ pub fn redeem_in_kind<'info>(
 
     let count = ctx.accounts.basket.constituent_count as usize;
     require!((forfeit_mask as u32) < (1u32 << count), VaultError::BadParameter);
-    require!(
-        ctx.remaining_accounts.len() == count * 4,
-        VaultError::BadRemainingAccounts
-    );
+    let (quads, extra) = split_quads(ctx.remaining_accounts, ctx.accounts.basket.constituent_count)?;
+    let invited = invited(extra, &ctx.accounts.payer.key())?;
 
-    let fee = flow_fee(shares, ctx.accounts.protocol.protocol_fee_bps)?;
+    let (fee, burn_fee, treasury_fee) = protocol_cut(shares, &ctx.accounts.protocol, invited)?;
     require!(shares > fee, VaultError::BelowFee);
-    let (burn_fee, treasury_fee) = split_protocol_fee(fee, ctx.accounts.protocol.burn_share_bps)?;
     for (to, amount) in [
         (ctx.accounts.burn_shares.to_account_info(), burn_fee),
         (ctx.accounts.treasury_shares.to_account_info(), treasury_fee),
@@ -188,10 +194,10 @@ pub fn redeem_in_kind<'info>(
             continue;
         }
         let c = ctx.accounts.basket.constituents[i];
-        let vault_ata = &ctx.remaining_accounts[i * 4];
-        let user_ata = &ctx.remaining_accounts[i * 4 + 1];
-        let mint_ai = &ctx.remaining_accounts[i * 4 + 2];
-        let token_program = &ctx.remaining_accounts[i * 4 + 3];
+        let vault_ata = &quads[i * 4];
+        let user_ata = &quads[i * 4 + 1];
+        let mint_ai = &quads[i * 4 + 2];
+        let token_program = &quads[i * 4 + 3];
 
         require_keys_eq!(*mint_ai.key, c.mint, VaultError::ConstituentMismatch);
         // The mint's owner *is* its token program; anything else would let a caller
@@ -222,7 +228,7 @@ pub fn redeem_in_kind<'info>(
     }
 
     // What's left, forfeited sleeves included, backs the shares still out.
-    resync_units(&mut ctx.accounts.basket, ctx.remaining_accounts, 4, &basket_key, supply_before - shares)
+    resync_units(&mut ctx.accounts.basket, quads, 4, &basket_key, supply_before - shares)
 }
 
 /// Re-derives every sleeve's units from its vault and `supply` (vaults at `stride` steps in
@@ -249,6 +255,8 @@ pub(crate) struct Deposit<'a, 'info> {
     pub burn_shares: &'a InterfaceAccount<'info, TokenAccountI>,
     pub treasury_shares: &'a InterfaceAccount<'info, TokenAccountI>,
     pub share_token_program: &'a Interface<'info, TokenInterface>,
+    /// The payer trades on a live invite: half the fee, none of it burned.
+    pub invited: bool,
 }
 
 /// Shared body of `seed_basket` and `mint_in_kind`: pull every sleeve in, then mint.
@@ -320,9 +328,8 @@ pub(crate) fn collect_and_mint<'info>(d: Deposit<'_, 'info>, remaining: &[Accoun
 
     // The deposit covers all `shares`; the protocol's cut of them goes to the burn PDA
     // and the treasury, so units and collateral are untouched.
-    let fee = flow_fee(shares, d.protocol.protocol_fee_bps)?;
+    let (fee, burn_fee, treasury_fee) = protocol_cut(shares, d.protocol, d.invited)?;
     require!(shares > fee, VaultError::BelowFee);
-    let (burn_fee, treasury_fee) = split_protocol_fee(fee, d.protocol.burn_share_bps)?;
     let program = d.share_token_program.to_account_info();
     let mint = d.share_mint.to_account_info();
     let authority = d.basket.to_account_info();
@@ -343,7 +350,7 @@ pub(crate) fn collect_and_mint<'info>(d: Deposit<'_, 'info>, remaining: &[Accoun
 /// when `s <= b * ONE_SHARE / units`. Remaining accounts are the mint quads.
 pub(crate) fn affordable_shares<'info>(ctx: &Context<'_, '_, 'info, 'info, MintInKind<'info>>, cap: u64) -> Result<u64> {
     let count = ctx.accounts.basket.constituent_count as usize;
-    require!(ctx.remaining_accounts.len() == count * 4, VaultError::BadRemainingAccounts);
+    let (quads, _) = split_quads(ctx.remaining_accounts, ctx.accounts.basket.constituent_count)?;
     let payer = ctx.accounts.payer.key();
     let basket_key = ctx.accounts.basket.key();
     let supply = ctx.accounts.share_mint.supply;
@@ -351,15 +358,15 @@ pub(crate) fn affordable_shares<'info>(ctx: &Context<'_, '_, 'info, 'info, MintI
     for i in 0..count {
         let c = ctx.accounts.basket.constituents[i];
         // The same slice of the vault `collect_and_mint` will charge.
-        let held = read_vault(&ctx.remaining_accounts[i * 4], &basket_key, &c.mint)?.amount;
+        let held = read_vault(&quads[i * 4], &basket_key, &c.mint)?.amount;
         let units = Basket::live_units(held, supply, c.units_per_share)?;
         if units == 0 {
             continue;
         }
-        let user = read_token_account(&ctx.remaining_accounts[i * 4 + 1])?;
+        let user = read_token_account(&quads[i * 4 + 1])?;
         require_keys_eq!(user.mint, c.mint, VaultError::ConstituentMismatch);
         require_keys_eq!(user.owner, payer, VaultError::ConstituentMismatch);
-        let mint_ai = &ctx.remaining_accounts[i * 4 + 2];
+        let mint_ai = &quads[i * 4 + 2];
         require_keys_eq!(*mint_ai.key, c.mint, VaultError::ConstituentMismatch);
         let usable = TransferFee::of(mint_ai)?.net(user.amount)?;
         // The most shares whose deposit fits in `usable`: through units while they fit (as
@@ -377,6 +384,26 @@ pub(crate) fn affordable_shares<'info>(ctx: &Context<'_, '_, 'info, 'info, MintI
 pub(crate) fn flow_fee(shares: u64, fee_bps: u16) -> Result<u64> {
     let fee = ((shares as u128) * (fee_bps as u128)).div_ceil(BPS_DENOM);
     u64::try_from(fee).map_err(|_| VaultError::MathOverflow.into())
+}
+
+/// The protocol's cut of `shares` and how it splits: `(fee, burn, treasury)`. An invited
+/// payer pays half the rate, rounded up, all of it to the treasury.
+pub(crate) fn protocol_cut(shares: u64, protocol: &Protocol, invited: bool) -> Result<(u64, u64, u64)> {
+    if invited {
+        let fee = flow_fee(shares, protocol.protocol_fee_bps.div_ceil(2))?;
+        return Ok((fee, 0, fee));
+    }
+    let fee = flow_fee(shares, protocol.protocol_fee_bps)?;
+    let (burn, treasury) = split_protocol_fee(fee, protocol.burn_share_bps)?;
+    Ok((fee, burn, treasury))
+}
+
+/// A mint's or redeem's remaining accounts: one quad per constituent, then what follows them
+/// (nothing, or an invite).
+pub(crate) fn split_quads<'a, 'info>(remaining: &'a [AccountInfo<'info>], count: u8) -> Result<(&'a [AccountInfo<'info>], &'a [AccountInfo<'info>])> {
+    let n = count as usize * 4;
+    require!(remaining.len() >= n, VaultError::BadRemainingAccounts);
+    Ok(remaining.split_at(n))
 }
 
 /// Splits a protocol fee between the burn PDA (for buying and burning GRAVI) and the treasury.

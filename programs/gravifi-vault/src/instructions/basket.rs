@@ -221,8 +221,10 @@ pub fn add_constituent(ctx: Context<AddConstituent>) -> Result<()> {
 }
 
 /// Drops an asset the basket no longer holds: its target must be 0% and rebalancing must
-/// have sold it out (no units per share), so no holder's claim changes. Any dust left in
-/// its vault, worth less than one base unit a share, stays there.
+/// have sold it out (no units per share), so no holder's claim changes. Whatever is still in
+/// its vault, rounding dust or tokens sent to it since, becomes a token the basket holds but
+/// doesn't count: the keeper's sweep (`sweep_start`) swaps it into one of the basket's own
+/// assets, for the holders, as it does with airdrops.
 pub fn remove_constituent(ctx: Context<Reconfigure>, index: u8) -> Result<()> {
     authorise_mandate(&ctx.accounts.basket, &ctx.accounts.authority)?;
     let basket = &mut ctx.accounts.basket;

@@ -69,9 +69,9 @@ const redeemIx = (w: BW, shares: bigint, burnA = w.burnA) =>
       ].flatMap((row) => row.map((pubkey, i) => ({ pubkey, isSigner: false, isWritable: i < 2 }))),
     );
 
-const startIx = (w: BW, amount: bigint, signer: Keypair = w.keeper, slippage = 50) =>
+const startIx = (w: BW, amount: bigint, signer: Keypair = w.keeper, slippage = 50, refund = 0n) =>
   w.ctx.vault.methods
-    .buybackStart(new BN(amount.toString()), slippage)
+    .buybackStart(new BN(amount.toString()), slippage, new BN(refund.toString()))
     .accountsPartial({
       rebalancer: signer.publicKey,
       keepers: pda.keepers(),
@@ -146,6 +146,18 @@ describe("buyback and burn", () => {
   it("redeeming refuses a destination the burn PDA doesn't own", async () => {
     const w = await buybackWorld();
     await expectError(rpc(w.ctx, redeemIx(w, 1_000_000n, w.keeperA)), "ConstituentMismatch");
+  });
+
+  it("a slice pays the keeper back up to $0.05 from the burn's tokens", async () => {
+    const w = await buybackWorld();
+    await redeemAll(w);
+    // 0.35 A sold for 35 GRAVI, and 0.05 A ($0.05) for the keeper.
+    await send(w.ctx, [await startIx(w, 350_000n, w.keeper, 50, 50_000n), deliver(w, 35n * ONE_GRAVI), await finishIx(w)], [w.keeper]);
+    assert.equal(balance(w.ctx, w.burnA), 0n);
+    assert.equal(balance(w.ctx, w.keeperA), 400_000n);
+    const w2 = await buybackWorld();
+    await redeemAll(w2);
+    await expectError(send(w2.ctx, [await startIx(w2, 300_000n, w2.keeper, 50, 50_001n), deliver(w2, 30n * ONE_GRAVI), await finishIx(w2)], [w2.keeper]), "RefundTooLarge");
   });
 
   it("a slice swaps for GRAVI at the oracle price and burns all of it", async () => {
