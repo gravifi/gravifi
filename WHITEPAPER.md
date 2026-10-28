@@ -243,13 +243,37 @@ account's fields), and the exemption applies to that wallet's baskets only.
 - **Memecoins**: from BONK and WIF to stonkfun's tokens.
 
 An asset is listed only if it has a working market on Solana. A token whose own rules let its
-issuer take a cut of every transfer is accepted only up to 3%, and the program checks that
+issuer take a cut of every transfer is accepted only up to 4%, and the program checks that
 cap on every deposit. Tokens with an active transfer hook, which hands every transfer to
 another program, are refused.
 
 Tokenized stocks are issued by third parties, who can freeze or claw back their tokens under
 their own terms; GraviFi can't prevent that, only keep redemption of everything else open
 (section 2.2). Their issuers don't offer them to US persons.
+
+### 7.1 Verified and Unverified
+
+The assets above are **GraviFi Verified**: chosen by the team. A creator
+can also ask for any other Solana token with a market (open listing). The app checks it
+first and refuses, whatever else it has going for it, a token that could jam or empty a
+vault: an active transfer hook, a transfer fee over 4%, accounts that start frozen, a token
+that can't move or is paused, and freeze, clawback or pause powers held by anyone but a known
+stock, gold or stablecoin issuer. Leveraged and inverse products are allowed, with a warning
+that they lose value when the market swings. Beyond that it needs a live price, $10,000 in
+its pools, a day of trading, and a $150 trade either way within 10% of the market. A token that passes is offered to everyone as **Unverified**
+and registered on chain in the transaction of the first basket that uses it, signed by the
+app's listing key (the lister, which the program lets list assets and nothing else); that
+creator pays the record's rent.
+
+Unverified tokens carry a badge and a one-line note wherever they appear, and so does every
+basket holding one; Explore and Pulse can be narrowed to baskets of Verified tokens. The
+rebalancer gives them the wider limits memecoins get, and backs off a basket whose slices
+keep failing on one. GraviFi doesn't fix or refund problems an Unverified token causes. The
+app re-checks them in turn every day: one that fails the rules for 3 days running is no
+longer offered for new baskets (baskets holding it keep it), and one Jupiter hasn't priced
+for a day is valued at zero so its baskets stay tradable. A token that meets the Verified bar for a week (for stocks from a
+known issuer, a $150 trade within 2-3%; for others, also $1M market cap and $100,000 in
+pools) can be promoted by the team. Every token shows its contract address.
 
 ## 8. Who controls what
 
@@ -259,7 +283,8 @@ There is no governance and no vote. Control is split so that no role can reach h
 |---|---|---|
 | **Holders** | Redeem at any time, send or trade their shares | |
 | **A basket's creator** | Change their basket's weights, assets, rebalancing, fee (within the caps), split; set how wallets show its shares (name, ticker, picture) | Touch the vault's tokens; once the basket is immutable, anything but how wallets show its shares |
-| **The protocol authority** (the team) | List assets, set fees and the creation burn within the ceilings, name the one burn-exempt team wallet, match assets to Pyth feeds, name the keepers, set how wallets show any basket's shares, and upgrade the program | Through any of its settings: move a vault's tokens, block a redemption, exceed the fee or creation-burn ceilings, send less than half of the protocol fee to the burn (outside an invited wallet's half fee) |
+| **The lister** (the app's listing key) | List a token a creator picked, inside the creator's own transaction, once it passed the app's checks | Anything else: delist, change a setting, move a token; or list a token whose new accounts start frozen, that can't move, or that's paused |
+| **The protocol authority** (the team) | List assets, name the lister, set fees and the creation burn within the ceilings, name the one burn-exempt team wallet, match assets to Pyth feeds, name the keepers, set how wallets show any basket's shares, and upgrade the program | Through any of its settings: move a vault's tokens, block a redemption, exceed the fee or creation-burn ceilings, send less than half of the protocol fee to the burn (outside an invited wallet's half fee) |
 | **The keeper** | Post the prices rebalances and buybacks are checked against; run rebalance and buyback slices within the program's checks, each paying it back at most $0.05 for its network costs; co-sign an invited wallet's invite record | Move a vault's tokens outside a slice, or accept less back than the posted price allows; take more than $0.05 from a slice; give a wallet half fees for more than 31 days at a time |
 | **The burn address** | Buy GRAVI and burn it | Anything else: it has no key |
 

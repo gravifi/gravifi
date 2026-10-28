@@ -3,7 +3,11 @@ use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
 use anchor_lang::solana_program::program::{invoke, invoke_signed};
 use anchor_spl::token_interface;
 use anchor_spl::token_2022::spl_token_2022;
-use spl_token_2022::extension::{transfer_fee::TransferFeeConfig, transfer_hook::TransferHook, BaseStateWithExtensions, StateWithExtensions};
+use spl_token_2022::extension::{
+    default_account_state::DefaultAccountState, non_transferable::NonTransferable, transfer_fee::TransferFeeConfig, transfer_hook::TransferHook,
+    BaseStateWithExtensions, StateWithExtensions,
+};
+use spl_token_2022::state::AccountState;
 
 use crate::errors::VaultError;
 
@@ -141,6 +145,24 @@ pub fn assert_no_active_transfer_hook(mint: &AccountInfo) -> Result<()> {
         let program_id: Option<Pubkey> = hook.program_id.into();
         require!(program_id.is_none(), VaultError::TransferHookUnsupported);
     }
+    Ok(())
+}
+
+/// Rejects a mint the vault couldn't hold: new accounts start frozen (DefaultAccountState, an
+/// issuer's allowlist: the vault's own account would be frozen), the token can't be transferred
+/// at all (NonTransferable), or its transfers are paused right now (Pausable).
+pub fn assert_holdable(mint: &AccountInfo) -> Result<()> {
+    if mint.owner != &spl_token_2022::ID {
+        return Ok(());
+    }
+    let data = mint.try_borrow_data()?;
+    let state = StateWithExtensions::<spl_token_2022::state::Mint>::unpack(&data)
+        .map_err(|_| error!(VaultError::ConstituentMismatch))?;
+    if let Ok(d) = state.get_extension::<DefaultAccountState>() {
+        require!(d.state != AccountState::Frozen as u8, VaultError::DefaultFrozen);
+    }
+    require!(state.get_extension::<NonTransferable>().is_err(), VaultError::NonTransferable);
+    require!(!crate::extensions::is_paused(&data), VaultError::TokenPaused);
     Ok(())
 }
 

@@ -130,4 +130,10 @@ pub enum VaultError {
     InviteActive,
     #[msg("A slice pays the keeper back at most $0.05")]
     RefundTooLarge,
+    #[msg("New accounts of this token start frozen: a vault couldn't hold it")]
+    DefaultFrozen,
+    #[msg("This token can't be transferred")]
+    NonTransferable,
+    #[msg("This token's transfers are paused")]
+    TokenPaused,
 }

@@ -36,15 +36,18 @@ pub fn update_multiplier(token_program: &Pubkey, mint: &Pubkey, authority: &Pubk
     }
 }
 
-/// The scaled UI config (authority, multiplier, new_multiplier_effective_timestamp,
-/// new_multiplier), or None if the mint has no scaled UI amount.
-fn scaled_ui_config(mint_data: &[u8]) -> Option<&[u8]> {
+/// Token-2022's Pausable extension (newer than the spl-token-2022 crate this program builds
+/// with): its authority, then whether transfers are paused.
+pub const PAUSABLE_EXTENSION_TYPE: u16 = 26;
+
+/// One mint extension's value, read straight from its TLV entry, or None if the mint hasn't it.
+fn mint_extension(mint_data: &[u8], wanted: u16, min_len: usize) -> Option<&[u8]> {
     let mut i = 166; // after the padded base mint and the account-type byte
     while i + 4 <= mint_data.len() {
         let ty = u16::from_le_bytes([mint_data[i], mint_data[i + 1]]);
         let len = u16::from_le_bytes([mint_data[i + 2], mint_data[i + 3]]) as usize;
         let value = mint_data.get(i + 4..i + 4 + len)?;
-        if ty == SCALED_UI_EXTENSION_TYPE && len >= 56 {
+        if ty == wanted && len >= min_len {
             return Some(value);
         }
         if ty == 0 {
@@ -53,6 +56,17 @@ fn scaled_ui_config(mint_data: &[u8]) -> Option<&[u8]> {
         i += 4 + len;
     }
     None
+}
+
+/// The scaled UI config (authority, multiplier, new_multiplier_effective_timestamp,
+/// new_multiplier), or None if the mint has no scaled UI amount.
+fn scaled_ui_config(mint_data: &[u8]) -> Option<&[u8]> {
+    mint_extension(mint_data, SCALED_UI_EXTENSION_TYPE, 56)
+}
+
+/// Whether the mint's transfers are paused right now (false if it has no Pausable extension).
+pub fn is_paused(mint_data: &[u8]) -> bool {
+    mint_extension(mint_data, PAUSABLE_EXTENSION_TYPE, 33).is_some_and(|v| v[32] != 0)
 }
 
 /// The multiplier in force at `now`, or None if the mint has no scaled UI amount.

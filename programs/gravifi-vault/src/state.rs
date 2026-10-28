@@ -253,6 +253,20 @@ pub fn burn_exempt(protocol: &AccountInfo) -> Option<Pubkey> {
     (wallet != Pubkey::default()).then_some(wallet)
 }
 
+/// The one key, besides the protocol authority, that may list assets (`register_asset`), at
+/// `[LISTER_SEED]`: the app's listing key, which co-signs a listing inside the creator's own
+/// transaction once the token passed the app's checks (open listing). It can do nothing else: not
+/// delist, not change a setting, not move a token. `set_lister` names it (`Pubkey::default()`
+/// removes it), protocol authority only.
+pub const LISTER_SEED: &[u8] = b"lister";
+
+#[account]
+#[derive(InitSpace)]
+pub struct Lister {
+    pub bump: u8,
+    pub lister: Pubkey,
+}
+
 /// One per mint at `[ASSET_SEED, mint]`. Baskets may only be built from Listed assets.
 #[account]
 #[derive(InitSpace)]
@@ -320,9 +334,10 @@ pub const MIN_POLICY_INTERVAL_SECS: i64 = 86_400;
 /// sleeve under target, so it empties completely and can be removed.
 pub const EMPTYING_BPS: i64 = 50;
 /// The highest Token-2022 transfer fee an asset may charge to be listed, added to a basket or
-/// bought into one (stonkfun tokens charge 1-3%, PreStocks 1%). A fee raised above it after
-/// listing pauses new money into that asset; redemptions and selling it out still work.
-pub const MAX_TRANSFER_FEE_BPS: u16 = 300;
+/// bought into one (stonkfun tokens charge 1-3%, PreStocks 1%; 4% leaves room for tokens taking
+/// 3% on trades). A fee raised above it after listing pauses new money into that asset;
+/// redemptions and selling it out still work.
+pub const MAX_TRANSFER_FEE_BPS: u16 = 400;
 /// A rebalance session ends once every sleeve is this close to target.
 pub const SESSION_END_DRIFT_BPS: i64 = 25;
 /// A session that hasn't traded for about a day (at ~400 ms a slot) lapses: the basket goes

@@ -59,6 +59,15 @@ pub fn set_guardian(ctx: Context<ProtocolAdmin>, guardian: Pubkey) -> Result<()>
     Ok(())
 }
 
+/// Names the lister, the one other key that may list assets; `Pubkey::default()` removes it.
+/// The first call creates its account.
+pub fn set_lister(ctx: Context<SetLister>, lister: Pubkey) -> Result<()> {
+    let l = &mut ctx.accounts.lister;
+    l.bump = ctx.bumps.lister;
+    l.lister = lister;
+    Ok(())
+}
+
 pub fn set_protocol_fees(
     ctx: Context<ProtocolAdmin>,
     protocol_fee_bps: u16,
@@ -86,9 +95,28 @@ pub fn set_creation_burn(ctx: Context<SetCreationBurn>, per_asset: u64) -> Resul
     Ok(())
 }
 
-/// Adds a mint to the set of assets baskets may be built from.
-pub fn register_asset(ctx: Context<RegisterAsset>) -> Result<()> {
+/// Adds a mint to the set of assets baskets may be built from. Signed by the protocol authority,
+/// or by the lister (`set_lister`), whose account is then the one remaining account. (A remaining
+/// account rather than a named one, so every client listing as the authority is unchanged.)
+pub fn register_asset<'info>(ctx: Context<'_, '_, 'info, 'info, RegisterAsset<'info>>) -> Result<()> {
+    let signer = ctx.accounts.authority.key();
+    let is_authority = signer == ctx.accounts.protocol.authority;
+    let by_lister = match ctx.remaining_accounts.first() {
+        Some(ai) if !is_authority => {
+            let (expected, _) = Pubkey::find_program_address(&[LISTER_SEED], &crate::ID);
+            require_keys_eq!(*ai.key, expected, VaultError::NotProtocolAuthority);
+            let l = Account::<Lister>::try_from(ai)?;
+            l.lister != Pubkey::default() && l.lister == signer
+        }
+        _ => false,
+    };
+    require!(is_authority || by_lister, VaultError::NotProtocolAuthority);
     assert_no_active_transfer_hook(&ctx.accounts.mint.to_account_info())?;
+    // The lister lists only what a vault can hold as it comes. The authority may still list a
+    // token whose new accounts start frozen, for an issuer that approves the vaults it holds.
+    if !is_authority {
+        assert_holdable(&ctx.accounts.mint.to_account_info())?;
+    }
     TransferFee::of(&ctx.accounts.mint.to_account_info())?.assert_within_cap()?;
 
     let e = &mut ctx.accounts.asset_entry;
@@ -382,19 +410,31 @@ pub struct SetCreationBurn<'info> {
 }
 
 #[derive(Accounts)]
-pub struct RegisterAsset<'info> {
-    /// Pays the entry's rent. Separate from `authority`, which is usually a multisig.
+pub struct SetLister<'info> {
     #[account(mut)]
-    pub payer: Signer<'info>,
-
     pub authority: Signer<'info>,
-
     #[account(
-        mut,
         seeds = [PROTOCOL_SEED],
         bump = protocol.bump,
         has_one = authority @ VaultError::NotProtocolAuthority
     )]
+    pub protocol: Account<'info, Protocol>,
+    #[account(init_if_needed, payer = authority, space = 8 + Lister::INIT_SPACE, seeds = [LISTER_SEED], bump)]
+    pub lister: Account<'info, Lister>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct RegisterAsset<'info> {
+    /// Pays the entry's rent. Separate from `authority`, which is usually a multisig, or the
+    /// lister, whose listings the creator asking for them pays for.
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    /// The protocol authority, or the lister when `lister` is passed (checked in the handler).
+    pub authority: Signer<'info>,
+
+    #[account(mut, seeds = [PROTOCOL_SEED], bump = protocol.bump)]
     pub protocol: Account<'info, Protocol>,
 
     pub mint: InterfaceAccount<'info, MintI>,

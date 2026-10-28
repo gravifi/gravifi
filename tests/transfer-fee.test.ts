@@ -1,6 +1,6 @@
 // Tokens that charge a Token-2022 transfer fee (stonkfun tokens: 1-3%, PreStocks: 1%). The
 // payer bears the fee on a deposit, the holder on a redemption, and rebalancing allows for it
-// in the oracle floor. A fee above 3% can't be listed, and a fee raised above 3% after listing
+// in the oracle floor. A fee above 4% can't be listed, and a fee raised above 4% after listing
 // stops new money while redemptions go on.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -74,15 +74,15 @@ describe("tokens that charge a transfer fee", () => {
     assert.equal(balance(w.ctx, holder) - hB, UNITS_B - feeOn(UNITS_B), "the holder got it less 1%");
   });
 
-  it("a token charging more than 3% can't be listed", async () => {
+  it("a token charging more than 4% can't be listed", async () => {
     const w = await world();
-    const steep = await createMint(w.ctx, 6, TOKEN_2022_PROGRAM_ID, undefined, 400);
+    const steep = await createMint(w.ctx, 6, TOKEN_2022_PROGRAM_ID, undefined, 500);
     await expectError(listAsset(w.ctx, steep), "TransferFeeTooHigh");
-    const fine = await createMint(w.ctx, 6, TOKEN_2022_PROGRAM_ID, undefined, 300);
+    const fine = await createMint(w.ctx, 6, TOKEN_2022_PROGRAM_ID, undefined, 400);
     await listAsset(w.ctx, fine);
   });
 
-  it("a fee raised above 3% after listing stops new money, and holders can still redeem", async () => {
+  it("a fee raised above 4% after listing stops new money, and holders can still redeem", async () => {
     const w = await world({ feeBpsB: FEE_BPS });
     const alice = fund(w.ctx);
     await fundHolder(w, alice);
@@ -172,9 +172,9 @@ describe("rebalancing a token that charges a transfer fee", () => {
     assert.equal(balance(w.ctx, w.vaultB), vB, "nothing left the vault");
   });
 
-  it("no rebalance buys into a token whose fee was raised above 3%", async () => {
+  it("no rebalance buys into a token whose fee was raised above 4%", async () => {
     const w = await keeperWorld();
-    await setFee(w, 400);
+    await setFee(w, 500);
     // B falls to $2, so it's the underweight sleeve: $20 of A, $10 of B.
     await setPrices(w, w.keeper, PRICE_A, 2_000_000_000_000n);
     await expectError(send(w.ctx, [await startIx(w, 0, 1_000_000n), await finishIx(w)], [w.keeper]), "TransferFeeTooHigh");

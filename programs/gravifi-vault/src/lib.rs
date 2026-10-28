@@ -54,6 +54,12 @@ pub mod gravifi_vault {
         instructions::protocol::set_guardian(ctx, guardian)
     }
 
+    /// Names the lister, the one other key that may list assets (`register_asset`);
+    /// `Pubkey::default()` removes it. Protocol authority only.
+    pub fn set_lister(ctx: Context<SetLister>, lister: Pubkey) -> Result<()> {
+        instructions::protocol::set_lister(ctx, lister)
+    }
+
     pub fn set_protocol_fees(
         ctx: Context<ProtocolAdmin>,
         protocol_fee_bps: u16,
@@ -68,8 +74,9 @@ pub mod gravifi_vault {
         instructions::protocol::set_creation_burn(ctx, per_asset)
     }
 
-    /// Adds a mint to the set of assets baskets may be built from.
-    pub fn register_asset(ctx: Context<RegisterAsset>) -> Result<()> {
+    /// Adds a mint to the set of assets baskets may be built from: signed by the protocol
+    /// authority, or by the lister with its account as the one remaining account.
+    pub fn register_asset<'info>(ctx: Context<'_, '_, 'info, 'info, RegisterAsset<'info>>) -> Result<()> {
         instructions::protocol::register_asset(ctx)
     }
 
