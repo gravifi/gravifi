@@ -118,8 +118,9 @@ comes round, or it drifts past its tolerance, a keeper trades it back:
   checks what comes back to the vault in the same transaction.
 
 The program checks every slice, and the share supply can't change in the middle of one. The
-floor is only as good as the price it's checked against: the keeper's price authority posts
-those prices (from Jupiter), and the program bounds what it may post. Where an asset has a Pyth
+floor is only as good as the price it's checked against. A price service posts those prices
+with its own key, the program's price authority: it reads each price from Jupiter itself, so the
+app can ask it to post a price but never choose one. The program bounds what it may post. Where an asset has a Pyth
 feed (about 20 of them today: SOL, ETH, BTC, JUP, BONK, WIF and others), a posted price must be
 within 3-5% of a fresh, fully verified Pyth price. Any other asset's price may move at most 20%
 from the last accepted one per hour, so a false price can't appear at once. Within those bounds
@@ -314,13 +315,16 @@ There is no governance and no vote. Control is split so that no role can reach h
 | **A basket's creator** | Change their basket's weights, assets, rebalancing, fee (within the caps), stop losses, split; set how wallets show its shares (name, ticker, picture); set an immutable basket's stop losses before its first deposit | Touch the vault's tokens; once the basket is immutable, anything but how wallets show its shares |
 | **The lister** (the app's listing key) | List a token a creator picked, inside the creator's own transaction, once it passed the app's checks | Anything else: delist, change a setting, move a token; or list a token whose new accounts start frozen, that can't move, or that's paused |
 | **The protocol authority** (the team) | List assets, name the lister, set fees and the creation burn within the ceilings, name the one burn-exempt team wallet, match assets to Pyth feeds, name the keepers, set how wallets show any basket's shares, and upgrade the program | Through any of its settings: move a vault's tokens, block a redemption, exceed the fee or creation-burn ceilings, send less than half of the protocol fee to the burn (outside an invited wallet's half fee) |
-| **The keeper** | Post the prices rebalances, buybacks and stop losses are checked against (anyone may ask the program to check a stop); run rebalance and buyback slices within the program's checks, each paying it back at most $0.05 for its network costs; co-sign an invited wallet's invite record | Move a vault's tokens outside a slice, or accept less back than the posted price allows; take more than $0.05 from a slice; give a wallet half fees for more than 31 days at a time |
+| **The price service** (its own key) | Post the prices rebalances, buybacks and stop losses are checked against, within the bounds above, read from Jupiter by itself | Anything else: trade, move a token, change a setting |
+| **The keeper** (the app's server) | Run rebalance and buyback slices within the program's checks, each paying it back at most $0.05 for its network costs; ask the price service to post a price (anyone may ask the program to check a stop); co-sign an invited wallet's invite record | Post or choose a price; move a vault's tokens outside a slice, or accept less back than the posted price allows; take more than $0.05 from a slice; give a wallet half fees for more than 31 days at a time |
 | **The burn address** | Buy GRAVI and burn it | Anything else: it has no key |
 
 The program and protocol authority are held today by one team key, and upgrading a program
-can change what it does. The keeper's price authority and rebalancer are one more key, held by
-the app's server: whoever held it could post false prices, within the bounds above, and trade
-baskets at a loss, a slice at a time. Holders trust the team with both keys today. That is why the next steps (section 10) are a multisig, so no single
+can change what it does. Prices and trades take two more keys, held apart: the price service's
+key posts prices, the app server's key trades. Taking value through a false price needs both. The
+price key alone can post a price only within the bounds above, which could send a rebalance the
+wrong way or fire a stop early, but it can't trade; the trading key alone trades only at the
+prices the price service posted. Holders trust the team with these keys today. That is why the next steps (section 10) are a multisig, so no single
 key can upgrade it, and a verified build, so anyone can check that what runs on-chain is the
 published code.
 
