@@ -318,6 +318,10 @@ pub const MAX_BUYBACK_SLIPPAGE_BPS: u16 = 300;
 /// One slice may move at most this share of the basket's value, so each trade stays small
 /// against pool depth and a sandwich costs more than it earns.
 pub const MAX_SLICE_BPS: u128 = 500;
+/// A sleeve set to 0% (stopped out, or taken out by its creator) may sell up to this much of the
+/// basket in one slice ("clip"), so it leaves in minutes rather than hours. Each clip is still
+/// held to the oracle floor and stops at the bought sleeve's target.
+pub const MAX_LEAVING_SLICE_BPS: u128 = 5_000;
 /// The most one rebalance, sweep or buyback slice pays the rebalancer back for what running
 /// it cost (network fees, and the accounts it opened for the basket), in USD x1e12: $0.05. A
 /// slice costs it about 0.00005 SOL; the rest of the room repays an opened account over a few
@@ -432,6 +436,57 @@ pub struct RebalanceState {
     pub min_buy: u64,
     pub buy_balance_before: u64,
     pub slices: u32,
+}
+
+/// A sleeve set to 0% whose price hasn't been posted for this long counts as worth nothing in the
+/// books (`value_book`): a token the market stopped pricing would otherwise block every rebalance
+/// of the basket. At $0 it can't be sold (its floor is zero), only held and redeemed in kind.
+pub const DEAD_PRICE_SECS: i64 = 86_400;
+
+// ---------------------------------------------------------------------------- stop losses
+
+pub const STOP_SEED: &[u8] = b"stop";
+/// A stop fires only if the price is still below it this long after it was first seen below.
+pub const STOP_CONFIRM_SECS: i64 = 300;
+/// How far below its reference a stop may sit: 5% to 90%.
+pub const MIN_STOP_BPS: u16 = 500;
+pub const MAX_STOP_BPS: u16 = 9_000;
+
+/// One asset's stop: it fires when the asset's posted price is below `reference_e12` less
+/// `pct_bps`, twice, at least STOP_CONFIRM_SECS apart.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Default, Debug, InitSpace)]
+pub struct Stop {
+    pub mint: Pubkey,
+    pub pct_bps: u16,
+    /// The reference rises with each higher posted price `check_stop` sees (a trailing stop);
+    /// otherwise it stays where the creator set it.
+    pub trailing: bool,
+    /// USD per whole token x1e12, in the same units as `AssetPrice`.
+    pub reference_e12: u64,
+    /// When the price was first seen below the stop; 0 while it isn't.
+    pub armed_at: i64,
+}
+
+impl Stop {
+    /// The price below which this stop arms, x1e12.
+    pub fn level_e12(&self) -> u128 {
+        self.reference_e12 as u128 * (BPS_DENOM - self.pct_bps as u128) / BPS_DENOM
+    }
+}
+
+/// A basket's stop losses, at `[STOP_SEED, basket]`, one per asset at most, keyed by mint (removing
+/// an asset shifts the indices of those after it). The creator writes them (`set_stops`); anyone
+/// may check one against its posted price (`check_stop`), and a stop that fires sets its asset's
+/// target to 0% and scales the others up, after which rebalancing sells the asset out.
+#[account]
+#[derive(InitSpace)]
+pub struct StopLoss {
+    pub bump: u8,
+    pub basket: Pubkey,
+    #[max_len(MAX_CONSTITUENTS)]
+    pub stops: Vec<Stop>,
+    /// Stops that fired, all time.
+    pub fired: u32,
 }
 
 /// The GRAVI buyback-and-burn, a singleton at `[BUYBACK_SEED]`. Works like a rebalance

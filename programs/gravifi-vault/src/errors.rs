@@ -136,4 +136,14 @@ pub enum VaultError {
     NonTransferable,
     #[msg("This token's transfers are paused")]
     TokenPaused,
+    #[msg("An immutable basket's stops are set before its first deposit and never change")]
+    StopsFixed,
+    #[msg("A stop must be on one of the basket's assets, once each, 5% to 90% below a positive reference price")]
+    BadStop,
+    #[msg("That asset has no stop in this basket")]
+    StopNotSet,
+    #[msg("That asset isn't in the basket at a target above 0%")]
+    StopInactive,
+    #[msg("The basket's last asset with a target can't be stopped out: there's nothing to move into")]
+    StopLastAsset,
 }

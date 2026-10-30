@@ -40,6 +40,13 @@ pub(crate) fn value_book<'info>(basket: &Account<'info, Basket>, accounts: &'inf
         let view = read_vault(&accounts[i * 2], &basket_key, &c.mint)?;
         let price = Account::<AssetPrice>::try_from(&accounts[i * 2 + 1]).map_err(|_| error!(VaultError::BadPrice))?;
         require_keys_eq!(price.mint, c.mint, VaultError::BadPrice);
+        // A sleeve on its way out whose price stopped being posted a day ago counts as nothing,
+        // so the rest of the basket can still rebalance. Its price reads as zero, which no slice
+        // can sell or buy at.
+        if c.target_bps == 0 && now - price.updated_at > DEAD_PRICE_SECS {
+            rows.push(Row { balance: view.amount, price_e12: 0, decimals: price.decimals, value: 0 });
+            continue;
+        }
         require!(price.price_e12 > 0 && now - price.updated_at <= MAX_PRICE_AGE_SECS, VaultError::BadPrice);
         let value = token_value(view.amount, price.price_e12, price.decimals)?;
         total = total.checked_add(value).ok_or(VaultError::MathOverflow)?;

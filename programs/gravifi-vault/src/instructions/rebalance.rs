@@ -67,7 +67,8 @@ pub fn rebalance_start<'info>(
         VaultError::WrongDirection
     );
 
-    // Never past the target on either side, and never more than one slice of the basket.
+    // Never past the target on either side, and never more than one slice of the basket: 5%,
+    // or 50% for a sleeve on its way out (a "clip"), so a stopped asset leaves in minutes.
     // Emptying may overshoot the bought sleeve by what's left, at most EMPTYING_BPS.
     let total = book.total;
     let sell_value = token_value(sell_amount, book.rows[s].price_e12, book.rows[s].decimals)?;
@@ -77,7 +78,7 @@ pub fn rebalance_start<'info>(
         .ok_or(VaultError::MathOverflow)?
         / BPS_DENOM
         + total / BPS_DENOM;
-    let cap = room.min(total * MAX_SLICE_BPS / BPS_DENOM);
+    let cap = room.min(total * if leaving { MAX_LEAVING_SLICE_BPS } else { MAX_SLICE_BPS } / BPS_DENOM);
     require!(sell_value <= cap, VaultError::SliceTooLarge);
     keeper_refund(refund, book.rows[s].price_e12, book.rows[s].decimals)?;
     require!(sell_amount.checked_add(refund).ok_or(VaultError::MathOverflow)? <= book.rows[s].balance, VaultError::SliceTooLarge);
@@ -256,6 +257,8 @@ pub fn sweep_start<'info>(
 /// is always allowed. A floor of zero would accept nothing back, so a slice that small is
 /// refused.
 fn oracle_floor(sell_value: u128, max_slippage_bps: u16, sell_fee_bps: u16, buy_mint: &AccountInfo, buy: &Row) -> Result<u64> {
+    // A sleeve the books count as worth nothing (`DEAD_PRICE_SECS`) has no price to buy at.
+    require!(buy.price_e12 > 0, VaultError::BadPrice);
     let buy_fee = TransferFee::of(buy_mint)?;
     buy_fee.assert_within_cap()?;
     let floor_value = sell_value * (BPS_DENOM - max_slippage_bps as u128) / BPS_DENOM * (BPS_DENOM - sell_fee_bps as u128) / BPS_DENOM

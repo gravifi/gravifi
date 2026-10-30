@@ -108,7 +108,9 @@ change to it counts from the moment it's made, never for the time before.
 Prices move, so a basket's actual weights drift from its targets. When a basket's schedule
 comes round, or it drifts past its tolerance, a keeper trades it back:
 
-- **In slices** of at most 5% of the basket's value, so no single trade moves a thin market.
+- **In slices** of at most 5% of the basket's value, so no single trade moves a thin market. An
+  asset on its way out (set to 0% by its creator, or stopped out, section 4.1) sells in clips of
+  up to 50%, each still stopping at the bought asset's target.
 - **At unpredictable times**, so nobody can trade ahead of a known schedule.
 - **Against a price floor.** Each slice must fetch at least the oracle price, less a small
   tolerance (1% for stocks and crypto; up to 3%, the program's ceiling, when a memecoin is
@@ -147,6 +149,33 @@ due every hour can't take the turns of the others, and every basket gets one in 
 can pay ZEC), and anyone can send a basket an airdrop. Those tokens aren't part of the recipe,
 so the keeper sweeps them: it swaps them into the basket's most underweight token against the
 same oracle floor, and their value goes to the holders.
+
+**A token the market stops pricing.** An asset at 0% whose price hasn't been posted for a day
+counts as worth nothing in the books, so it can't block the rest of the basket. Nothing can be
+sold or bought at $0, so it stays in the vault and redeeming still pays it out.
+
+### 4.1 Stop losses
+
+A creator can set a stop loss on any of a basket's assets: a percentage, 5% to 90%, below a
+reference price. A fixed stop's reference is the asset's price when the stop was set ("down 30%
+from now"); a trailing stop's reference rises with every higher price, so it sits below the
+asset's highest price since. The stops are stored on chain, where anyone can read them.
+
+If the asset's posted price is below its stop, the stop arms; if it's still below 5 minutes later,
+it fires. The program checks both prices (each fresh, within the bounds of section 4) and the
+time between them, and anyone may ask it to: the keeper does every minute. A price back above the
+stop before then disarms it. Firing sets the asset's target to 0% and scales every other target
+up in proportion, so the basket is at 100% again without it, and the stop is gone. The keeper then
+sells the asset out in clips of up to half the basket, a minute apart, each into the asset
+furthest under its new target and each held to the oracle floor. This happens whatever the
+basket's size: the $50 line doesn't apply to a stop.
+
+What a stop can't do: it doesn't buy back if the price recovers; a creator can add the asset
+again. A stop fires on the posted price, so on an asset without a Pyth feed, whose price may fall
+at most 20% an hour, a stop after a crash fires and sells in steps, over hours; the app labels
+these "slow stops". A thin token can be pushed through its stop for 5 minutes, and a stop sells
+near the bottom of a dip. An immutable basket's stops are part of its recipe: they're set before
+its first deposit and never change, and when one fires the basket follows that fixed rule.
 
 ## 5. Fees
 
@@ -282,10 +311,10 @@ There is no governance and no vote. Control is split so that no role can reach h
 | Role | Can | Can't |
 |---|---|---|
 | **Holders** | Redeem at any time, send or trade their shares | |
-| **A basket's creator** | Change their basket's weights, assets, rebalancing, fee (within the caps), split; set how wallets show its shares (name, ticker, picture) | Touch the vault's tokens; once the basket is immutable, anything but how wallets show its shares |
+| **A basket's creator** | Change their basket's weights, assets, rebalancing, fee (within the caps), stop losses, split; set how wallets show its shares (name, ticker, picture); set an immutable basket's stop losses before its first deposit | Touch the vault's tokens; once the basket is immutable, anything but how wallets show its shares |
 | **The lister** (the app's listing key) | List a token a creator picked, inside the creator's own transaction, once it passed the app's checks | Anything else: delist, change a setting, move a token; or list a token whose new accounts start frozen, that can't move, or that's paused |
 | **The protocol authority** (the team) | List assets, name the lister, set fees and the creation burn within the ceilings, name the one burn-exempt team wallet, match assets to Pyth feeds, name the keepers, set how wallets show any basket's shares, and upgrade the program | Through any of its settings: move a vault's tokens, block a redemption, exceed the fee or creation-burn ceilings, send less than half of the protocol fee to the burn (outside an invited wallet's half fee) |
-| **The keeper** | Post the prices rebalances and buybacks are checked against; run rebalance and buyback slices within the program's checks, each paying it back at most $0.05 for its network costs; co-sign an invited wallet's invite record | Move a vault's tokens outside a slice, or accept less back than the posted price allows; take more than $0.05 from a slice; give a wallet half fees for more than 31 days at a time |
+| **The keeper** | Post the prices rebalances, buybacks and stop losses are checked against (anyone may ask the program to check a stop); run rebalance and buyback slices within the program's checks, each paying it back at most $0.05 for its network costs; co-sign an invited wallet's invite record | Move a vault's tokens outside a slice, or accept less back than the posted price allows; take more than $0.05 from a slice; give a wallet half fees for more than 31 days at a time |
 | **The burn address** | Buy GRAVI and burn it | Anything else: it has no key |
 
 The program and protocol authority are held today by one team key, and upgrading a program

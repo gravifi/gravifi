@@ -201,6 +201,25 @@ pub mod gravifi_vault {
         instructions::basket::set_policy(ctx, rebalance_mode, interval_secs, drift_bps, mgmt_fee_bps)
     }
 
+    /// Replaces the basket's stop losses (each a percentage below a reference price, fixed or
+    /// trailing). The creator of a creator-managed basket at any time; of an immutable one only
+    /// before its first deposit.
+    pub fn set_stops(ctx: Context<SetStops>, stops: Vec<StopArgs>) -> Result<()> {
+        instructions::stops::set_stops(ctx, stops)
+    }
+
+    /// Closes a creator-managed basket's stop account, its rent back to the creator.
+    pub fn close_stops(ctx: Context<CloseStops>) -> Result<()> {
+        instructions::stops::close_stops(ctx)
+    }
+
+    /// Checks one asset's stop against its posted price: arms it below the stop, fires it if still
+    /// below STOP_CONFIRM_SECS later (its target to 0%, the others scaled up), disarms it above.
+    /// Permissionless.
+    pub fn check_stop(ctx: Context<CheckStop>) -> Result<()> {
+        instructions::stops::check_stop(ctx)
+    }
+
     /// Adds a wallet to an allowlisted basket. Creator-only.
     pub fn allow_wallet(ctx: Context<AllowWallet>) -> Result<()> {
         instructions::basket::allow_wallet(ctx)
