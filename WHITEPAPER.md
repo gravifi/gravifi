@@ -290,7 +290,7 @@ vault: an active transfer hook, a transfer fee over 4%, accounts that start froz
 that can't move or is paused, and freeze, clawback or pause powers held by anyone but a known
 stock, gold or stablecoin issuer. Leveraged and inverse products are allowed, with a warning
 that they lose value when the market swings. Beyond that it needs a live price, $10,000 in
-its pools, a day of trading, and a $150 trade either way within 10% of the market. A token that passes is offered to everyone as **Unverified**
+its pools, 6 hours of trading, and a $150 trade either way within 10% of the market. A token that passes is offered to everyone as **Unverified**
 and registered on chain in the transaction of the first basket that uses it, signed by the
 app's listing key (the lister, which the program lets list assets and nothing else); that
 creator pays the record's rent.

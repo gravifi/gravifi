@@ -102,6 +102,14 @@ const finishIx = (w: BW, signer: Keypair = w.keeper) =>
     })
     .instruction();
 
+const closeIx = (w: BW, mint: PublicKey, account: PublicKey, tokenProgram: PublicKey, mintAuthority: PublicKey | null, signer: Keypair = w.keeper) =>
+  w.ctx.vault.methods
+    .buybackClose()
+    .accountsPartial({ rebalancer: signer.publicKey, keepers: pda.keepers(), protocol: pda.protocol(), mint, burnAccount: account, mintAuthority, tokenProgram })
+    .instruction();
+
+const lamports = (w: BW, key: PublicKey) => BigInt(w.ctx.svm.getAccount(key)?.lamports ?? 0);
+
 /** The "market": the keeper delivers GRAVI to the burn PDA. */
 const deliver = (w: BW, amount: bigint) =>
   createTransferCheckedInstruction(w.keeperGravi, w.graviMint, w.burnGravi, w.keeper.publicKey, amount, 9, [], TOKEN_PROGRAM_ID);
@@ -213,6 +221,54 @@ describe("buyback and burn", () => {
     const { warp } = await import("./helpers.ts");
     warp(w.ctx, 200);
     await expectError(send(w.ctx, [await startIx(w, 400_000n), deliver(w, 40n * ONE_GRAVI), await finishIx(w)], [w.keeper]), "BadPrice");
+  });
+});
+
+describe("closing the burn PDA's emptied accounts", () => {
+  it("a sold-out burn account closes and its rent goes back to the rebalancer", async () => {
+    const w = await buybackWorld();
+    await redeemAll(w);
+    await send(w.ctx, [await startIx(w, 400_000n), deliver(w, 40n * ONE_GRAVI), await finishIx(w)], [w.keeper]);
+    const rent = lamports(w, w.burnA);
+    const before = lamports(w, w.keeper.publicKey);
+    await send(w.ctx, [await closeIx(w, w.mintA, w.burnA, TOKEN_PROGRAM_ID, w.ctx.payer.publicKey)], [w.keeper]);
+    assert.equal(lamports(w, w.burnA), 0n, "closed");
+    assert.equal(lamports(w, w.keeper.publicKey) - before, rent, "the rent is back with the rebalancer");
+    // The next buyback opens it again, as the keeper's redeem does.
+    await createAta(w.ctx, w.mintA, pda.burn(), TOKEN_PROGRAM_ID);
+    assert.equal(balance(w.ctx, w.burnA), 0n);
+  });
+
+  it("an account still holding tokens isn't closed", async () => {
+    const w = await buybackWorld();
+    await redeemAll(w);
+    await expectError(send(w.ctx, [await closeIx(w, w.mintB, w.burnB, TOKEN_2022_PROGRAM_ID, w.ctx.payer.publicKey)], [w.keeper]), "BurnAccountNotEmpty");
+  });
+
+  it("never the GRAVI account the buyback burns from", async () => {
+    const w = await buybackWorld();
+    await redeemAll(w);
+    await send(w.ctx, [await startIx(w, 400_000n), deliver(w, 40n * ONE_GRAVI), await finishIx(w)], [w.keeper]);
+    assert.equal(balance(w.ctx, w.burnGravi), 0n);
+    await expectError(send(w.ctx, [await closeIx(w, w.graviMint, w.burnGravi, TOKEN_PROGRAM_ID, w.ctx.payer.publicKey)], [w.keeper]), "BurnAccountKept");
+  });
+
+  it("never a share account, which every mint and redeem pays its burn fee into", async () => {
+    const w = await buybackWorld();
+    await redeemAll(w);
+    assert.equal(balance(w.ctx, burnShares(w)), 0n);
+    await expectError(send(w.ctx, [await closeIx(w, w.shareMint, burnShares(w), TOKEN_PROGRAM_ID, w.basket)], [w.keeper]), "BurnAccountKept");
+    // Naming some other account as the share mint's authority doesn't get past it.
+    await expectError(send(w.ctx, [await closeIx(w, w.shareMint, burnShares(w), TOKEN_PROGRAM_ID, w.ctx.payer.publicKey)], [w.keeper]), "BadParameter");
+    await expectError(send(w.ctx, [await closeIx(w, w.shareMint, burnShares(w), TOKEN_PROGRAM_ID, null)], [w.keeper]), "BadParameter");
+  });
+
+  it("only the configured rebalancer closes them", async () => {
+    const w = await buybackWorld();
+    await redeemAll(w);
+    await send(w.ctx, [await startIx(w, 400_000n), deliver(w, 40n * ONE_GRAVI), await finishIx(w)], [w.keeper]);
+    const outsider = fund(w.ctx);
+    await expectError(send(w.ctx, [await closeIx(w, w.mintA, w.burnA, TOKEN_PROGRAM_ID, w.ctx.payer.publicKey, outsider)], [outsider]), "NotRebalancer");
   });
 });
 

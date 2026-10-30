@@ -338,6 +338,12 @@ pub mod gravifi_vault {
         instructions::buyback::buyback_finish(ctx)
     }
 
+    /// Closes an empty token account the burn PDA owns and gives its rent back to the
+    /// rebalancer, who paid it. Never the burn PDA's GRAVI account, never a share mint's.
+    pub fn buyback_close(ctx: Context<BuybackClose>) -> Result<()> {
+        instructions::buyback::buyback_close(ctx)
+    }
+
     // ------------------------------------------------------------------------- share token
 
     /// Names the share token in wallets: creates its Metaplex metadata the first time (`payer`

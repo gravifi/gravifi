@@ -146,4 +146,8 @@ pub enum VaultError {
     StopInactive,
     #[msg("The basket's last asset with a target can't be stopped out: there's nothing to move into")]
     StopLastAsset,
+    #[msg("A burn token account is closed only once it's empty")]
+    BurnAccountNotEmpty,
+    #[msg("The burn PDA's GRAVI and share accounts are never closed")]
+    BurnAccountKept,
 }

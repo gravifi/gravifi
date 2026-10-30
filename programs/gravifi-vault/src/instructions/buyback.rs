@@ -191,6 +191,33 @@ pub fn buyback_finish(ctx: Context<BuybackFinish>) -> Result<()> {
     Ok(())
 }
 
+/// Closes a token account the burn PDA owns once it's empty, and gives its rent back to the
+/// rebalancer, who paid it when the redeem opened it. A buyback then costs only network
+/// fees: each run opens the accounts it redeems into and closes them once sold.
+///
+/// Never the burn PDA's GRAVI account (start and finish read it), and never an account of a
+/// share mint: a share mint's mint authority is its basket, an account this program owns, and
+/// every mint and redeem pays its burn fee into that account.
+pub fn buyback_close(ctx: Context<BuybackClose>) -> Result<()> {
+    require!(ctx.accounts.burn_account.amount == 0, VaultError::BurnAccountNotEmpty);
+    if let anchor_lang::solana_program::program_option::COption::Some(authority) = ctx.accounts.mint.mint_authority {
+        let given = ctx.accounts.mint_authority.as_ref().ok_or(error!(VaultError::BadParameter))?;
+        require_keys_eq!(given.key(), authority, VaultError::BadParameter);
+        require!(given.owner != &crate::ID, VaultError::BurnAccountKept);
+    }
+    let burn_bump = [ctx.bumps.burn_authority];
+    let burn_seeds: [&[u8]; 2] = [BURN_SEED, &burn_bump];
+    token_interface::close_account(CpiContext::new_with_signer(
+        ctx.accounts.token_program.to_account_info(),
+        token_interface::CloseAccount {
+            account: ctx.accounts.burn_account.to_account_info(),
+            destination: ctx.accounts.rebalancer.to_account_info(),
+            authority: ctx.accounts.burn_authority.to_account_info(),
+        },
+        &[&burn_seeds],
+    ))
+}
+
 // ---------------------------------------------------------------------------- accounts
 
 #[derive(Accounts)]
@@ -238,6 +265,26 @@ pub struct BuybackStart<'info> {
     #[account(address = anchor_lang::solana_program::sysvar::instructions::ID)]
     pub instructions: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct BuybackClose<'info> {
+    #[account(mut)]
+    pub rebalancer: Signer<'info>,
+    #[account(seeds = [KEEPERS_SEED], bump = keepers.bump, constraint = keepers.rebalancer == rebalancer.key() @ VaultError::NotRebalancer)]
+    pub keepers: Account<'info, Keepers>,
+    #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump)]
+    pub protocol: Account<'info, Protocol>,
+    /// CHECK: address-only PDA; signs as the owner of burn-earmarked accounts.
+    #[account(seeds = [BURN_SEED], bump)]
+    pub burn_authority: UncheckedAccount<'info>,
+    #[account(mint::token_program = token_program, constraint = mint.key() != protocol.gravi_mint @ VaultError::BurnAccountKept)]
+    pub mint: InterfaceAccount<'info, MintI>,
+    #[account(mut, token::mint = mint, token::authority = burn_authority, token::token_program = token_program)]
+    pub burn_account: InterfaceAccount<'info, TokenAccountI>,
+    /// CHECK: the mint's mint authority, required when it has one; only its key and owner are read.
+    pub mint_authority: Option<UncheckedAccount<'info>>,
+    pub token_program: Interface<'info, TokenInterface>,
 }
 
 #[derive(Accounts)]
