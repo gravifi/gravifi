@@ -300,6 +300,9 @@ pub const KEEPERS_SEED: &[u8] = b"keepers";
 pub const PRICE_SEED: &[u8] = b"price";
 pub const REBALANCE_SEED: &[u8] = b"rebalance";
 pub const BUYBACK_SEED: &[u8] = b"buyback";
+pub const BUYBACK_SOL_SEED: &[u8] = b"buyback_sol";
+/// Wrapped SOL: what the burn PDA's tokens are sold for, before the SOL buys GRAVI in one go.
+pub const NATIVE_MINT: Pubkey = pubkey!("So11111111111111111111111111111111111111112");
 
 /// Prices are USD per whole token, scaled by 1e12 (so $0.000001 keeps six digits).
 pub const PRICE_SCALE: u128 = 1_000_000_000_000;
@@ -311,10 +314,11 @@ pub const MAX_PRICE_AGE_SECS: i64 = 120;
 /// 1.62% from SOL), so at 1.5% the keeper could never buy one into a basket. The keeper asks
 /// for 1% on slices of stocks and crypto, and up to this only on slices touching a memecoin.
 pub const MAX_REBALANCE_SLIPPAGE_BPS: u16 = 300;
-/// Ceiling on a buyback slice's tolerance. Wider than a rebalance's: GRAVI first trades on
-/// pump.fun's bonding curve, whose fee alone is about 1%, and a buyback spends protocol fees
-/// a small slice at a time, never a holder's deposit.
-pub const MAX_BUYBACK_SLIPPAGE_BPS: u16 = 300;
+/// Ceiling on a buyback slice's tolerance, both its sales to SOL and its GRAVI buy. Far wider
+/// than a rebalance's: a buyback spends protocol fees, never a holder's deposit, and its fee
+/// tokens are memecoins a few pools from SOL whose fees alone pass 3% (31 Oct, the pump "LTC":
+/// 3.7% to GRAVI through three pools): sell it all, slippage aside, and burn.
+pub const MAX_BUYBACK_SLIPPAGE_BPS: u16 = 1_000;
 /// One slice may move at most this share of the basket's value, so each trade stays small
 /// against pool depth and a sandwich costs more than it earns.
 pub const MAX_SLICE_BPS: u128 = 500;
@@ -328,6 +332,11 @@ pub const MAX_LEAVING_SLICE_BPS: u128 = 5_000;
 /// slices. Paid in the sold token on top of the slice, so the basket (or the burn's budget)
 /// bears it; a leaked keeper key can take at most this per slice.
 pub const MAX_KEEPER_REFUND_E12: u128 = 50_000_000_000;
+/// The most one buyback slice pays the rebalancer back, in USD x1e12: $0.50. A buyback run
+/// sells every token the burn PDA holds for SOL, and the rebalancer is paid back for all of it
+/// at once, in SOL, out of the one GRAVI buy that follows (some 25 transactions of fees). Only
+/// ever from the burn's budget.
+pub const MAX_BUYBACK_REFUND_E12: u128 = 500_000_000_000;
 /// Sleeves closer than this to target aren't worth trading.
 pub const MIN_TRADE_DRIFT_BPS: i64 = 10;
 /// The least a basket's policy may ask for: a drift tolerance under 0.5%, or a schedule more
@@ -503,5 +512,23 @@ pub struct Buyback {
     pub gravi_before: u64,
     /// GRAVI burned by buybacks, all time, in base units.
     pub total_burned: u64,
+    pub slices: u32,
+}
+
+/// The burn PDA's sales to SOL, a singleton at `[BUYBACK_SOL_SEED]`: `buyback_sol_start` lends a
+/// token the burn PDA holds to the rebalancer, who swaps it for wrapped SOL delivered to the burn
+/// PDA's own SOL account in the same transaction; `buyback_sol_finish` checks at least the oracle
+/// value came back. Once its tokens are all SOL, the SOL buys GRAVI in one go: `buyback_start`
+/// with SOL as the token sold, then `buyback_finish` burns it.
+#[account]
+#[derive(InitSpace)]
+pub struct BuybackSol {
+    pub bump: u8,
+    pub pending: bool,
+    pub pending_slot: u64,
+    pub min_sol: u64,
+    pub sol_before: u64,
+    /// SOL these sales brought the burn PDA, all time, in lamports.
+    pub total_sol: u64,
     pub slices: u32,
 }

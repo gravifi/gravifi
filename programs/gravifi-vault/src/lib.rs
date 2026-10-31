@@ -326,8 +326,8 @@ pub mod gravifi_vault {
     /// First half of a buyback slice: lends `sell_amount` of a token the burn PDA holds to
     /// the rebalancer, who swaps it for GRAVI in the same transaction. The matching
     /// `buyback_finish` must follow and checks at least the oracle value, less
-    /// `max_slippage_bps`, came back as GRAVI. `refund`: as in `rebalance_start`, from the
-    /// burn's tokens, for the buyback's network costs.
+    /// `max_slippage_bps`, came back as GRAVI. `refund`: up to $0.50 more of the sold token
+    /// (MAX_BUYBACK_REFUND_E12), from the burn's budget, for the run's network costs.
     pub fn buyback_start(ctx: Context<BuybackStart>, sell_amount: u64, max_slippage_bps: u16, refund: u64) -> Result<()> {
         instructions::buyback::buyback_start(ctx, sell_amount, max_slippage_bps, refund)
     }
@@ -336,6 +336,19 @@ pub mod gravifi_vault {
     /// floor, then burns every GRAVI the burn PDA holds.
     pub fn buyback_finish(ctx: Context<BuybackFinish>) -> Result<()> {
         instructions::buyback::buyback_finish(ctx)
+    }
+
+    /// First half of a sale to SOL: lends `sell_amount` of a token the burn PDA holds to the
+    /// rebalancer, who swaps it for wrapped SOL delivered to the burn PDA's own SOL account in
+    /// the same transaction; `buyback_sol_finish` must follow. The SOL then buys GRAVI in one go
+    /// (`buyback_start` selling SOL). `refund`: as in `buyback_start`.
+    pub fn buyback_sol_start(ctx: Context<BuybackSolStart>, sell_amount: u64, max_slippage_bps: u16, refund: u64) -> Result<()> {
+        instructions::buyback::buyback_sol_start(ctx, sell_amount, max_slippage_bps, refund)
+    }
+
+    /// Second half of a sale to SOL: checks the SOL that came back clears the oracle floor.
+    pub fn buyback_sol_finish(ctx: Context<BuybackSolFinish>) -> Result<()> {
+        instructions::buyback::buyback_sol_finish(ctx)
     }
 
     /// Closes an empty token account the burn PDA owns and gives its rent back to the

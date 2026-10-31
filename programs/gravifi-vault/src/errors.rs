@@ -150,4 +150,6 @@ pub enum VaultError {
     BurnAccountNotEmpty,
     #[msg("The burn PDA's GRAVI and share accounts are never closed")]
     BurnAccountKept,
+    #[msg("Nothing of this program's may run between a buyback's start and finish, nor a burn redeem from inside another program")]
+    BuybackInterleaved,
 }
