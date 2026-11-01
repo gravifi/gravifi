@@ -152,4 +152,34 @@ pub enum VaultError {
     BurnAccountKept,
     #[msg("Nothing of this program's may run between a buyback's start and finish, nor a burn redeem from inside another program")]
     BuybackInterleaved,
+    #[msg("Only the strategist can do this, on a smart basket")]
+    NotStrategist,
+    #[msg("This isn't a smart basket")]
+    NotSmartBasket,
+    #[msg("This smart basket is paused: it stays on its last targets")]
+    SmartPaused,
+    #[msg("A smart basket's targets and assets are set by its strategist, within its guardrails")]
+    SmartManaged,
+    #[msg("A basket becomes smart before its first deposit, from creator control")]
+    SmartNotAllowed,
+    #[msg("Guardrails out of range: at most 20% a day, 50% a week, 35% an asset (30% unverified), 2 to 14 assets, a stop 5% to 90%, and a mandate hash")]
+    BadGuardrails,
+    #[msg("That weight is over the basket's cap for this asset")]
+    WeightAboveCap,
+    #[msg("That many assets is outside the basket's mandate")]
+    AssetCountOutOfRange,
+    #[msg("That changes the targets more than the basket allows in 24 hours")]
+    TurnoverDayCap,
+    #[msg("That changes the targets more than the basket allows in 7 days")]
+    TurnoverWeekCap,
+    #[msg("No new mandate is waiting")]
+    NoPendingMandate,
+    #[msg("A new mandate applies only after a day's notice")]
+    MandateNoticeRunning,
+    #[msg("Only the creator or the guardian can pause a smart basket, and only who paused it (or the guardian) can resume it")]
+    NotPauser,
+    #[msg("Wrong Verified record for this asset")]
+    BadVerifiedRecord,
+    #[msg("This basket's mandate has no stop, or that asset already has one")]
+    SmartStopNotAllowed,
 }

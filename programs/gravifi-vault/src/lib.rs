@@ -168,7 +168,7 @@ pub mod gravifi_vault {
     // --------------------------------------------------------------------- managing a basket
 
     /// Replace the target weights. `Immutable` rejects unconditionally, which is the whole
-    /// promise of that mode.
+    /// promise of that mode; a smart basket's targets are its strategist's (`smart_set_targets`).
     pub fn set_targets(ctx: Context<Reconfigure>, target_bps: Vec<u16>) -> Result<()> {
         instructions::basket::set_targets(ctx, target_bps)
     }
@@ -355,6 +355,67 @@ pub mod gravifi_vault {
     /// rebalancer, who paid it. Never the burn PDA's GRAVI account, never a share mint's.
     pub fn buyback_close(ctx: Context<BuybackClose>) -> Result<()> {
         instructions::buyback::buyback_close(ctx)
+    }
+
+    // ------------------------------------------------------------------------- smart baskets
+
+    /// Names the strategist, the app's key that runs smart baskets within their guardrails
+    /// (`Pubkey::default()` removes it), and sets the protocol fee on smart baskets' mints and
+    /// redeems, at most `MAX_SMART_FEE_BPS` (`SMART_FEE_DEFAULT_BPS` until set). Protocol
+    /// authority only.
+    pub fn set_smart_config(ctx: Context<SetSmartConfig>, strategist: Pubkey, fee_bps: u16) -> Result<()> {
+        instructions::smart::set_smart_config(ctx, strategist, fee_bps)
+    }
+
+    /// Marks an asset GraviFi Verified, or takes the mark away. A smart basket holds an asset
+    /// without it to at most its Unverified cap. Protocol authority only.
+    pub fn set_verified(ctx: Context<SetVerified>, verified: bool) -> Result<()> {
+        instructions::smart::set_verified(ctx, verified)
+    }
+
+    /// Makes a creator-managed basket smart, before its first deposit, with its mandate's hash
+    /// and guardrails. Creator only.
+    pub fn enable_smart(ctx: Context<EnableSmart>, mandate_hash: [u8; 32], guard: Guardrails) -> Result<()> {
+        instructions::smart::enable_smart(ctx, mandate_hash, guard)
+    }
+
+    /// Proposes a new mandate and guardrails, or handing the basket back to creator control
+    /// (`leave`); it applies after a day's notice. An all-zero hash withdraws the waiting one.
+    /// Creator only.
+    pub fn propose_mandate(ctx: Context<CreatorSmart>, mandate_hash: [u8; 32], guard: Guardrails, leave: bool) -> Result<()> {
+        instructions::smart::propose_mandate(ctx, mandate_hash, guard, leave)
+    }
+
+    /// Applies the waiting mandate once its notice is over. Permissionless.
+    pub fn apply_mandate(ctx: Context<ApplyMandate>) -> Result<()> {
+        instructions::smart::apply_mandate(ctx)
+    }
+
+    /// Pauses (or resumes) the strategist on a smart basket, which stays on its last targets.
+    /// The creator or the guardian.
+    pub fn set_smart_pause(ctx: Context<SetSmartPause>, paused: bool) -> Result<()> {
+        instructions::smart::set_smart_pause(ctx, paused)
+    }
+
+    /// The strategist sets a smart basket's targets, within its guardrails. Remaining accounts:
+    /// each constituent's Verified record address, in order.
+    pub fn smart_set_targets<'info>(ctx: Context<'_, '_, 'info, 'info, StrategistBasket<'info>>, target_bps: Vec<u16>) -> Result<()> {
+        instructions::smart::smart_set_targets(ctx, target_bps)
+    }
+
+    /// The strategist adds a listed asset to a smart basket at 0%. No GRAVI is burned.
+    pub fn smart_add_constituent(ctx: Context<StrategistAdd>) -> Result<()> {
+        instructions::smart::smart_add_constituent(ctx)
+    }
+
+    /// The strategist drops an asset a smart basket has sold out.
+    pub fn smart_remove_constituent(ctx: Context<StrategistBasket>, index: u8) -> Result<()> {
+        instructions::smart::smart_remove_constituent(ctx, index)
+    }
+
+    /// The strategist puts the mandate's stop on an asset of a smart basket that has none.
+    pub fn smart_set_stop(ctx: Context<StrategistStop>) -> Result<()> {
+        instructions::smart::smart_set_stop(ctx)
     }
 
     // ------------------------------------------------------------------------- share token

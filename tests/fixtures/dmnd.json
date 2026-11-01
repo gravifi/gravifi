@@ -1,0 +1,134 @@
+{
+ "_note": "Saved DMND.dev answers, 30 Oct 2026 (BONK and WIF), trimmed to the fields used; no key.",
+ "stats": {
+  "data": [
+   {
+    "mint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+    "found": true,
+    "stats": {
+     "mint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+     "name": "Bonk",
+     "symbol": "Bonk",
+     "image_url": "https://arweave.net/hQiPZOsRZXGXBJd_82PhVdlM_hACsT_q6wqwf5cSY7I",
+     "liquidity_usd": 711795.585601256,
+     "buy_volume_1h": "169.0630373621857004947285967012571722524000",
+     "sell_volume_1h": "121.918250476238741525430498421530176000",
+     "buy_volume_6h": "1191.0849184848133035324411185308118444804000",
+     "sell_volume_6h": "1216.370357713304984515774358011571372297",
+     "buy_volume_24h": "6591.6140545380874710307013833459291133191000",
+     "sell_volume_24h": "5808.8928755616441252310525315015756288343000",
+     "holder_count": 275643,
+     "holder_change_24h": 229,
+     "top10_pct": "38.83563400",
+     "dev_pct": null,
+     "snipers_pct": null,
+     "bundlers_pct": null,
+     "insiders_pct": null,
+     "last_trade_price_usd": 2.9698441095616393e-06
+    }
+   },
+   {
+    "mint": "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",
+    "found": true,
+    "stats": {
+     "mint": "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",
+     "name": "dogwifhat",
+     "symbol": "$WIF",
+     "image_url": "https://bafkreibk3covs5ltyqxa272uodhculbr6kea6betidfwy3ajsav2vjzyum.ipfs.nftstorage.link",
+     "liquidity_usd": 5281044.93101948,
+     "buy_volume_1h": "115.368934611423637295248768103207064000",
+     "sell_volume_1h": "132.0303224835716967060080976700",
+     "buy_volume_6h": "1109.310950397682338758897207691273857000",
+     "sell_volume_6h": "1065.501599166446288482238988606028136000",
+     "buy_volume_24h": "4702.5429351756985397695437403056985258493000",
+     "sell_volume_24h": "3693.675804568724411195054365702353311036",
+     "holder_count": 250956,
+     "holder_change_24h": null,
+     "top10_pct": "44.20973800",
+     "dev_pct": null,
+     "snipers_pct": null,
+     "bundlers_pct": null,
+     "insiders_pct": null,
+     "last_trade_price_usd": 0.17665287633186233
+    }
+   }
+  ],
+  "indexed_slot": 463452084,
+  "sol_usd": 95.44803628567733,
+  "sol_usd_updated_at": "2026-10-30T22:24:15Z"
+ },
+ "ohlcv1h": {
+  "data": [
+   {
+    "bucket": "2026-10-30T17:00:00Z",
+    "close_usd": "0.000002946392335597590172",
+    "all_pool_known_volume_usd": "37798.9922085774229271368893898471",
+    "open_usd": "0.000002958236746424498668"
+   },
+   {
+    "bucket": "2026-10-30T18:00:00Z",
+    "close_usd": "0.000002946269665955729474",
+    "all_pool_known_volume_usd": "25836.83224853923543619742061325392",
+    "open_usd": "0.000002958236762750660492"
+   },
+   {
+    "bucket": "2026-10-30T19:00:00Z",
+    "close_usd": "0.00000295837905482232094",
+    "all_pool_known_volume_usd": "49908.26589464974959415237231072944",
+    "open_usd": "0.000002946115546651739681"
+   },
+   {
+    "bucket": "2026-10-30T20:00:00Z",
+    "close_usd": "0.00000295838106716271027",
+    "all_pool_known_volume_usd": "39243.69301723636400896857332475232",
+    "open_usd": "0.000002982225384148895956"
+   },
+   {
+    "bucket": "2026-10-30T21:00:00Z",
+    "close_usd": "0.000002969665506365409411",
+    "all_pool_known_volume_usd": "36722.23810893606004169105908639145",
+    "open_usd": "0.000002958385822611070788"
+   }
+  ]
+ },
+ "ohlcv1d": {
+  "data": [
+   {
+    "bucket": "2026-10-24T00:00:00Z",
+    "close_usd": "0.000003165322103935275545",
+    "all_pool_known_volume_usd": "660637.97961928096794428525461948981",
+    "open_usd": "0.000003153337324599104577"
+   },
+   {
+    "bucket": "2026-10-25T00:00:00Z",
+    "close_usd": "0.000003005915312438122002",
+    "all_pool_known_volume_usd": "972457.85026764438665154680013525094",
+    "open_usd": "0.000003140350963146949873"
+   },
+   {
+    "bucket": "2026-10-26T00:00:00Z",
+    "close_usd": "0.000003034171021727375459",
+    "all_pool_known_volume_usd": "558348.84175986238667755794107008111",
+    "open_usd": "0.000002993745441052927456"
+   },
+   {
+    "bucket": "2026-10-27T00:00:00Z",
+    "close_usd": "0.000003054320560958111427",
+    "all_pool_known_volume_usd": "400507.12529152823296239887356689568",
+    "open_usd": "0.000003054189251596052584"
+   },
+   {
+    "bucket": "2026-10-28T00:00:00Z",
+    "close_usd": "0.000003152950758933126697",
+    "all_pool_known_volume_usd": "2803924.75285220639132786289013279904",
+    "open_usd": "0.000003041838368514402027"
+   },
+   {
+    "bucket": "2026-10-29T00:00:00Z",
+    "close_usd": "0.00000280886467218075423",
+    "all_pool_known_volume_usd": "1370173.30469429303992302579565338248",
+    "open_usd": "0.00000315301889661166051"
+   }
+  ]
+ }
+}

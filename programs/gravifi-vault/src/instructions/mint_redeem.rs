@@ -144,7 +144,7 @@ pub fn redeem_in_kind<'info>(
     let (quads, extra) = split_quads(ctx.remaining_accounts, ctx.accounts.basket.constituent_count)?;
     let invited = invited(extra, &ctx.accounts.payer.key())?;
 
-    let (fee, burn_fee, treasury_fee) = protocol_cut(shares, &ctx.accounts.protocol, invited)?;
+    let (fee, burn_fee, treasury_fee) = protocol_cut(shares, &ctx.accounts.protocol, &ctx.accounts.basket, invited)?;
     require!(shares > fee, VaultError::BelowFee);
     for (to, amount) in [
         (ctx.accounts.burn_shares.to_account_info(), burn_fee),
@@ -328,7 +328,7 @@ pub(crate) fn collect_and_mint<'info>(d: Deposit<'_, 'info>, remaining: &[Accoun
 
     // The deposit covers all `shares`; the protocol's cut of them goes to the burn PDA
     // and the treasury, so units and collateral are untouched.
-    let (fee, burn_fee, treasury_fee) = protocol_cut(shares, d.protocol, d.invited)?;
+    let (fee, burn_fee, treasury_fee) = protocol_cut(shares, d.protocol, d.basket, d.invited)?;
     require!(shares > fee, VaultError::BelowFee);
     let program = d.share_token_program.to_account_info();
     let mint = d.share_mint.to_account_info();
@@ -386,14 +386,16 @@ pub(crate) fn flow_fee(shares: u64, fee_bps: u16) -> Result<u64> {
     u64::try_from(fee).map_err(|_| VaultError::MathOverflow.into())
 }
 
-/// The protocol's cut of `shares` and how it splits: `(fee, burn, treasury)`. An invited
-/// payer pays half the rate, rounded up, all of it to the treasury.
-pub(crate) fn protocol_cut(shares: u64, protocol: &Protocol, invited: bool) -> Result<(u64, u64, u64)> {
+/// The protocol's cut of `shares` and how it splits: `(fee, burn, treasury)`. A smart basket
+/// pays the Smart-mode fee (`smart_fee_bps`), split the same way. An invited payer pays half
+/// the rate, rounded up, all of it to the treasury.
+pub(crate) fn protocol_cut(shares: u64, protocol: &Account<Protocol>, basket: &Basket, invited: bool) -> Result<(u64, u64, u64)> {
+    let rate = if basket.control == ControlMode::Smart { smart_fee_bps(&protocol.to_account_info()) } else { protocol.protocol_fee_bps };
     if invited {
-        let fee = flow_fee(shares, protocol.protocol_fee_bps.div_ceil(2))?;
+        let fee = flow_fee(shares, rate.div_ceil(2))?;
         return Ok((fee, 0, fee));
     }
-    let fee = flow_fee(shares, protocol.protocol_fee_bps)?;
+    let fee = flow_fee(shares, rate)?;
     let (burn, treasury) = split_protocol_fee(fee, protocol.burn_share_bps)?;
     Ok((fee, burn, treasury))
 }

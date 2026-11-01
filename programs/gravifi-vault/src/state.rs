@@ -65,6 +65,11 @@ pub enum ControlMode {
     Dao,
     /// Nothing may change the mandate. Enforced here, not merely in the UI.
     Immutable,
+    /// A smart basket: the strategist (the app's key, `Strategist`) sets its targets and adds and
+    /// removes assets, only within the guardrails on its `Smart` account; the creator changes
+    /// those with a day's notice, and the creator or the guardian can pause it. Mints and redeems
+    /// pay the Smart-mode protocol fee (`smart_fee_bps`). Entered with `enable_smart`.
+    Smart,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug, InitSpace)]
@@ -292,6 +297,138 @@ pub fn load_asset_entry(ai: &AccountInfo) -> Result<AssetEntry> {
         .map_err(|_| VaultError::AssetNotListed)?;
     require_keys_eq!(*ai.key, expected, VaultError::AssetNotListed);
     Ok(entry)
+}
+
+// --------------------------------------------------------------------------- smart baskets
+
+/// The protocol fee on a smart basket's mints and redeems, in bps of the shares: double the
+/// normal one, for the daily reviews. It sits after the burn-exempt wallet, in the protocol
+/// account's tail, written by `set_smart_fee`; until then it's `SMART_FEE_DEFAULT_BPS`.
+pub const SMART_FEE_OFFSET: usize = BURN_EXEMPT_OFFSET + 32;
+/// [fee u16 little-endian][1 once set].
+pub const SMART_FEE_LEN: usize = 3;
+pub const SMART_FEE_DEFAULT_BPS: u16 = 80;
+/// The ceiling on the Smart-mode fee, as `MAX_PROTOCOL_FEE_BPS` is on the normal one.
+pub const MAX_SMART_FEE_BPS: u16 = 100;
+
+pub fn smart_fee_bps(protocol: &AccountInfo) -> u16 {
+    let Ok(data) = protocol.try_borrow_data() else { return SMART_FEE_DEFAULT_BPS };
+    match data.get(SMART_FEE_OFFSET..SMART_FEE_OFFSET + SMART_FEE_LEN) {
+        Some([lo, hi, 1]) => u16::from_le_bytes([*lo, *hi]),
+        _ => SMART_FEE_DEFAULT_BPS,
+    }
+}
+
+/// The strategist, at `[STRATEGIST_SEED]`: the app's key that runs smart baskets. It may set a
+/// smart basket's targets, add and remove its assets and put the mandate's stop on them, only
+/// within the basket's guardrails. It can't move a token, change a fee or a guardrail, or touch
+/// any other basket. `set_strategist` names it (`Pubkey::default()` removes it), protocol
+/// authority only.
+pub const STRATEGIST_SEED: &[u8] = b"strategist";
+
+#[account]
+#[derive(InitSpace)]
+pub struct Strategist {
+    pub bump: u8,
+    pub strategist: Pubkey,
+}
+
+/// `[VERIFIED_SEED, mint]` exists for each asset the protocol authority vouches for (GraviFi
+/// Verified, `set_verified`). A smart basket holds an asset without one to at most its guard's
+/// `max_unverified_bps`.
+pub const VERIFIED_SEED: &[u8] = b"verified";
+
+#[account]
+#[derive(InitSpace)]
+pub struct VerifiedAsset {
+    pub bump: u8,
+    pub mint: Pubkey,
+}
+
+pub const SMART_SEED: &[u8] = b"smart";
+/// Ceilings on a smart basket's guardrails, in code: a creator may set tighter ones, never
+/// looser. Target changes (the sum of the increases) per rolling 24 hours and 7 days, and the
+/// weight of one asset, Verified and not.
+pub const SMART_MAX_DAY_BPS: u16 = 2_000;
+pub const SMART_MAX_WEEK_BPS: u16 = 5_000;
+pub const SMART_MAX_WEIGHT_BPS: u16 = 3_500;
+pub const SMART_MAX_UNVERIFIED_BPS: u16 = 3_000;
+/// How long a new mandate waits before it applies, so holders who disagree can redeem first.
+pub const MANDATE_NOTICE_SECS: i64 = 86_400;
+/// The turnover window: one bucket per hour, 7 days.
+pub const TURNOVER_HOURS: usize = 168;
+
+/// What the strategist must stay within, set by the creator.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Default, Debug, PartialEq, Eq, InitSpace)]
+pub struct Guardrails {
+    /// Most the targets may change (sum of the increases) in any 24 hours and any 7 days.
+    pub max_day_bps: u16,
+    pub max_week_bps: u16,
+    /// Most one asset may weigh, and one without a Verified record.
+    pub max_weight_bps: u16,
+    pub max_unverified_bps: u16,
+    /// How many assets may have a target above 0%: 2 to MAX_LAUNCH_CONSTITUENTS (14).
+    pub min_assets: u8,
+    pub max_assets: u8,
+    /// The stop the strategist puts on an asset (`smart_set_stop`): this far below the price
+    /// when set, trailing or not. 0: none.
+    pub stop_bps: u16,
+    pub stop_trailing: bool,
+}
+
+/// Who paused a smart basket.
+pub const PAUSED_BY_CREATOR: u8 = 1;
+pub const PAUSED_BY_GUARDIAN: u8 = 2;
+
+/// A smart basket's rules, at `[SMART_SEED, basket]`.
+#[account]
+#[derive(InitSpace)]
+pub struct Smart {
+    pub bump: u8,
+    pub basket: Pubkey,
+    /// sha256 of the mandate the app reviews the basket against (its JSON), so holders can
+    /// check which rules it follows.
+    pub mandate_hash: [u8; 32],
+    pub guard: Guardrails,
+    /// 0 while running; else who paused it (PAUSED_BY_*). Paused, the strategist can't act and
+    /// the basket stays on its last targets; stops and rebalancing go on.
+    pub paused_by: u8,
+    /// A mandate the creator proposed, applying from `pending_at` (0: none). `pending_leave`
+    /// returns the basket to its creator's hands instead.
+    pub pending_at: i64,
+    pub pending_hash: [u8; 32],
+    pub pending_guard: Guardrails,
+    pub pending_leave: bool,
+    /// Target changes per hour over the last `TURNOVER_HOURS`, bucket `hour % TURNOVER_HOURS`;
+    /// `hour` is the newest hour (unix time / 3600) the buckets reach.
+    pub hour: i64,
+    pub turnover: [u16; TURNOVER_HOURS],
+    /// Target changes the strategist made, all time.
+    pub changes: u32,
+}
+
+impl Smart {
+    /// Moves the window up to `now_hour`, emptying the buckets of hours that left it.
+    pub fn advance(&mut self, now_hour: i64) {
+        if now_hour <= self.hour {
+            return;
+        }
+        if now_hour - self.hour >= TURNOVER_HOURS as i64 {
+            self.turnover = [0; TURNOVER_HOURS];
+        } else {
+            for h in (self.hour + 1)..=now_hour {
+                self.turnover[h.rem_euclid(TURNOVER_HOURS as i64) as usize] = 0;
+            }
+        }
+        self.hour = now_hour;
+    }
+
+    /// Changes in the last 24 hours (this one included) and the last 7 days, once advanced.
+    pub fn used(&self) -> (u32, u32) {
+        let day = (0..24).map(|k| self.turnover[(self.hour - k).rem_euclid(TURNOVER_HOURS as i64) as usize] as u32).sum();
+        let week = self.turnover.iter().map(|t| *t as u32).sum();
+        (day, week)
+    }
 }
 
 // ---------------------------------------------------------------------------- rebalancing

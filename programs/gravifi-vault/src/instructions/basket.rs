@@ -47,6 +47,8 @@ pub fn initialize_basket<'info>(
     require!(args.mgmt_fee_bps <= MAX_CREATOR_FEE_BPS, VaultError::FeeTooHigh);
     check_policy(args.rebalance_mode, args.interval_secs, args.drift_bps)?;
     require!(args.control != ControlMode::Dao, VaultError::GovernanceRemoved);
+    // A basket becomes smart after it's created (`enable_smart`), which writes its guardrails.
+    require!(args.control != ControlMode::Smart, VaultError::SmartNotAllowed);
     require!(
         ctx.remaining_accounts.len() == n * 2,
         VaultError::BadRemainingAccounts
@@ -165,7 +167,7 @@ fn burn_per_asset<'info>(
 /// Replace the target weights. `Immutable` rejects unconditionally, which is the whole
 /// promise of that mode.
 pub fn set_targets(ctx: Context<Reconfigure>, target_bps: Vec<u16>) -> Result<()> {
-    authorise_mandate(&ctx.accounts.basket, &ctx.accounts.authority)?;
+    authorise_recipe(&ctx.accounts.basket, &ctx.accounts.authority)?;
     let count = ctx.accounts.basket.constituent_count as usize;
     require!(target_bps.len() == count, VaultError::BadRemainingAccounts);
     let sum: u32 = target_bps.iter().map(|b| *b as u32).sum();
@@ -186,20 +188,14 @@ pub fn set_targets(ctx: Context<Reconfigure>, target_bps: Vec<u16>) -> Result<()
 /// so every instruction that reads all the vaults keeps working. The asset's GRAVI burn is
 /// paid here, as if the basket had been created with it.
 pub fn add_constituent(ctx: Context<AddConstituent>) -> Result<()> {
-    authorise_mandate(&ctx.accounts.basket, &ctx.accounts.authority)?;
-    let basket_key = ctx.accounts.basket.key();
-    let mint_ai = ctx.accounts.mint.to_account_info();
-    let mint_key = mint_ai.key();
-    let basket = &ctx.accounts.basket;
-    require!((basket.constituent_count as usize) < MAX_LAUNCH_CONSTITUENTS, VaultError::TooManyConstituents);
-    require!(basket.active().iter().all(|c| c.mint != mint_key), VaultError::DuplicateConstituent);
-
-    let entry = load_asset_entry(&ctx.accounts.asset_entry.to_account_info())?;
-    require_keys_eq!(entry.mint, mint_key, VaultError::AssetNotListed);
-    require!(entry.status == AssetStatus::Listed, VaultError::AssetNotListed);
-    assert_no_active_transfer_hook(&mint_ai)?;
-    TransferFee::of(&mint_ai)?.assert_within_cap()?;
-    read_vault(&ctx.accounts.vault.to_account_info(), &basket_key, &mint_key)?;
+    authorise_recipe(&ctx.accounts.basket, &ctx.accounts.authority)?;
+    let mint_key = ctx.accounts.mint.key();
+    check_addable(
+        &ctx.accounts.basket,
+        &ctx.accounts.mint.to_account_info(),
+        &ctx.accounts.asset_entry.to_account_info(),
+        &ctx.accounts.vault.to_account_info(),
+    )?;
 
     // An added asset pays its GRAVI burn as if the basket had started with it.
     let a = &mut *ctx.accounts;
@@ -226,8 +222,27 @@ pub fn add_constituent(ctx: Context<AddConstituent>) -> Result<()> {
 /// doesn't count: the keeper's sweep (`sweep_start`) swaps it into one of the basket's own
 /// assets, for the holders, as it does with airdrops.
 pub fn remove_constituent(ctx: Context<Reconfigure>, index: u8) -> Result<()> {
-    authorise_mandate(&ctx.accounts.basket, &ctx.accounts.authority)?;
-    let basket = &mut ctx.accounts.basket;
+    authorise_recipe(&ctx.accounts.basket, &ctx.accounts.authority)?;
+    drop_emptied(&mut ctx.accounts.basket, index)
+}
+
+/// What adding `mint` to `basket` needs, whoever adds it: a listed asset not already in it, room
+/// for one more, no active transfer hook or fee past the cap, and the basket's vault for it.
+pub(crate) fn check_addable(basket: &Account<Basket>, mint_ai: &AccountInfo, entry_ai: &AccountInfo, vault_ai: &AccountInfo) -> Result<()> {
+    let mint_key = mint_ai.key();
+    require!((basket.constituent_count as usize) < MAX_LAUNCH_CONSTITUENTS, VaultError::TooManyConstituents);
+    require!(basket.active().iter().all(|c| c.mint != mint_key), VaultError::DuplicateConstituent);
+    let entry = load_asset_entry(entry_ai)?;
+    require_keys_eq!(entry.mint, mint_key, VaultError::AssetNotListed);
+    require!(entry.status == AssetStatus::Listed, VaultError::AssetNotListed);
+    assert_no_active_transfer_hook(mint_ai)?;
+    TransferFee::of(mint_ai)?.assert_within_cap()?;
+    read_vault(vault_ai, &basket.key(), &mint_key)?;
+    Ok(())
+}
+
+/// Removes sleeve `index`, which must be at 0% and sold out.
+pub(crate) fn drop_emptied(basket: &mut Basket, index: u8) -> Result<()> {
     let (i, n) = (index as usize, basket.constituent_count as usize);
     require!(i < n, VaultError::BadParameter);
     require!(n > 2, VaultError::TooFewConstituents);
@@ -381,15 +396,24 @@ pub(crate) fn check_policy(mode: RebalanceMode, interval_secs: i64, drift_bps: u
     Ok(())
 }
 
+/// The creator's changes to a basket: its policy, splits and stops. A smart basket's creator keeps
+/// these; what it holds is the strategist's (`authorise_recipe`).
 pub(crate) fn authorise_mandate(basket: &Account<Basket>, authority: &Signer) -> Result<()> {
     match basket.control {
         ControlMode::Immutable => Err(VaultError::BasketImmutable.into()),
-        ControlMode::Creator => {
+        ControlMode::Creator | ControlMode::Smart => {
             require_keys_eq!(authority.key(), basket.creator, VaultError::NotMandateAuthority);
             Ok(())
         }
         ControlMode::Dao => Err(VaultError::GovernanceRemoved.into()),
     }
+}
+
+/// The creator's changes to what a basket holds (targets, assets): creator control only. A smart
+/// basket's go through the strategist and its guardrails, never around them.
+pub(crate) fn authorise_recipe(basket: &Account<Basket>, authority: &Signer) -> Result<()> {
+    require!(basket.control != ControlMode::Smart, VaultError::SmartManaged);
+    authorise_mandate(basket, authority)
 }
 
 // ---------------------------------------------------------------------------- accounts

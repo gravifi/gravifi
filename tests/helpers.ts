@@ -207,6 +207,10 @@ export const pda = {
   guard: (mint: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("guard"), mint.toBuffer()], VAULT_ID)[0],
   invite: (wallet: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("invite"), wallet.toBuffer()], VAULT_ID)[0],
   lister: () => PublicKey.findProgramAddressSync([Buffer.from("lister")], VAULT_ID)[0],
+  strategist: () => PublicKey.findProgramAddressSync([Buffer.from("strategist")], VAULT_ID)[0],
+  smart: (basket: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("smart"), basket.toBuffer()], VAULT_ID)[0],
+  verified: (mint: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("verified"), mint.toBuffer()], VAULT_ID)[0],
+  stop: (basket: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("stop"), basket.toBuffer()], VAULT_ID)[0],
 };
 
 /** Posts prices as the keeper does once they're bounded: a price more than 20% from its
