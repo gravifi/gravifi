@@ -16,10 +16,12 @@ import {
   createMint,
   expectError,
   fund,
+  mintTo,
   pda,
   postPrices,
   rpc,
   setup,
+  supply,
   warp,
   type Ctx,
 } from "./helpers.ts";
@@ -60,8 +62,24 @@ async function setVerified(ctx: Ctx, mint: PublicKey, verified: boolean, authori
   );
 }
 
-function enableSmart(ctx: Ctx, basket: PublicKey, creator: Keypair, guard: Guard = GUARD, mandate = MANDATE) {
-  return rpc(ctx, ctx.vault.methods.enableSmart(mandate, guard).accountsPartial({ creator: creator.publicKey, basket, smart: pda.smart(basket) }), [creator]);
+type Gravi = { mint: PublicKey; account: PublicKey };
+
+/** enable_smart, naming the creator's GRAVI accounts given (null leaves them out). */
+function enableSmart(ctx: Ctx, basket: PublicKey, creator: Keypair, guard: Guard = GUARD, mandate = MANDATE, gravi: Gravi | null = null) {
+  const accounts = gravi ? { graviMint: gravi.mint, creatorGravi: gravi.account, graviTokenProgram: TOKEN_PROGRAM_ID } : NO_GRAVI;
+  return rpc(
+    ctx,
+    ctx.vault.methods.enableSmart(mandate, guard).accountsPartial({ creator: creator.publicKey, basket, smart: pda.smart(basket), protocol: pda.protocol(), creationBurn: pda.creationBurn(), ...accounts }),
+    [creator],
+  );
+}
+
+async function setSmartBurn(ctx: Ctx, graviMint: PublicKey, amount: bigint, authority = ctx.payer) {
+  await rpc(
+    ctx,
+    ctx.vault.methods.setSmartBurn(new BN(amount.toString())).accountsPartial({ authority: authority.publicKey, protocol: pda.protocol(), graviMint }),
+    [authority],
+  );
 }
 
 /** Four listed assets at 25% each, A and B Verified, C and D not, and a fifth (E) listed with the
@@ -551,6 +569,77 @@ describe("smart baskets: the fee", () => {
     await setSmartConfig(w.ctx, w.creator.publicKey, 100);
     const fee = (SEED_SHARES * 40n + 9_999n) / 10_000n;
     assert.equal(balance(w.ctx, ata(w.shareMint, w.creator.publicKey)), SEED_SHARES - fee);
+  });
+});
+
+describe("smart baskets: the smart burn", () => {
+  // The test GRAVI mint has 9 decimals.
+  const GRAVI = 1_000_000_000n;
+  const creationBurned = async (ctx: Ctx) => BigInt(((await (ctx.vault.account as any).creationBurn.fetch(pda.creationBurn())) as any).totalBurned.toString());
+
+  it("starts off: a basket becomes smart without any GRAVI", async () => {
+    const w = await world({ seed: false });
+    await enableSmart(w.ctx, w.basket, w.creator, { ...GUARD, minAssets: 2 });
+    assert.ok(await w.ctx.vault.account.smart.fetch(pda.smart(w.basket)));
+  });
+
+  it("is set by the protocol authority, up to 1,000,000 GRAVI, against GRAVI's own mint", async () => {
+    const w = await world({ seed: false });
+    const stranger = fund(w.ctx);
+    await expectError(setSmartBurn(w.ctx, w.graviMint, GRAVI, stranger), "NotProtocolAuthority");
+    await expectError(setSmartBurn(w.ctx, w.graviMint, 1_000_000n * GRAVI + 1n), "CreationBurnTooHigh");
+    await expectError(setSmartBurn(w.ctx, await createMint(w.ctx, 9), GRAVI), "GraviMintNotSet");
+    await setSmartBurn(w.ctx, w.graviMint, 1_000_000n * GRAVI);
+  });
+
+  it("burns once from the creator on becoming smart, counted with the creation burn; never without the GRAVI", async () => {
+    const w = await world({ seed: false });
+    const amount = 50_000n * GRAVI;
+    await setSmartBurn(w.ctx, w.graviMint, amount);
+    const guard = { ...GUARD, minAssets: 2 };
+    // Without the GRAVI accounts, or short of GRAVI, it doesn't become smart.
+    await expectError(enableSmart(w.ctx, w.basket, w.creator, guard), "CreationBurnAccountsMissing");
+    const account = await createAta(w.ctx, w.graviMint, w.creator.publicKey);
+    await mintTo(w.ctx, w.graviMint, account, amount - 1n);
+    await expectError(enableSmart(w.ctx, w.basket, w.creator, guard, MANDATE, { mint: w.graviMint, account }), "insufficient funds");
+    await mintTo(w.ctx, w.graviMint, account, 6n);
+    // Another mint passed as GRAVI is refused.
+    const other = await createMint(w.ctx, 9);
+    const otherAccount = await createAta(w.ctx, other, w.creator.publicKey);
+    await mintTo(w.ctx, other, otherAccount, amount);
+    await expectError(enableSmart(w.ctx, w.basket, w.creator, guard, MANDATE, { mint: other, account: otherAccount }), "GraviMintNotSet");
+
+    const supplyBefore = supply(w.ctx, w.graviMint);
+    const countedBefore = await creationBurned(w.ctx);
+    await enableSmart(w.ctx, w.basket, w.creator, guard, MANDATE, { mint: w.graviMint, account });
+    assert.equal(balance(w.ctx, account), 5n);
+    assert.equal(supply(w.ctx, w.graviMint), supplyBefore - amount);
+    assert.equal(await creationBurned(w.ctx), countedBefore + amount);
+  });
+
+  it("burns nothing from the burn-exempt wallet (the team's)", async () => {
+    const w = await world({ seed: false });
+    await setSmartBurn(w.ctx, w.graviMint, 50_000n * GRAVI);
+    await rpc(w.ctx, w.ctx.vault.methods.setBurnExempt(w.creator.publicKey).accountsPartial({ authority: w.ctx.payer.publicKey, protocol: pda.protocol() }));
+    await enableSmart(w.ctx, w.basket, w.creator, { ...GUARD, minAssets: 2 });
+    assert.ok(await w.ctx.vault.account.smart.fetch(pda.smart(w.basket)));
+  });
+
+  it("sits after the Smart-mode fee: setting one keeps the other", async () => {
+    const w = await world({ seed: false });
+    const raw = () => Buffer.from(w.ctx.svm.getAccount(pda.protocol())!.data);
+    // Set before any fee: the fee's bytes stay unset, so it reads as the default.
+    await setSmartBurn(w.ctx, w.graviMint, 7n);
+    let r = raw();
+    assert.equal(r.readBigUInt64LE(r.length - 8), 7n);
+    assert.equal(r[r.length - 9], 0);
+    await setSmartConfig(w.ctx, fund(w.ctx).publicKey, 90);
+    await setSmartBurn(w.ctx, w.graviMint, 9n);
+    await setSmartConfig(w.ctx, fund(w.ctx).publicKey, 70);
+    r = raw();
+    assert.equal(r.readBigUInt64LE(r.length - 8), 9n);
+    assert.equal(r.readUInt16LE(r.length - 11), 70);
+    assert.equal(r[r.length - 9], 1);
   });
 });
 

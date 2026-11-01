@@ -367,6 +367,13 @@ pub mod gravifi_vault {
         instructions::smart::set_smart_config(ctx, strategist, fee_bps)
     }
 
+    /// Sets the GRAVI a creator burns once on making a basket smart (`enable_smart`), on top of
+    /// the per-asset creation burn: 0 turns it off, at most `MAX_SMART_BURN_TOKENS` whole GRAVI.
+    /// Protocol authority only.
+    pub fn set_smart_burn(ctx: Context<SetSmartBurn>, amount: u64) -> Result<()> {
+        instructions::smart::set_smart_burn(ctx, amount)
+    }
+
     /// Marks an asset GraviFi Verified, or takes the mark away. A smart basket holds an asset
     /// without it to at most its Unverified cap. Protocol authority only.
     pub fn set_verified(ctx: Context<SetVerified>, verified: bool) -> Result<()> {
@@ -374,7 +381,8 @@ pub mod gravifi_vault {
     }
 
     /// Makes a creator-managed basket smart, before its first deposit, with its mandate's hash
-    /// and guardrails. Creator only.
+    /// and guardrails, burning the smart burn (`set_smart_burn`) from the creator's GRAVI.
+    /// Creator only.
     pub fn enable_smart(ctx: Context<EnableSmart>, mandate_hash: [u8; 32], guard: Guardrails) -> Result<()> {
         instructions::smart::enable_smart(ctx, mandate_hash, guard)
     }

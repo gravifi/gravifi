@@ -123,10 +123,10 @@ pub fn initialize_basket<'info>(
 }
 
 /// The creator's GRAVI accounts, named only while the creation burn is on.
-struct GraviAccounts<'a, 'info> {
-    mint: Option<&'a UncheckedAccount<'info>>,
-    from: Option<&'a UncheckedAccount<'info>>,
-    program: Option<&'a Interface<'info, TokenInterface>>,
+pub(crate) struct GraviAccounts<'a, 'info> {
+    pub mint: Option<&'a UncheckedAccount<'info>>,
+    pub from: Option<&'a UncheckedAccount<'info>>,
+    pub program: Option<&'a Interface<'info, TokenInterface>>,
 }
 
 /// Burns the per-asset GRAVI for `assets` assets from `owner`'s account and counts it. The
@@ -141,6 +141,20 @@ fn burn_per_asset<'info>(
     exempt: Option<Pubkey>,
 ) -> Result<()> {
     let amount = c.per_asset.checked_mul(assets).ok_or(VaultError::MathOverflow)?;
+    burn_gravi(c, protocol, gravi, owner, amount, new_basket, exempt)
+}
+
+/// Burns `amount` GRAVI from `owner`'s account and counts it with the creation burn. The
+/// burn-exempt wallet burns nothing.
+pub(crate) fn burn_gravi<'info>(
+    c: &mut CreationBurn,
+    protocol: &Protocol,
+    gravi: GraviAccounts<'_, 'info>,
+    owner: AccountInfo<'info>,
+    amount: u64,
+    new_basket: bool,
+    exempt: Option<Pubkey>,
+) -> Result<()> {
     if amount == 0 || exempt == Some(owner.key()) {
         return Ok(());
     }

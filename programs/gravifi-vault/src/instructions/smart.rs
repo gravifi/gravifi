@@ -10,9 +10,10 @@
 //! between the burn and the treasury as the normal one is.
 
 use anchor_lang::prelude::*;
+use anchor_spl::token_interface::{Mint as MintI, TokenInterface};
 
 use crate::errors::VaultError;
-use crate::instructions::basket::{check_addable, drop_emptied};
+use crate::instructions::basket::{burn_gravi, check_addable, drop_emptied, GraviAccounts};
 use crate::state::*;
 
 #[event]
@@ -85,6 +86,35 @@ pub fn set_smart_config(ctx: Context<SetSmartConfig>, strategist: Pubkey, fee_bp
     }
     let [lo, hi] = fee_bps.to_le_bytes();
     ai.try_borrow_mut_data()?[SMART_FEE_OFFSET..need].copy_from_slice(&[lo, hi, 1]);
+    Ok(())
+}
+
+/// Sets the GRAVI, in base units, a creator burns once on making a basket smart: 0 turns it off,
+/// and it can't go over `MAX_SMART_BURN_TOKENS` whole GRAVI. It sits in the protocol account's
+/// tail (`SMART_BURN_OFFSET`), which grows to hold it the first time. Protocol authority only.
+pub fn set_smart_burn(ctx: Context<SetSmartBurn>, amount: u64) -> Result<()> {
+    let ceiling = 10u64
+        .checked_pow(ctx.accounts.gravi_mint.decimals as u32)
+        .and_then(|one| one.checked_mul(MAX_SMART_BURN_TOKENS))
+        .ok_or(VaultError::MathOverflow)?;
+    require!(amount <= ceiling, VaultError::CreationBurnTooHigh);
+
+    let ai = ctx.accounts.protocol.to_account_info();
+    let need = SMART_BURN_OFFSET + SMART_BURN_LEN;
+    if ai.data_len() < need {
+        let short = Rent::get()?.minimum_balance(need).saturating_sub(ai.lamports());
+        if short > 0 {
+            anchor_lang::system_program::transfer(
+                CpiContext::new(
+                    ctx.accounts.system_program.to_account_info(),
+                    anchor_lang::system_program::Transfer { from: ctx.accounts.authority.to_account_info(), to: ai.clone() },
+                ),
+                short,
+            )?;
+        }
+        ai.resize(need)?;
+    }
+    ai.try_borrow_mut_data()?[SMART_BURN_OFFSET..need].copy_from_slice(&amount.to_le_bytes());
     Ok(())
 }
 
@@ -162,11 +192,25 @@ pub(crate) fn check_guardrails(g: &Guardrails, mandate_hash: &[u8; 32]) -> Resul
 
 /// Makes a creator-managed basket smart, before its first deposit: from then on only the
 /// strategist sets its targets and assets, within `guard`, and its mints and redeems pay the
-/// Smart-mode fee. The creator pays the rules account's rent.
+/// Smart-mode fee. The creator pays the rules account's rent and burns the smart burn
+/// (`set_smart_burn`) from their GRAVI, unless they're the burn-exempt wallet.
 pub fn enable_smart(ctx: Context<EnableSmart>, mandate_hash: [u8; 32], guard: Guardrails) -> Result<()> {
-    let basket = &mut ctx.accounts.basket;
-    require!(basket.control == ControlMode::Creator && !basket.seeded, VaultError::SmartNotAllowed);
+    require!(ctx.accounts.basket.control == ControlMode::Creator && !ctx.accounts.basket.seeded, VaultError::SmartNotAllowed);
     check_guardrails(&guard, &mandate_hash)?;
+
+    let a = &mut *ctx.accounts;
+    let protocol = a.protocol.to_account_info();
+    burn_gravi(
+        &mut a.creation_burn,
+        &a.protocol,
+        GraviAccounts { mint: a.gravi_mint.as_ref(), from: a.creator_gravi.as_ref(), program: a.gravi_token_program.as_ref() },
+        a.creator.to_account_info(),
+        smart_burn(&protocol),
+        false,
+        burn_exempt(&protocol),
+    )?;
+
+    let basket = &mut ctx.accounts.basket;
     basket.control = ControlMode::Smart;
 
     let s = &mut ctx.accounts.smart;
@@ -395,6 +439,33 @@ pub struct EnableSmart<'info> {
     pub basket: Account<'info, Basket>,
     #[account(init, payer = creator, space = 8 + Smart::INIT_SPACE, seeds = [SMART_SEED, basket.key().as_ref()], bump)]
     pub smart: Box<Account<'info, Smart>>,
+    pub system_program: Program<'info, System>,
+    /// Read for the smart burn and the burn-exempt wallet, in its tail.
+    #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump)]
+    pub protocol: Box<Account<'info, Protocol>>,
+    /// Counts the smart burn with the creation burn.
+    #[account(mut, seeds = [CREATION_BURN_SEED], bump = creation_burn.bump)]
+    pub creation_burn: Box<Account<'info, CreationBurn>>,
+    /// CHECK: GRAVI, matched against the protocol's mint in `burn_gravi`. Needed only while the
+    /// smart burn is on.
+    #[account(mut)]
+    pub gravi_mint: Option<UncheckedAccount<'info>>,
+    /// CHECK: the creator's GRAVI account; the token program checks it as it burns.
+    #[account(mut)]
+    pub creator_gravi: Option<UncheckedAccount<'info>>,
+    pub gravi_token_program: Option<Interface<'info, TokenInterface>>,
+}
+
+#[derive(Accounts)]
+pub struct SetSmartBurn<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    /// Grown by hand to hold the smart burn after its fields (see SMART_BURN_OFFSET).
+    #[account(mut, seeds = [PROTOCOL_SEED], bump = protocol.bump, has_one = authority @ VaultError::NotProtocolAuthority)]
+    pub protocol: Account<'info, Protocol>,
+    /// Read for its decimals, to set the ceiling in whole GRAVI. Fails until the mint is set.
+    #[account(address = protocol.gravi_mint @ VaultError::GraviMintNotSet)]
+    pub gravi_mint: InterfaceAccount<'info, MintI>,
     pub system_program: Program<'info, System>,
 }
 

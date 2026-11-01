@@ -311,6 +311,22 @@ pub const SMART_FEE_DEFAULT_BPS: u16 = 80;
 /// The ceiling on the Smart-mode fee, as `MAX_PROTOCOL_FEE_BPS` is on the normal one.
 pub const MAX_SMART_FEE_BPS: u16 = 100;
 
+/// The GRAVI, in base units, a creator burns once when a basket is made smart (`enable_smart`), on
+/// top of the per-asset creation burn. It sits after the Smart-mode fee in the protocol account's
+/// tail, written by `set_smart_burn`; 0, or no tail yet, means none.
+pub const SMART_BURN_OFFSET: usize = SMART_FEE_OFFSET + SMART_FEE_LEN;
+pub const SMART_BURN_LEN: usize = 8;
+/// Its ceiling, in whole GRAVI.
+pub const MAX_SMART_BURN_TOKENS: u64 = 1_000_000;
+
+pub fn smart_burn(protocol: &AccountInfo) -> u64 {
+    let Ok(data) = protocol.try_borrow_data() else { return 0 };
+    data.get(SMART_BURN_OFFSET..SMART_BURN_OFFSET + SMART_BURN_LEN)
+        .and_then(|b| b.try_into().ok())
+        .map(u64::from_le_bytes)
+        .unwrap_or(0)
+}
+
 pub fn smart_fee_bps(protocol: &AccountInfo) -> u16 {
     let Ok(data) = protocol.try_borrow_data() else { return SMART_FEE_DEFAULT_BPS };
     match data.get(SMART_FEE_OFFSET..SMART_FEE_OFFSET + SMART_FEE_LEN) {
