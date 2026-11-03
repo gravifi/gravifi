@@ -292,6 +292,21 @@ pub mod gravifi_vault {
         instructions::rebalance::rebalance_start(ctx, sell_index, buy_index, sell_amount, max_slippage_bps, refund)
     }
 
+    /// A slice through SOL: sells an overweight sleeve into the basket's own wrapped SOL sleeve
+    /// (`hub_index`), by at most what the sleeves under target still need, for a pair no single
+    /// route fits a transaction; the next ordinary slice sells the SOL into them. As
+    /// `rebalance_start` otherwise, `rebalance_finish` following.
+    pub fn rebalance_start_via<'info>(
+        ctx: Context<'_, '_, 'info, 'info, RebalanceStart<'info>>,
+        sell_index: u8,
+        hub_index: u8,
+        sell_amount: u64,
+        max_slippage_bps: u16,
+        refund: u64,
+    ) -> Result<()> {
+        instructions::rebalance::rebalance_start_via(ctx, sell_index, hub_index, sell_amount, max_slippage_bps, refund)
+    }
+
     /// Second half of a slice: checks the oracle floor, re-derives units for the two
     /// sleeves that traded, and ends the session once every sleeve is near target.
     pub fn rebalance_finish<'info>(ctx: Context<'_, '_, 'info, 'info, RebalanceFinish<'info>>) -> Result<()> {

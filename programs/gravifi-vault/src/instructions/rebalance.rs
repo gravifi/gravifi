@@ -29,6 +29,36 @@ pub fn rebalance_start<'info>(
     max_slippage_bps: u16,
     refund: u64,
 ) -> Result<()> {
+    start_slice(ctx, sell_index, buy_index, sell_amount, max_slippage_bps, refund, false)
+}
+
+/// A slice through SOL, for a pair no single route between fits a transaction (two thin tokens,
+/// a basket of many assets): sells an overweight sleeve into the basket's own SOL sleeve (the
+/// hub), checked against the oracle like any slice, by at most what the sleeves under target
+/// still need. The hub is then over its target, so the next ordinary slice sells it into them.
+/// The SOL never leaves the basket's vault between the two, and the books count it throughout,
+/// so mints and redeems in between price right. `rebalance_finish` must follow, as for any
+/// slice. `hub_index`: the basket's wrapped SOL sleeve (any target, 0% included).
+pub fn rebalance_start_via<'info>(
+    ctx: Context<'_, '_, 'info, 'info, RebalanceStart<'info>>,
+    sell_index: u8,
+    hub_index: u8,
+    sell_amount: u64,
+    max_slippage_bps: u16,
+    refund: u64,
+) -> Result<()> {
+    start_slice(ctx, sell_index, hub_index, sell_amount, max_slippage_bps, refund, true)
+}
+
+fn start_slice<'info>(
+    ctx: Context<'_, '_, 'info, 'info, RebalanceStart<'info>>,
+    sell_index: u8,
+    buy_index: u8,
+    sell_amount: u64,
+    max_slippage_bps: u16,
+    refund: u64,
+    via: bool,
+) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     let basket = &ctx.accounts.basket;
     require!(basket.seeded, VaultError::NotSeeded);
@@ -61,18 +91,32 @@ pub fn rebalance_start<'info>(
     let st = &ctx.accounts.rebalance_state;
     let session = st.session_active && Clock::get()?.slot.saturating_sub(st.pending_slot) <= SESSION_IDLE_SLOTS;
     require!(due || session || leaving || joining, VaultError::RebalanceNotDue);
+    // Through SOL: the hub may go over its target, by no more than the most any other sleeve
+    // is under (less what it's over already), so what it takes in has somewhere to go.
+    let need = if via {
+        require_keys_eq!(basket.constituents[b].mint, NATIVE_MINT, VaultError::NotSolHub);
+        (0..n).filter(|&j| j != s && j != b).map(|j| -drift[j]).max().unwrap_or(0)
+    } else {
+        0
+    };
     require!(
         (drift[s] > MIN_TRADE_DRIFT_BPS || emptying)
-            && (drift[b] < -MIN_TRADE_DRIFT_BPS || (leaving && drift[b] < 0) || (emptying && drift[b] <= 0)),
+            && if via {
+                need > MIN_TRADE_DRIFT_BPS && need - drift[b].max(0) > MIN_TRADE_DRIFT_BPS
+            } else {
+                drift[b] < -MIN_TRADE_DRIFT_BPS || (leaving && drift[b] < 0) || (emptying && drift[b] <= 0)
+            },
         VaultError::WrongDirection
     );
 
     // Never past the target on either side, and never more than one slice of the basket: 5%,
     // or 50% for a sleeve on its way out (a "clip"), so a stopped asset leaves in minutes.
-    // Emptying may overshoot the bought sleeve by what's left, at most EMPTYING_BPS.
+    // Emptying may overshoot the bought sleeve by what's left, at most EMPTYING_BPS. Through
+    // SOL, the hub's room is what's needed elsewhere.
     let total = book.total;
     let sell_value = token_value(sell_amount, book.rows[s].price_e12, book.rows[s].decimals)?;
-    let gap = if emptying { drift[s].max(0) } else { drift[s].min(-drift[b]) };
+    let into = if via { need - drift[b].max(0) } else { -drift[b] };
+    let gap = if emptying && !via { drift[s].max(0) } else { drift[s].min(into) };
     let room = (gap as u128)
         .checked_mul(total)
         .ok_or(VaultError::MathOverflow)?

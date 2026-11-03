@@ -182,4 +182,6 @@ pub enum VaultError {
     BadVerifiedRecord,
     #[msg("This basket's mandate has no stop, or that asset already has one")]
     SmartStopNotAllowed,
+    #[msg("A slice through SOL must buy the basket's own wrapped SOL")]
+    NotSolHub,
 }
