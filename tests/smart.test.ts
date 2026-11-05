@@ -185,9 +185,9 @@ describe("smart baskets: becoming smart", () => {
     const stranger = fund(w.ctx);
     await expectError(enableSmart(w.ctx, w.basket, stranger), "NotMandateAuthority");
     const bad: [Partial<Guard>, string][] = [
-      [{ maxDayBps: 2_001 }, "day over 20%"],
+      [{ maxDayBps: 4_001, maxWeekBps: 5_000 }, "day over 40%"],
       [{ maxDayBps: 0 }, "no change at all"],
-      [{ maxWeekBps: 5_001 }, "week over 50%"],
+      [{ maxWeekBps: 10_001 }, "week over 100%"],
       [{ maxWeekBps: 1_000, maxDayBps: 2_000 }, "week under the day"],
       [{ maxWeightBps: 3_501 }, "weight over 35%"],
       [{ maxUnverifiedBps: 3_001 }, "unverified over 30%"],
@@ -458,7 +458,9 @@ describe("smart baskets: pause and mandate", () => {
     const next = hash('{"goal":"blue chips"}');
     const tighter = { ...GUARD, maxDayBps: 500 };
     await expectError(propose(w, next, tighter, false, w.strategist), "NotMandateAuthority");
-    await expectError(propose(w, next, { ...GUARD, maxDayBps: 2_500 }), "BadGuardrails");
+    await expectError(propose(w, next, { ...GUARD, maxDayBps: 4_001 }), "BadGuardrails");
+    await expectError(propose(w, next, { ...GUARD, maxDayBps: 4_000, maxWeekBps: 10_001 }), "BadGuardrails");
+    await propose(w, next, { ...GUARD, maxDayBps: 4_000, maxWeekBps: 10_000 }); // the ceilings themselves
     await propose(w, next, tighter);
     await expectError(apply(w), "MandateNoticeRunning");
     // Until it applies, the old rules hold.

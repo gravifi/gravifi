@@ -365,8 +365,8 @@ pub const SMART_SEED: &[u8] = b"smart";
 /// Ceilings on a smart basket's guardrails, in code: a creator may set tighter ones, never
 /// looser. Target changes (the sum of the increases) per rolling 24 hours and 7 days, and the
 /// weight of one asset, Verified and not.
-pub const SMART_MAX_DAY_BPS: u16 = 2_000;
-pub const SMART_MAX_WEEK_BPS: u16 = 5_000;
+pub const SMART_MAX_DAY_BPS: u16 = 4_000;
+pub const SMART_MAX_WEEK_BPS: u16 = 10_000;
 pub const SMART_MAX_WEIGHT_BPS: u16 = 3_500;
 pub const SMART_MAX_UNVERIFIED_BPS: u16 = 3_000;
 /// How long a new mandate waits before it applies, so holders who disagree can redeem first.
