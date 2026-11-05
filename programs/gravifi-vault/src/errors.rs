@@ -184,4 +184,10 @@ pub enum VaultError {
     SmartStopNotAllowed,
     #[msg("A slice through SOL must buy the basket's own wrapped SOL")]
     NotSolHub,
+    #[msg("A basket with shares out raises its creator cut with a day's notice")]
+    CutRiseNeedsNotice,
+    #[msg("This rise's notice hasn't run out yet")]
+    CutNoticeRunning,
+    #[msg("These treasury shares are owed to the basket's creator")]
+    TreasuryOwedToCreator,
 }

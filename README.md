@@ -22,9 +22,10 @@ test suite. How it all works is in the [whitepaper](WHITEPAPER.md)
   from swapping shares back for the tokens they represent.
 - **Every share is fully backed.** Deposits round up, payouts round down, and value leaves a
   vault only through a redemption, a checked rebalance slice or the buyback.
-- **Fee limits are code.** The protocol fee can't exceed 0.50% per mint or redeem, a creator
-  fee can't exceed 0.20% a year, and a change to a creator fee never applies to time already
-  passed.
+- **Fee limits are code.** The protocol fee can't exceed 0.50% per mint or redeem, a creator's
+  cut can't exceed 0.60% of a buy and is never charged on a redeem, a rise of it waits a day once
+  a basket has shares, a yearly fee can't exceed 0.20%, and a change to one never applies to
+  time already passed.
 - **The burn address has no key.** At least half of every protocol fee goes to it, a floor in
   the code, and it can only be spent buying GRAVI and burning it.
 - **The creation burn has a ceiling.** Each asset in a basket burns GRAVI from its creator's
@@ -84,7 +85,7 @@ head -c "$(wc -c < target/deploy/gravifi_vault.so)" onchain.so | shasum -a 256
 shasum -a 256 target/deploy/gravifi_vault.so
 ```
 
-Both hashes start with `458fb5d39b68c36e`. A verified build (`solana-verify`), reproducible
+Both hashes start with `66db144e76888665`. A verified build (`solana-verify`), reproducible
 on any machine, comes with the move to a multisig.
 
 ## Status

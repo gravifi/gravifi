@@ -25,7 +25,7 @@ import {
   warp,
   type Ctx,
 } from "./helpers.ts";
-import { NO_GRAVI, SEED_SHARES, UNITS_A, UNITS_B, feeShares, initProtocol, listAsset, quads, setCreationBurn, world } from "./fixtures.ts";
+import { NO_GRAVI, SEED_SHARES, UNITS_A, UNITS_B, feeShares, fundHolder, initProtocol, listAsset, mintIx, quads, redeemIx, setCreationBurn, world } from "./fixtures.ts";
 
 const HOUR = 3_600;
 const DAY = 86_400;
@@ -546,6 +546,23 @@ describe("smart baskets: the fee", () => {
       [w.creator],
     );
     assert.equal(balance(w.ctx, burnShares) + balance(w.ctx, treasuryShares) - before, (redeem * 80n + 9_999n) / 10_000n);
+  });
+
+  it("a creator's cut comes on top: 1.40% on a buy at the cap, and a sale pays only the 0.8%", async () => {
+    const { w, seed } = await seededSmart(40);
+    await rpc(w.ctx, w.ctx.vault.methods.setCreatorCut(60).accountsPartial({ authority: w.creator.publicKey, basket: w.basket, notice: null }), [w.creator]);
+    await seed(SEED_SHARES);
+    const alice = fund(w.ctx);
+    await fundHolder(w, alice);
+    await rpc(w.ctx, mintIx(w, alice, SEED_SHARES), [alice]);
+    assert.equal(balance(w.ctx, ata(w.shareMint, alice.publicKey)), (SEED_SHARES * 9_860n) / 10_000n);
+    const owed = (SEED_SHARES * 60n) / 10_000n;
+    assert.equal((await w.ctx.vault.account.basket.fetch(w.basket)).creatorUnclaimed.toString(), owed.toString());
+    const { burnShares, treasuryShares } = feeShares(w.shareMint);
+    const before = balance(w.ctx, burnShares) + balance(w.ctx, treasuryShares);
+    await rpc(w.ctx, redeemIx(w, alice, 1_000_000_000n), [alice]);
+    assert.equal(balance(w.ctx, burnShares) + balance(w.ctx, treasuryShares) - before, 8_000_000n);
+    assert.equal((await w.ctx.vault.account.basket.fetch(w.basket)).creatorUnclaimed.toString(), owed.toString());
   });
 
   it("is set by the protocol authority up to 1%, never past it", async () => {

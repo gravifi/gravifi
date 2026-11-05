@@ -104,7 +104,9 @@ pub fn initialize_basket<'info>(
     b.creator = ctx.accounts.creator.key();
     b.share_mint = ctx.accounts.share_mint.key();
     b.rebalance_supply = 0;
-    b.reserved = [0; 24];
+    b.reserved = [0; 14];
+    b.creator_cut_bps = 0;
+    b.creator_unclaimed = 0;
     b.basket_id = args.basket_id;
     b.access = args.access;
     b.control = args.control;
@@ -281,6 +283,8 @@ pub fn set_policy(
 ) -> Result<()> {
     authorise_mandate(&ctx.accounts.basket, &ctx.accounts.authority)?;
     require!(mgmt_fee_bps <= MAX_CREATOR_FEE_BPS, VaultError::FeeTooHigh);
+    // A basket has the yearly fee or the creator's cut, never both.
+    require!(mgmt_fee_bps == 0 || ctx.accounts.basket.cut_bps() == 0, VaultError::FeeTooHigh);
     check_policy(rebalance_mode, interval_secs, drift_bps)?;
 
     let basket = &mut ctx.accounts.basket;
@@ -318,7 +322,9 @@ pub fn restore_creator_control(ctx: Context<RestoreControl>) -> Result<()> {
     basket.control = ControlMode::Creator;
     // These bytes held its governor's address; clear them for their new use.
     basket.rebalance_supply = 0;
-    basket.reserved = [0; 24];
+    basket.reserved = [0; 14];
+    basket.creator_cut_bps = 0;
+    basket.creator_unclaimed = 0;
     Ok(())
 }
 

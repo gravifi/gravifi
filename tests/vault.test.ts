@@ -613,6 +613,7 @@ describe("fees", () => {
         w.ctx.vault.methods.treasuryWithdraw(new BN(1)).accountsPartial({
           authority: w.ctx.payer.publicKey,
           protocol: pda.protocol(),
+          basket: w.basket,
           shareMint: w.shareMint,
           treasuryShares: accts.burnShares,
           destination: dest,

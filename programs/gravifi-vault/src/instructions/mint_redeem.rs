@@ -50,6 +50,7 @@ pub fn seed_basket<'info>(
         treasury_shares: &a.treasury_shares,
         share_token_program: &a.share_token_program,
         invited: false,
+        creator_cut_bps: 0,
     };
     collect_and_mint(deposit, ctx.remaining_accounts, shares)
 }
@@ -101,6 +102,9 @@ pub fn mint_in_kind<'info>(
         }
     }
 
+    // The creator's own mints would only pay themselves.
+    let creator_cut_bps = if payer == basket.creator { 0 } else { basket.cut_bps() };
+
     let a = &mut *ctx.accounts;
     let deposit = Deposit {
         payer: &a.payer,
@@ -112,6 +116,7 @@ pub fn mint_in_kind<'info>(
         treasury_shares: &a.treasury_shares,
         share_token_program: &a.share_token_program,
         invited,
+        creator_cut_bps,
     };
     collect_and_mint(deposit, quads, shares)
 }
@@ -257,6 +262,8 @@ pub(crate) struct Deposit<'a, 'info> {
     pub share_token_program: &'a Interface<'info, TokenInterface>,
     /// The payer trades on a live invite: half the fee, none of it burned.
     pub invited: bool,
+    /// The creator's cut of this deposit. An invite doesn't change it.
+    pub creator_cut_bps: u16,
 }
 
 /// Shared body of `seed_basket` and `mint_in_kind`: pull every sleeve in, then mint.
@@ -327,16 +334,20 @@ pub(crate) fn collect_and_mint<'info>(d: Deposit<'_, 'info>, remaining: &[Accoun
     let signer: &[&[&[u8]]] = &[&seeds];
 
     // The deposit covers all `shares`; the protocol's cut of them goes to the burn PDA
-    // and the treasury, so units and collateral are untouched.
+    // and the treasury, so units and collateral are untouched. The creator's cut waits in the
+    // treasury's shares too, counted on the basket.
     let (fee, burn_fee, treasury_fee) = protocol_cut(shares, d.protocol, d.basket, d.invited)?;
-    require!(shares > fee, VaultError::BelowFee);
+    let cut = flow_fee(shares, d.creator_cut_bps)?;
+    let kept = fee.checked_add(cut).ok_or(VaultError::MathOverflow)?;
+    require!(shares > kept, VaultError::BelowFee);
+    d.basket.creator_unclaimed = d.basket.creator_unclaimed.checked_add(cut).ok_or(VaultError::MathOverflow)?;
     let program = d.share_token_program.to_account_info();
     let mint = d.share_mint.to_account_info();
     let authority = d.basket.to_account_info();
     for (to, amount) in [
-        (d.payer_shares.to_account_info(), shares - fee),
+        (d.payer_shares.to_account_info(), shares - kept),
         (d.burn_shares.to_account_info(), burn_fee),
-        (d.treasury_shares.to_account_info(), treasury_fee),
+        (d.treasury_shares.to_account_info(), treasury_fee + cut),
     ] {
         if amount > 0 {
             mint_shares(&program, &mint, &to, &authority, signer, amount)?;

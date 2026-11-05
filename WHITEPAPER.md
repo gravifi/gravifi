@@ -85,7 +85,7 @@ Anyone can create a basket in the app:
 | **Assets** | 2 to 14, from the 133 listed |
 | **Weights** | Any split adding up to 100% |
 | **Rebalancing** | On a schedule, when it drifts past a tolerance, or both (at least a day apart, at least 0.5% drift). Rebalancing starts once the basket holds $50 (section 4) |
-| **Creator fee** | 0% to 0.20% a year |
+| **Creator's cut** | 0% to 0.60% of each buy |
 | **Access** | Public; allowlist (only wallets the creator approves can mint); or private (only the creator can mint). Anyone holding shares can always redeem |
 | **Control** | Creator-managed, or immutable: locked forever, nobody can change it again |
 | **Starting price** | $1 to $10,000 a share |
@@ -99,9 +99,14 @@ caps, and split its shares.
 once every 30 days). Every holder's balance and the price per share change together in one
 transaction; nobody's slice changes.
 
-**The creator fee** is streamed as new shares, so a creator earns more only if the basket
-grows. It is the only cost of holding: the protocol charges nothing while shares are held. A
-change to it counts from the moment it's made, never for the time before.
+**The creator's cut** is a share of each buy by someone else, paid in shares. Selling and holding
+don't pay it, so nobody already in can be charged more by a later rise. A creator can lower it
+at any time. Raising it takes a day's notice once the basket has shares, shown on its page, so no
+buyer pays more than they were quoted. An immutable basket's is fixed at its first deposit.
+
+**The yearly fee** is how creators earned before the cut: up to 0.20% a year, streamed as new
+shares while held. Baskets that have one keep it until their creator chooses a cut, which stops
+it. A basket has one or the other, never both, and new baskets are only offered the cut.
 
 ## 4. Rebalancing
 
@@ -183,7 +188,8 @@ its first deposit and never change, and when one fires the basket follows that f
 | Fee | Rate | Who pays, when | Where it goes |
 |---|---|---|---|
 | **Protocol fee** | 0.40% | On every mint and redeem, including a creator's first deposit | Half to the GRAVI burn, half to the treasury |
-| **Creator fee** | 0% to 0.20% a year | Holders, as share dilution while held | The basket's creator |
+| **Creator's cut** | 0% to 0.60% | On each buy by someone else, on top of the protocol fee. Selling and holding don't pay it | The basket's creator |
+| **Yearly fee** | 0% to 0.20% a year | Holders, as share dilution while held, on baskets that haven't chosen a cut | The basket's creator |
 | **Creation burn** | 10,000 GRAVI per asset | The creator, for each asset a basket is created with or gets added | Burned |
 | **App fee** | 0.05% | On buys and sells through the app's USDC/SOL route | The treasury |
 | **Network** | fractions of a cent | Every transaction | Solana validators |
@@ -198,8 +204,10 @@ paid daily in SOL by the app. It is a share of fees from someone else's trading,
 anything held, and it never pays out more than those trades paid in.
 
 The protocol fee rounds up, so no flow is too small to pay it, and it is kept in shares, so
-the vault stays fully backed. The limits are in the program's code: the protocol fee can never
-exceed 0.50%, a creator fee can never exceed 0.20% a year, the creation burn can never exceed
+the vault stays fully backed. A creator's cut rounds up too and waits in the treasury's shares
+until it's claimed, by anyone, to the creator's own account; the treasury can't withdraw it. The
+limits are in the program's code: the protocol fee can never
+exceed 0.50%, a creator's cut can never exceed 0.60% of a buy, a yearly fee can never exceed 0.20%, the creation burn can never exceed
 1,000,000 GRAVI per asset, and at least half of every protocol fee goes to the GRAVI burn, except
 an invited wallet's half fee in its first month (above). Changing
 any of them would take new code, in public.

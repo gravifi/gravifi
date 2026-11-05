@@ -14,7 +14,9 @@ async function makeLegacyDao(w: World) {
   // Its governor's address sat in the bytes now used for the rebalance supply snapshot.
   const governor = fund(w.ctx).publicKey.toBuffer();
   decoded.rebalanceSupply = new BN(governor.readBigUInt64LE(0).toString());
-  decoded.reserved = Array.from(governor.subarray(8));
+  decoded.reserved = Array.from(governor.subarray(8, 22));
+  decoded.creatorCutBps = governor.readUInt16LE(22);
+  decoded.creatorUnclaimed = new BN(governor.readBigUInt64LE(24).toString());
   const data = await w.ctx.vault.coder.accounts.encode("basket", decoded);
   const full = Buffer.alloc(acct.data.length);
   data.copy(full);
@@ -49,7 +51,9 @@ describe("basket control without holder governance", () => {
     const b = await w.ctx.vault.account.basket.fetch(w.basket);
     assert.deepEqual(b.control, { creator: {} });
     assert.equal(b.rebalanceSupply.toString(), "0");
-    assert.deepEqual(b.reserved, new Array(24).fill(0));
+    assert.deepEqual(b.reserved, new Array(14).fill(0));
+    assert.equal(b.creatorCutBps, 0);
+    assert.equal(b.creatorUnclaimed.toString(), "0");
     await rpc(w.ctx, setTargetsIx(w), [w.creator]);
     const after = await w.ctx.vault.account.basket.fetch(w.basket);
     assert.deepEqual(after.constituents.map((c) => c.targetBps), [5_000, 5_000]);

@@ -26,6 +26,9 @@ pub const MAX_PROTOCOL_FEE_BPS: u16 = 50;
 /// authority can raise it, never lower it. The one exception is a referred wallet's first
 /// month, which pays half the fee and burns none of it (`Invite`).
 pub const MIN_BURN_SHARE_BPS: u16 = 5_000;
+/// The ceiling on a creator's cut of a mint (`creator_cut.rs`), on top of the protocol's fee and
+/// outside it, so the burn's share of that fee is untouched. Only an upgrade moves it.
+pub const MAX_CREATOR_CUT_BPS: u16 = 60;
 
 pub const SHARE_DECIMALS: u8 = 9;
 /// Base units in one whole share.
@@ -106,7 +109,13 @@ pub struct Basket {
     /// unchanged. (These 32 bytes held the governor's address before holder governance was
     /// removed, so the account layout is unchanged.)
     pub rebalance_supply: u64,
-    pub reserved: [u8; 24],
+    pub reserved: [u8; 14],
+    /// The creator's cut of every mint by someone else, in bps of the shares (`creator_cut.rs`).
+    /// These two read as 0 on a legacy Dao basket, whose spare bytes may still hold its old
+    /// governor's: read them through `cut_bps` and `owed_to_creator`.
+    pub creator_cut_bps: u16,
+    /// Treasury shares owed to the creator (`claim_creator_cut` moves them).
+    pub creator_unclaimed: u64,
     /// Namespace seed so one creator can run many baskets.
     pub basket_id: [u8; 16],
 
@@ -133,6 +142,16 @@ pub struct Basket {
 }
 
 impl Basket {
+    /// The creator's cut of a mint.
+    pub fn cut_bps(&self) -> u16 {
+        if self.control == ControlMode::Dao { 0 } else { self.creator_cut_bps }
+    }
+
+    /// Treasury shares owed to the creator.
+    pub fn owed_to_creator(&self) -> u64 {
+        if self.control == ControlMode::Dao { 0 } else { self.creator_unclaimed }
+    }
+
     pub fn active(&self) -> &[Constituent] {
         &self.constituents[..self.constituent_count as usize]
     }
@@ -525,6 +544,21 @@ pub struct Keepers {
 /// A referred wallet's invite: `[INVITE_SEED, wallet]`, written with the rebalancer's signature
 /// and paid for by the wallet (`set_invite`), whose rent goes back to it at `close_invite`.
 pub const INVITE_SEED: &[u8] = b"invite";
+/// A pending rise of a basket's creator cut, at `[CUT_NOTICE_SEED, basket]`.
+pub const CUT_NOTICE_SEED: &[u8] = b"cut_notice";
+/// How long a rise waits once a basket has shares, so no buyer pays more than they were quoted.
+pub const CUT_NOTICE_SECS: i64 = 86_400;
+
+#[account]
+#[derive(InitSpace)]
+pub struct CutNotice {
+    pub bump: u8,
+    pub basket: Pubkey,
+    pub bps: u16,
+    /// When it may apply.
+    pub at: i64,
+}
+
 /// The longest an invite can run from when it's written: a month, and a day of room.
 pub const MAX_INVITE_SECS: i64 = 31 * 86_400;
 

@@ -201,6 +201,28 @@ pub mod gravifi_vault {
         instructions::basket::set_policy(ctx, rebalance_mode, interval_secs, drift_bps, mgmt_fee_bps)
     }
 
+    /// Sets the creator's cut of every mint (at most `MAX_CREATOR_CUT_BPS`) at once: down at any
+    /// time, or to anything before the first deposit. Passing a pending rise's notice cancels it.
+    /// A cut stops the yearly fee. Creator only.
+    pub fn set_creator_cut(ctx: Context<SetCreatorCut>, bps: u16) -> Result<()> {
+        instructions::creator_cut::set_creator_cut(ctx, bps)
+    }
+
+    /// Asks for a higher cut on a basket with shares out, applying a day from now. Creator only.
+    pub fn propose_cut_rise(ctx: Context<ProposeCutRise>, bps: u16) -> Result<()> {
+        instructions::creator_cut::propose_cut_rise(ctx, bps)
+    }
+
+    /// Applies a rise whose day's notice has run out. Permissionless.
+    pub fn apply_cut_rise(ctx: Context<ApplyCutRise>) -> Result<()> {
+        instructions::creator_cut::apply_cut_rise(ctx)
+    }
+
+    /// Moves what the creator is owed from the treasury's shares to theirs. Permissionless.
+    pub fn claim_creator_cut(ctx: Context<ClaimCreatorCut>) -> Result<()> {
+        instructions::creator_cut::claim_creator_cut(ctx)
+    }
+
     /// Replaces the basket's stop losses (each a percentage below a reference price, fixed or
     /// trailing). The creator of a creator-managed basket at any time; of an immutable one only
     /// before its first deposit.
