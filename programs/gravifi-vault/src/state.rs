@@ -33,6 +33,10 @@ pub const MAX_CREATOR_CUT_BPS: u16 = 60;
 pub const SHARE_DECIMALS: u8 = 9;
 /// Base units in one whole share.
 pub const ONE_SHARE: u128 = 1_000_000_000;
+/// Set in `mint_in_kind`'s `min_shares`, the rest of it is a floor on the shares the buyer
+/// receives, after the protocol's fee and the creator's cut; clear, it's a floor on the shares
+/// minted before them, as it always was.
+pub const MIN_NET_FLAG: u64 = 1 << 63;
 pub const BPS_DENOM: u128 = 10_000;
 /// Julian year, matching the convention used for annualised fee quotes.
 pub const SECONDS_PER_YEAR: i128 = 31_557_600;
@@ -118,6 +122,8 @@ pub struct Basket {
     /// 1 once holders run it by vote (`enter_community`). It stays 1 while a vote has handed it
     /// to the strategist, when `control` reads Smart. Read through `by_vote`.
     pub community: u8,
+    /// Bytes 0..4: when a vote last added an asset (`community_execute_add`), unix seconds as a
+    /// u32, read through `vote_added_at`; 0 for never. The fifth byte is spare.
     pub reserved: [u8; 5],
     /// The creator's cut of every mint by someone else, in bps of the shares (`creator_cut.rs`).
     /// These two read as 0 on a legacy Dao basket, whose spare bytes may still hold its old
@@ -169,6 +175,17 @@ impl Basket {
     /// Holders run this basket by vote: `Community`, or `Smart` after a vote handed it over.
     pub fn by_vote(&self) -> bool {
         self.community == 1 && matches!(self.control, ControlMode::Community | ControlMode::Smart)
+    }
+
+    /// When a vote last added an asset to this basket (0: never). Only a Community basket writes
+    /// it; on a legacy Dao basket these bytes may hold its old governor's, and nothing reads them.
+    pub fn vote_added_at(&self) -> i64 {
+        u32::from_le_bytes([self.reserved[0], self.reserved[1], self.reserved[2], self.reserved[3]]) as i64
+    }
+
+    pub fn set_vote_added_at(&mut self, now: i64) {
+        let at = u32::try_from(now).unwrap_or(u32::MAX).to_le_bytes();
+        self.reserved[..4].copy_from_slice(&at);
     }
 
     pub fn active(&self) -> &[Constituent] {
@@ -671,18 +688,25 @@ pub const DEAD_PRICE_SECS: i64 = 86_400;
 pub const STOP_SEED: &[u8] = b"stop";
 /// A stop fires only if the price is still below it this long after it was first seen below.
 pub const STOP_CONFIRM_SECS: i64 = 300;
+/// ...and no longer than this after: an arming nobody confirmed in time starts over from the next
+/// check below the stop, so "below for five minutes" is two checks five to fifteen minutes apart,
+/// not two dips hours apart with nobody looking in between.
+pub const STOP_ARM_WINDOW_SECS: i64 = 3 * STOP_CONFIRM_SECS;
 /// How far below its reference a stop may sit: 5% to 90%.
 pub const MIN_STOP_BPS: u16 = 500;
 pub const MAX_STOP_BPS: u16 = 9_000;
 
 /// One asset's stop: it fires when the asset's posted price is below `reference_e12` less
-/// `pct_bps`, twice, at least STOP_CONFIRM_SECS apart.
+/// `pct_bps`, twice, STOP_CONFIRM_SECS to STOP_ARM_WINDOW_SECS apart. Its reference is never above
+/// the asset's fresh posted price when it's written on a seeded basket (`hold_to_price`), so no
+/// stop starts out armed.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Default, Debug, InitSpace)]
 pub struct Stop {
     pub mint: Pubkey,
     pub pct_bps: u16,
-    /// The reference rises with each higher posted price `check_stop` sees (a trailing stop);
-    /// otherwise it stays where the creator set it.
+    /// The reference rises to a higher price that has held (a trailing stop): the lower of the
+    /// posted price and the asset's `PriceGuard` reference, once that reference is at least
+    /// STOP_CONFIRM_SECS old (`check_stop`). Otherwise it stays where the creator set it.
     pub trailing: bool,
     /// USD per whole token x1e12, in the same units as `AssetPrice`.
     pub reference_e12: u64,
@@ -946,6 +970,11 @@ pub const QUORUM_BPS: u128 = 1_000;
 /// Fee, Go Smart and leaving need this much of For + Against; the rest need over half.
 pub const SUPERMAJORITY_BPS: u128 = 6_600;
 pub const MAX_OPEN_PROPOSALS: u8 = 3;
+/// A wallet's open proposal on a basket, at `[OPEN_SEED, basket, proposer]`: one at a time each.
+pub const OPEN_SEED: &[u8] = b"open";
+/// An asset a vote added can't be removed for this long: room for the Reweight that weights it to
+/// be proposed, voted on, and run.
+pub const REMOVE_GRACE_SECS: i64 = VOTE_PERIOD_SECS + VOTE_TIMELOCK_SECS + VOTE_GRACE_SECS;
 
 /// A wallet's staked shares of one basket, at `[SHARE_STAKE_SEED, basket, wallet]`. Any basket's
 /// holders may stake; votes count only in community baskets.
@@ -1073,6 +1102,17 @@ impl Proposal {
             yes > no
         }
     }
+}
+
+/// That proposal `id` is its proposer's one open proposal on `basket`, at `[OPEN_SEED, basket,
+/// proposer]`. The proposer pays its rent at `community_propose` and gets it back at
+/// `community_close`. Proposals opened before it existed have none.
+#[account]
+#[derive(InitSpace)]
+pub struct OpenProposal {
+    pub bump: u8,
+    pub basket: Pubkey,
+    pub id: u32,
 }
 
 /// One wallet's vote, at `[VOTE_SEED, proposal, wallet]`: that it exists is what stops a second.

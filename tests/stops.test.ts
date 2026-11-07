@@ -52,11 +52,15 @@ const prices = (w: SW, a: bigint, b: bigint) => postPrices(w.ctx, w.keeper, [[w.
 
 const stopArgs = (mint: PublicKey, pctBps: number, referenceE12: bigint, trailing = false) => ({ mint, pctBps, trailing, referenceE12: new BN(referenceE12.toString()) });
 
-const setStops = (w: SW, stops: ReturnType<typeof stopArgs>[], signer: Keypair = w.creator) =>
-  rpc(w.ctx, w.ctx.vault.methods.setStops(stops).accountsPartial({ creator: signer.publicKey, basket: w.basket, stopLoss: w.stopLoss }), [signer]);
+const meta = (pubkey: PublicKey) => ({ pubkey, isSigner: false, isWritable: false });
 
+/** set_stops, naming each stop's price (which a seeded basket's stops are held to). */
+const setStops = (w: SW, stops: ReturnType<typeof stopArgs>[], signer: Keypair = w.creator) =>
+  rpc(w.ctx, w.ctx.vault.methods.setStops(stops).accountsPartial({ creator: signer.publicKey, basket: w.basket, stopLoss: w.stopLoss }).remainingAccounts(stops.map((s) => meta(pda.price(s.mint)))), [signer]);
+
+/** check_stop, naming the asset's price guard (which a trailing stop rises against). */
 const checkStop = (w: SW, mint: PublicKey) =>
-  rpc(w.ctx, w.ctx.vault.methods.checkStop().accountsPartial({ basket: w.basket, stopLoss: w.stopLoss, assetPrice: pda.price(mint) }));
+  rpc(w.ctx, w.ctx.vault.methods.checkStop().accountsPartial({ basket: w.basket, stopLoss: w.stopLoss, assetPrice: pda.price(mint) }).remainingAccounts([meta(pda.guard(mint))]));
 
 const targets = async (w: SW) => ((await w.ctx.vault.account.basket.fetch(w.basket)).constituents as { targetBps: number }[]).map((c) => c.targetBps);
 const stops = async (w: SW) => (await w.ctx.vault.account.stopLoss.fetch(w.stopLoss)) as unknown as { stops: { mint: PublicKey; armedAt: BN; referenceE12: BN }[]; fired: number };
@@ -174,6 +178,49 @@ describe("stop losses", () => {
     assert.deepEqual(await targets(w), [6_000, 4_000]);
   });
 
+  it("a stop's reference can't start above the price, so it can't start out armed (M1)", async () => {
+    const w = await stopWorld();
+    // B is at $6: a stop on B "30% below $100" would arm at once and fire five minutes later.
+    await expectError(setStops(w, [stopArgs(w.mintB, 3_000, 100n * PRICE_B)]), "StopAbovePrice");
+    await expectError(setStops(w, [stopArgs(w.mintB, 3_000, PRICE_B + 1n)]), "StopAbovePrice");
+    // Its price must be named, fresh and the asset's own.
+    await expectError(
+      rpc(w.ctx, w.ctx.vault.methods.setStops([stopArgs(w.mintB, 3_000, PRICE_B)]).accountsPartial({ creator: w.creator.publicKey, basket: w.basket, stopLoss: w.stopLoss }), [w.creator]),
+      "BadRemainingAccounts",
+    );
+    await expectError(
+      rpc(w.ctx, w.ctx.vault.methods.setStops([stopArgs(w.mintB, 3_000, PRICE_B)]).accountsPartial({ creator: w.creator.publicKey, basket: w.basket, stopLoss: w.stopLoss }).remainingAccounts([meta(pda.price(w.mintA))]), [w.creator]),
+      "BadPrice",
+    );
+    warp(w.ctx, 121);
+    await expectError(setStops(w, [stopArgs(w.mintB, 3_000, PRICE_B)]), "BadPrice");
+    await prices(w, PRICE_A, PRICE_B);
+    // At or below the price is fine (an entry price below today's, say).
+    await setStops(w, [stopArgs(w.mintB, 3_000, PRICE_B), stopArgs(w.mintA, 3_000, PRICE_A / 2n)]);
+    await checkStop(w, w.mintB);
+    assert.equal(Number((await stops(w)).stops[0].armedAt), 0);
+  });
+
+  it("an arming nobody confirmed within fifteen minutes starts over (M4)", async () => {
+    const w = await stopWorld();
+    await setStops(w, [stopArgs(w.mintB, 3_000, PRICE_B)]); // $4.20
+    await prices(w, PRICE_A, 4_100_000_000_000n);
+    await checkStop(w, w.mintB);
+    const armed = Number((await stops(w)).stops[0].armedAt);
+    assert.ok(armed > 0);
+    // Hours later, nobody having checked in between, another dip: armed anew, not fired.
+    warp(w.ctx, 3 * CONFIRM + 1);
+    await prices(w, PRICE_A, 4_100_000_000_000n);
+    await checkStop(w, w.mintB);
+    assert.deepEqual(await targets(w), [6_000, 4_000]);
+    assert.ok(Number((await stops(w)).stops[0].armedAt) > armed);
+    // Confirmed five minutes after that arming: fired.
+    warp(w.ctx, CONFIRM);
+    await prices(w, PRICE_A, 4_100_000_000_000n);
+    await checkStop(w, w.mintB);
+    assert.deepEqual(await targets(w), [10_000, 0]);
+  });
+
   it("a stale price neither arms nor fires a stop", async () => {
     const w = await stopWorld();
     await setStops(w, [stopArgs(w.mintB, 3_000, PRICE_B)]);
@@ -182,11 +229,24 @@ describe("stop losses", () => {
     await expectError(checkStop(w, w.mintB), "BadPrice");
   });
 
-  it("a trailing stop's reference rises with the price and never falls", async () => {
+  it("a trailing stop's reference rises with a price that has held, and never falls", async () => {
     const w = await stopWorld();
     await setStops(w, [stopArgs(w.mintB, 3_000, PRICE_B, true), stopArgs(w.mintA, 3_000, PRICE_A)]);
     await prices(w, PRICE_A, 8n * E12);
+    // $8 is the guard's reference too, but only as of this very print: one price isn't held.
     await checkStop(w, w.mintB);
+    assert.equal(BigInt((await stops(w)).stops[0].referenceE12.toString()), PRICE_B);
+    // Five minutes on, still $8: it held, so the reference rises to it.
+    warp(w.ctx, CONFIRM);
+    await prices(w, PRICE_A, 8n * E12);
+    await checkStop(w, w.mintB);
+    assert.equal(BigInt((await stops(w)).stops[0].referenceE12.toString()), 8n * E12);
+    // One higher print rises to no more than the guard's reference ($8), which it hasn't moved.
+    await prices(w, PRICE_A, 9_500_000_000_000n);
+    await checkStop(w, w.mintB);
+    assert.equal(BigInt((await stops(w)).stops[0].referenceE12.toString()), 8n * E12);
+    // Without the guard named, the reference doesn't move at all.
+    await rpc(w.ctx, w.ctx.vault.methods.checkStop().accountsPartial({ basket: w.basket, stopLoss: w.stopLoss, assetPrice: pda.price(w.mintB) }));
     assert.equal(BigInt((await stops(w)).stops[0].referenceE12.toString()), 8n * E12);
     await prices(w, PRICE_A, 7n * E12);
     await checkStop(w, w.mintB);

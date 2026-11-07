@@ -327,15 +327,19 @@ pub(crate) fn keeper_refund(refund: u64, price_e12: u64, decimals: u8) -> Result
     Ok(())
 }
 
-/// The finish must come later in this very transaction, for this basket.
+/// The finish must come later in this very transaction, for this basket, and be the next of this
+/// program's instructions in it. While the slice is out on loan the vaults show less than the
+/// basket owns, so nothing else of ours may run in between: a mint priced from them, undone by
+/// redeeming the burn's or the stakers' shares, would leave the supply where the finish checks it
+/// and still have bought in cheap.
 fn assert_finish_follows(ixs: &AccountInfo, basket: &Pubkey) -> Result<()> {
     let mut i = load_current_index_checked(ixs)? as usize + 1;
     while let Ok(ix) = load_instruction_at_checked(i, ixs) {
-        if ix.program_id == crate::ID
-            && ix.data.len() >= 8
-            && ix.data[..8] == *<crate::instruction::RebalanceFinish as anchor_lang::Discriminator>::DISCRIMINATOR
-            && ix.accounts.get(2).map(|a| a.pubkey) == Some(*basket)
-        {
+        if ix.program_id == crate::ID {
+            let finish = ix.data.len() >= 8
+                && ix.data[..8] == *<crate::instruction::RebalanceFinish as anchor_lang::Discriminator>::DISCRIMINATOR
+                && ix.accounts.get(2).map(|a| a.pubkey) == Some(*basket);
+            require!(finish, VaultError::SliceInterleaved);
             return Ok(());
         }
         i += 1;

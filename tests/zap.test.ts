@@ -36,6 +36,20 @@ describe("minting what the swaps delivered", () => {
     await expectError(rpc(w.ctx, mintIx(w, bob, 4_000_000_000n, null, 3_500_000_000n), [bob]), "BelowMinShares");
   });
 
+  it("with MIN_NET_FLAG, the floor is on what the buyer receives, after the fee and the cut (L5)", async () => {
+    const NET = 1n << 63n;
+    // A 0.5% protocol fee: 3 shares minted, 0.015 kept, 2.985 to the buyer.
+    const w = await world({ protocolFeeBps: 50 });
+    const bob = fund(w.ctx);
+    await mintTo(w.ctx, w.mintA, await createAta(w.ctx, w.mintA, bob.publicKey, TOKEN_PROGRAM_ID), 6_000_000n, TOKEN_PROGRAM_ID);
+    await mintTo(w.ctx, w.mintB, await createAta(w.ctx, w.mintB, bob.publicKey, TOKEN_2022_PROGRAM_ID), 1_500_000_000n, TOKEN_2022_PROGRAM_ID);
+    await createAta(w.ctx, w.shareMint, bob.publicKey);
+    // A gross floor of 3 passes, though bob gets 2.985; a net floor of 2.99 doesn't.
+    await expectError(rpc(w.ctx, mintIx(w, bob, 4_000_000_000n, null, NET | 2_990_000_000n), [bob]), "BelowMinShares");
+    await rpc(w.ctx, mintIx(w, bob, 4_000_000_000n, null, NET | 2_985_000_000n), [bob]);
+    assert.equal(balance(w.ctx, ata(w.shareMint, bob.publicKey)), 2_985_000_000n);
+  });
+
   it("a floor above the ask is refused", async () => {
     const { w, bob } = await bobWith(6_000_000n, 1_500_000_000n);
     await expectError(rpc(w.ctx, mintIx(w, bob, 1_000_000_000n, null, 2_000_000_000n), [bob]), "BadParameter");

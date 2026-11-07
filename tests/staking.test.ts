@@ -352,11 +352,11 @@ describe("staking: the pot", () => {
     assert.ok(balance(w.ctx, ata(NATIVE_MINT, long.publicKey, TOKEN_PROGRAM_ID)) > 29n * SOL);
   });
 
-  it("what nothing counted to earn goes back to the next pot, and a pot can't start early", async () => {
+  it("what nothing counted to earn goes back to the next pot", async () => {
     const w = await stakeWorld();
     await deposit(w, 30n * SOL);
     await fundPot(w);
-    await expectError(fundPot(w), "StreamRunning");
+    await expectError(fundPot(w), "NothingToTake");
     warp(w.ctx, MONTH);
     assert.equal(n((await pool(w)).periods), 1n);
     await fundPot(w); // nobody counted: all of it again
@@ -366,6 +366,29 @@ describe("staking: the pot", () => {
 
     const empty = await stakeWorld();
     await expectError(fundPot(empty), "NothingToTake");
+  });
+
+  it("a dust donation can't hold the month's SOL back: a top-up re-spreads over a fresh month (L3)", async () => {
+    const w = await stakeWorld();
+    const a = await warmed(w);
+    // A griefer starts a month with 1 lamport before the keeper's sales land.
+    await deposit(w, 1n);
+    await fundPot(w);
+    warp(w.ctx, DAY);
+    // The real SOL arrives and tops the month up: it all streams over the next 30 days.
+    await deposit(w, 30n * SOL);
+    await fundPot(w);
+    const p = await pool(w);
+    assert.equal(n(p.funded), 30n * SOL + 1n);
+    assert.equal(n(p.periods), 1n, "a top-up isn't a new month");
+    // Another dust top-up would stretch the payout out: it must bring at least what has streamed.
+    warp(w.ctx, DAY);
+    await deposit(w, 1n);
+    await expectError(fundPot(w), "StreamRunning");
+    warp(w.ctx, MONTH);
+    await claim(w, a);
+    const got = balance(w.ctx, ata(NATIVE_MINT, a.publicKey, TOKEN_PROGRAM_ID));
+    assert.ok(got <= 30n * SOL + 1n && 30n * SOL - got < 1_000n, `${got}`);
   });
 
   it("a new pot never promises what stakers are still owed", async () => {
@@ -511,7 +534,7 @@ describe("staking: selling for the pot", () => {
 describe("staking: free baskets", () => {
   const BURN = 10_000n * ONE_GRAVI;
 
-  async function createBasket(w: SW, who: Keypair, gravi: boolean, stakeAccounts?: Keypair, writable = true) {
+  async function createBasket(w: SW, who: Keypair, gravi: boolean, stakeAccounts?: Keypair, writable = true, mints = [w.mintA, w.mintB]) {
     const basketId = Keypair.generate().publicKey.toBytes().slice(0, 16);
     const basket = pda.basket(who.publicKey, basketId);
     const extra = stakeAccounts
@@ -523,7 +546,7 @@ describe("staking: free baskets", () => {
     await rpc(
       w.ctx,
       w.ctx.vault.methods
-        .initializeBasket({ basketId: Array.from(basketId), access: { public: {} }, control: { creator: {} }, rebalanceMode: { hybrid: {} }, intervalSecs: new BN(86_400), driftBps: 500, mgmtFeeBps: 20, mints: [w.mintA, w.mintB], targetBps: [5_000, 5_000] })
+        .initializeBasket({ basketId: Array.from(basketId), access: { public: {} }, control: { creator: {} }, rebalanceMode: { hybrid: {} }, intervalSecs: new BN(86_400), driftBps: 500, mgmtFeeBps: 20, mints, targetBps: mints.map(() => 10_000 / mints.length) })
         .accountsPartial({
           creator: who.publicKey,
           basket,
@@ -532,7 +555,7 @@ describe("staking: free baskets", () => {
           ...(gravi ? { graviMint: w.graviMint, creatorGravi: ata(w.graviMint, who.publicKey, GRAVI_PROGRAM), graviTokenProgram: GRAVI_PROGRAM } : NO_GRAVI),
         })
         .remainingAccounts([
-          ...[w.mintA, pda.asset(w.mintA), w.mintB, pda.asset(w.mintB)].map((pubkey) => ({ pubkey, isSigner: false, isWritable: false })),
+          ...mints.flatMap((m) => [m, pda.asset(m)]).map((pubkey) => ({ pubkey, isSigner: false, isWritable: false })),
           ...extra,
         ]),
       [who],
@@ -616,7 +639,14 @@ describe("staking: free baskets", () => {
     await setCreationBurn(w.ctx, w.graviMint, BURN);
     await rpc(w.ctx, w.ctx.vault.methods.setSmartBurn(new BN((50_000n * ONE_GRAVI).toString())).accountsPartial({ authority: w.ctx.payer.publicKey, protocol: pda.protocol(), graviMint: w.graviMint }));
     const who = await warmed(w);
-    const basket = await createBasket(w, who, false, who);
+    // Four assets at 25%, within the guardrails (two can't be: 35% each is 70%).
+    const more: PublicKey[] = [];
+    for (let i = 0; i < 2; i++) {
+      const m = await createMint(w.ctx, 6, TOKEN_PROGRAM_ID);
+      await listAsset(w.ctx, m);
+      more.push(m);
+    }
+    const basket = await createBasket(w, who, false, who, true, [w.mintA, w.mintB, ...more]);
     const guard = { maxDayBps: 2_000, maxWeekBps: 5_000, maxWeightBps: 3_500, maxUnverifiedBps: 3_000, minAssets: 2, maxAssets: 6, stopBps: 0, stopTrailing: false };
     const before = balance(w.ctx, ata(w.graviMint, who.publicKey, GRAVI_PROGRAM));
     await rpc(

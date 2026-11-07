@@ -203,14 +203,20 @@ sold or bought at $0, so it stays in the vault and redeeming still pays it out.
 
 A creator can set a stop loss on any of a basket's assets: a percentage, 5% to 90%, below a
 reference price. A fixed stop's reference is the asset's price when the stop was set ("down 30%
-from now"); a trailing stop's reference rises with every higher price, so it sits below the
-asset's highest price since. The stops are stored on chain, where anyone can read them.
+from now"); a trailing stop's reference rises with higher prices that have held (the asset's
+guard reference, section 4, at least 5 minutes old), so it sits below the asset's highest
+lasting price since; one high print doesn't lift it. On a basket with holders a reference can't be
+above the asset's posted price when the stop is written, so no stop starts out triggered. The
+stops are stored on chain, where anyone can read them.
 
-If the asset's posted price is below its stop, the stop arms; if it's still below 5 minutes later,
-it fires. The program checks both prices (each fresh, within the bounds of section 4) and the
-time between them, and anyone may ask it to: the keeper does every minute. A price back above the
-stop before then disarms it. Firing sets the asset's target to 0% and scales every other target
-up in proportion, so the basket is at 100% again without it, and the stop is gone. The keeper then
+If the asset's posted price is below its stop, the stop arms; if it's still below 5 to 15 minutes
+later, it fires. An arming nobody confirmed within 15 minutes starts over. The program checks both
+prices (each fresh, within the bounds of section 4) and the time between them, and anyone may ask
+it to: the keeper does every minute. A price back above the stop before then disarms it. Firing
+sets the asset's target to 0% and scales every other target up in proportion, so the basket is at
+100% again without it, and the stop is gone. On a smart basket, or one its holders run (section
+8.1), no asset is scaled past its weight cap: what the caps leave no room for stays on the stopped
+asset, and a stop with no room at all waits, armed. The keeper then
 sells the asset out in clips of up to half the basket, a minute apart, each into the asset
 furthest under its new target and each held to the oracle floor. This happens whatever the
 basket's size: the $50 line doesn't apply to a stop.
@@ -419,7 +425,8 @@ sold or redeemed until withdrawn. In a community basket, staked shares vote:
 
 - **Weight.** One share, one vote, built up over 3 days and read as of the moment a proposal
   opened, so shares bought or staked after that carry nothing on it.
-- **Proposing.** Staked weight of 1% of the supply, and at most 3 open proposals per basket.
+- **Proposing.** Staked weight of 1% of the supply, at most 3 open proposals per basket, and one
+  per wallet.
   Proposals can change targets, add an asset, change the rebalancing policy, the stops or the
   split, lower the creator's fee or cut, hand the basket to the strategist, or return it to its
   creator.
@@ -428,7 +435,9 @@ sold or redeemed until withdrawn. In a community basket, staked shares vote:
   hours, so anyone who disagrees can redeem first. Anyone can then run it, for 7 days.
 - **Limits.** Every change stays within the ceilings a smart basket's strategist is held to: 35%
   in one asset (30% if not Verified), 40% of the targets changed in a day, 100% in a week. Stop
-  losses fire with no vote. Redeeming is always open.
+  losses fire with no vote, within the same weight caps. An asset sold out can be removed by
+  anyone, but not while a proposal is open, nor for 11 days after a vote added one, so a new asset
+  can't be dropped before the vote that weights it runs. Redeeming is always open.
 
 A majority can still do what its votes allow: within those limits it could replace a whole basket
 in about 6 days. A vote can be bought, and nothing on chain can stop that. Holders of a community

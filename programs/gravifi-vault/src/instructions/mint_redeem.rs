@@ -51,6 +51,7 @@ pub fn seed_basket<'info>(
         share_token_program: &a.share_token_program,
         invited: false,
         creator_cut_bps: 0,
+        min_net: 0,
     };
     collect_and_mint(deposit, ctx.remaining_accounts, shares)
 }
@@ -63,6 +64,11 @@ pub fn seed_basket<'info>(
 /// isn't known to the unit when it signs: it pre-signs this with the quoted amount and
 /// its slippage floor, and nothing is left over except what legs filled unevenly.
 ///
+/// With `MIN_NET_FLAG` set in `min_shares`, the rest of it is a floor on the shares the payer
+/// receives, after the protocol's fee and the creator's cut, so a fee raised between signing and
+/// landing can't take more than the buyer agreed to. Without it, it floors the shares minted
+/// before them, as it always did.
+///
 /// A referred wallet passes its invite after the quads and pays half the fee (`Invite`).
 pub fn mint_in_kind<'info>(
     ctx: Context<'_, '_, 'info, 'info, MintInKind<'info>>,
@@ -73,10 +79,12 @@ pub fn mint_in_kind<'info>(
     let (quads, extra) = split_quads(ctx.remaining_accounts, ctx.accounts.basket.constituent_count)?;
     let invited = invited(extra, &ctx.accounts.payer.key())?;
     require!(!ctx.accounts.basket.mint_paused, VaultError::MintPaused);
-    require!(min_shares <= shares, VaultError::BadParameter);
-    let shares = if min_shares < shares { affordable_shares(&ctx, shares)? } else { shares };
+    let net_floor = min_shares & MIN_NET_FLAG != 0;
+    let floor = min_shares & !MIN_NET_FLAG;
+    require!(floor <= shares, VaultError::BadParameter);
+    let shares = if floor < shares { affordable_shares(&ctx, shares)? } else { shares };
     require!(shares > 0, VaultError::ZeroShares);
-    require!(shares >= min_shares, VaultError::BelowMinShares);
+    require!(net_floor || shares >= floor, VaultError::BelowMinShares);
 
     let basket = &ctx.accounts.basket;
     let payer = ctx.accounts.payer.key();
@@ -117,6 +125,7 @@ pub fn mint_in_kind<'info>(
         share_token_program: &a.share_token_program,
         invited,
         creator_cut_bps,
+        min_net: if net_floor { floor } else { 0 },
     };
     collect_and_mint(deposit, quads, shares)
 }
@@ -265,6 +274,8 @@ pub(crate) struct Deposit<'a, 'info> {
     pub invited: bool,
     /// The creator's cut of this deposit. An invite doesn't change it.
     pub creator_cut_bps: u16,
+    /// The fewest shares the payer must receive, after the fee and the cut.
+    pub min_net: u64,
 }
 
 /// Shared body of `seed_basket` and `mint_in_kind`: pull every sleeve in, then mint.
@@ -341,6 +352,7 @@ pub(crate) fn collect_and_mint<'info>(d: Deposit<'_, 'info>, remaining: &[Accoun
     let cut = flow_fee(shares, d.creator_cut_bps)?;
     let kept = fee.checked_add(cut).ok_or(VaultError::MathOverflow)?;
     require!(shares > kept, VaultError::BelowFee);
+    require!(shares - kept >= d.min_net, VaultError::BelowMinShares);
     d.basket.creator_unclaimed = d.basket.creator_unclaimed.checked_add(cut).ok_or(VaultError::MathOverflow)?;
     owe_stakers(d.basket, d.protocol, fee, treasury_fee)?;
     let program = d.share_token_program.to_account_info();
@@ -471,7 +483,7 @@ pub struct SeedBasket<'info> {
     #[account(seeds = [BURN_SEED], bump)]
     pub burn_authority: UncheckedAccount<'info>,
 
-    #[account(mut, token::mint = share_mint, token::authority = protocol)]
+    #[account(mut, token::mint = share_mint, token::authority = protocol, constraint = is_ata(&treasury_shares.to_account_info(), &protocol.key(), &share_mint.key()) @ VaultError::NotBasketVault)]
     pub treasury_shares: Box<InterfaceAccount<'info, TokenAccountI>>,
 
     pub share_token_program: Interface<'info, TokenInterface>,
@@ -501,7 +513,7 @@ pub struct MintInKind<'info> {
     #[account(seeds = [BURN_SEED], bump)]
     pub burn_authority: UncheckedAccount<'info>,
 
-    #[account(mut, token::mint = share_mint, token::authority = protocol)]
+    #[account(mut, token::mint = share_mint, token::authority = protocol, constraint = is_ata(&treasury_shares.to_account_info(), &protocol.key(), &share_mint.key()) @ VaultError::NotBasketVault)]
     pub treasury_shares: InterfaceAccount<'info, TokenAccountI>,
 
     /// Required only when access == Allowlist.
@@ -534,7 +546,7 @@ pub struct RedeemInKind<'info> {
     #[account(seeds = [BURN_SEED], bump)]
     pub burn_authority: UncheckedAccount<'info>,
 
-    #[account(mut, token::mint = share_mint, token::authority = protocol)]
+    #[account(mut, token::mint = share_mint, token::authority = protocol, constraint = is_ata(&treasury_shares.to_account_info(), &protocol.key(), &share_mint.key()) @ VaultError::NotBasketVault)]
     pub treasury_shares: InterfaceAccount<'info, TokenAccountI>,
 
     pub share_token_program: Interface<'info, TokenInterface>,

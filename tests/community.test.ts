@@ -147,8 +147,11 @@ const execute = (w: W, id: number, verified: PublicKey[] = []) =>
       .remainingAccounts(verified.map((pubkey) => ({ pubkey, isSigner: false, isWritable: false }))),
   );
 
+/** A wallet's one open proposal on the basket. */
+const openOf = (w: W, who: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("open"), w.basket.toBuffer(), who.toBuffer()], w.ctx.vault.programId)[0];
+
 const close = (w: W, id: number, proposer: PublicKey) =>
-  rpc(w.ctx, w.ctx.vault.methods.communityClose().accountsPartial({ community: pda.community(w.basket), proposal: pda.proposal(w.basket, id), proposer }));
+  rpc(w.ctx, w.ctx.vault.methods.communityClose().accountsPartial({ community: pda.community(w.basket), proposal: pda.proposal(w.basket, id), proposer, openProposal: openOf(w, proposer) }));
 
 /** Bob has 90% staked and fully weighted, so what he proposes and backs passes. */
 async function bobReady(w: W) {
@@ -156,9 +159,22 @@ async function bobReady(w: W) {
   warp(w.ctx, VOTE);
 }
 
-/** Proposes, passes and waits out `action`, and returns its id, ready to execute. */
-async function passed(w: W, action: Action, extra: { burns?: boolean; stake?: Keypair } = {}) {
-  const id = await propose(w, w.bob, action, extra);
+/** Bob as in `bobReady`, and Alice (9%) and Carol (20 shares, about 2%) staked enough to propose:
+ *  each wallet has one open proposal at a time. Returns Carol. */
+async function crewReady(w: W) {
+  const carol = fund(w.ctx);
+  await fundHolder(w, carol);
+  await rpc(w.ctx, mintIx(w, carol, 20n * SHARES), [carol]);
+  await shareStake(w, carol, 20n * SHARES);
+  await shareStake(w, w.alice, 90n * SHARES);
+  await bobReady(w);
+  return carol;
+}
+
+/** Proposes (Bob, unless `who`), passes with Bob's vote and waits out `action`, and returns its
+ *  id, ready to execute. */
+async function passed(w: W, action: Action, extra: { burns?: boolean; stake?: Keypair } = {}, who?: Keypair) {
+  const id = await propose(w, who ?? w.bob, action, extra);
   await vote(w, w.bob, id);
   warp(w.ctx, VOTE + WAIT);
   return id;
@@ -384,7 +400,7 @@ describe("community: passing", () => {
     await shareStake(w, carol, 600n * SHARES);
     warp(w.ctx, VOTE);
     const fee = await propose(w, w.bob, { creatorFee: { mgmtFeeBps: 0 } });
-    const policy = await propose(w, w.bob, { policy: { rebalanceMode: { hybrid: {} }, intervalSecs: new BN(2 * DAY), driftBps: 600 } });
+    const policy = await propose(w, carol, { policy: { rebalanceMode: { hybrid: {} }, intervalSecs: new BN(2 * DAY), driftBps: 600 } });
     for (const id of [fee, policy]) {
       await vote(w, w.bob, id);
       await vote(w, carol, id, false);
@@ -394,14 +410,39 @@ describe("community: passing", () => {
     await execute(w, policy);
   });
 
+  it("one open proposal per wallet, so filling every slot takes three of them (M3)", async () => {
+    const w = await goCommunity();
+    const carol = await crewReady(w);
+    const action = { split: { numerator: 2, denominator: 1 } };
+    const rent = w.ctx.svm.getBalance(w.alice.publicKey)!;
+    const a = await propose(w, w.alice, action);
+    assert.ok(w.ctx.svm.getAccount(openOf(w, w.alice.publicKey)), "Alice's open proposal, on her rent");
+    // One wallet with 1% staked can't hold every slot by itself.
+    await expectError(propose(w, w.alice, action), "ProposerHasOpenProposal");
+    await propose(w, w.bob, action);
+    await expectError(propose(w, w.bob, action), "ProposerHasOpenProposal");
+    await propose(w, carol, action);
+    // Closed (failed: nobody voted), she can propose again, and her rent comes back.
+    warp(w.ctx, VOTE);
+    await close(w, a, w.alice.publicKey);
+    assert.equal(w.ctx.svm.getAccount(openOf(w, w.alice.publicKey))?.lamports ?? 0, 0);
+    assert.equal(w.ctx.svm.getBalance(w.alice.publicKey)!, rent);
+    await propose(w, w.alice, action);
+  });
+
   it("at most 3 open at once; a done one closes, its rent back, and its votes too", async () => {
     const w = await goCommunity();
-    await bobReady(w);
+    const carol = await crewReady(w);
+    const dave = fund(w.ctx);
+    await fundHolder(w, dave);
+    await rpc(w.ctx, mintIx(w, dave, 20n * SHARES), [dave]);
+    await shareStake(w, dave, 20n * SHARES);
+    warp(w.ctx, VOTE);
     const action = { split: { numerator: 2, denominator: 1 } };
     const a = await propose(w, w.bob, action);
-    await propose(w, w.bob, action);
-    await propose(w, w.bob, action);
-    await expectError(propose(w, w.bob, action), "TooManyProposals");
+    await propose(w, w.alice, action);
+    await propose(w, carol, action);
+    await expectError(propose(w, dave, action), "TooManyProposals");
     await vote(w, w.bob, a);
     await expectError(close(w, a, w.bob.publicKey), "ProposalStillOpen");
     const closeVote = () => rpc(w.ctx, w.ctx.vault.methods.communityCloseVote().accountsPartial({ vote: pda.vote(pda.proposal(w.basket, a), w.bob.publicKey), wallet: w.bob.publicKey }));
@@ -409,9 +450,9 @@ describe("community: passing", () => {
     warp(w.ctx, VOTE);
     await expectError(close(w, a, w.bob.publicKey), "ProposalStillOpen"); // passed: it may yet run
     await closeVote();
-    await close(w, 1, w.bob.publicKey); // no votes: failed
+    await close(w, 1, w.alice.publicKey); // no votes: failed
     assert.equal((await community(w)).open, 2);
-    await propose(w, w.bob, action);
+    await propose(w, dave, action);
     assert.equal((await community(w)).nextId, 4, "ids never repeat");
   });
 });
@@ -438,7 +479,7 @@ describe("community: what a vote does", () => {
 
   it("reweights within the weight caps, Verified or not", async () => {
     const w = await goCommunity();
-    await bobReady(w);
+    await crewReady(w);
     const { C, vault } = await assetC(w);
     const add = await passed(w, { addAsset: { mint: C } });
     await executeAdd(w, add, C, vault);
@@ -447,17 +488,17 @@ describe("community: what a vote does", () => {
     // A is 60%, B 40%. C unverified can't take 31%.
     const over = await passed(w, await reweight(w, [4_000, 2_900, 3_100]));
     await expectError(execute(w, over, await verifiedOf(w)), "WeightAboveCap");
-    const ok = await passed(w, await reweight(w, [4_000, 3_000, 3_000]));
+    const ok = await passed(w, await reweight(w, [4_000, 3_000, 3_000]), {}, w.alice);
     await execute(w, ok, await verifiedOf(w));
     assert.deepEqual(await targets(w), [4_000, 3_000, 3_000]);
-    await close(w, ok, w.bob.publicKey);
+    await close(w, ok, w.alice.publicKey);
     // At least two assets stay above 0%.
-    await expectError(propose(w, w.bob, await reweight(w, [10_000, 0, 0])), "AssetCountOutOfRange");
+    await expectError(propose(w, w.alice, await reweight(w, [10_000, 0, 0])), "AssetCountOutOfRange");
   });
 
   it("stays within the change limits, day and week", async () => {
     const w = await goCommunity();
-    await bobReady(w);
+    const carol = await crewReady(w);
     for (let i = 0; i < 4; i++) {
       const { C, vault } = await assetC(w);
       await rpc(w.ctx, w.ctx.vault.methods.setVerified(true).accountsPartial({ authority: w.ctx.payer.publicKey, protocol: pda.protocol(), mint: C, verified: pda.verified(C) }));
@@ -472,10 +513,11 @@ describe("community: what a vote does", () => {
 
     // Each is 40% from where the basket stands now, so all three can be proposed together. Run in
     // order they move 40%, 20% and 40%.
+    const proposers = [w.bob, w.alice, carol];
     const ids = [
       await propose(w, w.bob, await reweight(w, [3_000, 3_000, 1_000, 1_000, 1_000, 1_000])),
-      await propose(w, w.bob, await reweight(w, [3_000, 3_000, 0, 0, 2_000, 2_000])),
-      await propose(w, w.bob, await reweight(w, [3_000, 3_000, 2_000, 2_000, 0, 0])),
+      await propose(w, w.alice, await reweight(w, [3_000, 3_000, 0, 0, 2_000, 2_000])),
+      await propose(w, carol, await reweight(w, [3_000, 3_000, 2_000, 2_000, 0, 0])),
     ];
     for (const id of ids) await vote(w, w.bob, id);
     warp(w.ctx, VOTE + WAIT);
@@ -486,7 +528,7 @@ describe("community: what a vote does", () => {
     await expectError(execute(w, ids[2], await verifiedOf(w)), "TurnoverDayCap");
     warp(w.ctx, DAY);
     await execute(w, ids[2], await verifiedOf(w));
-    for (const id of ids) await close(w, id, w.bob.publicKey);
+    for (const [i, id] of ids.entries()) await close(w, id, proposers[i].publicKey);
     // The whole week's 100% is spent, 2 days in: a fourth has to wait for the first to leave the window.
     const fourth = await passed(w, await reweight(w, [3_000, 3_000, 1_000, 1_000, 1_000, 1_000]));
     await expectError(execute(w, fourth, await verifiedOf(w)), "TurnoverWeekCap");
@@ -497,11 +539,11 @@ describe("community: what a vote does", () => {
 
   it("targets pinned to assets that have since changed don't run", async () => {
     const w = await goCommunity();
-    await bobReady(w);
+    await crewReady(w);
     const { C, vault } = await assetC(w);
     const old = await propose(w, w.bob, await reweight(w, [5_000, 5_000]));
     await vote(w, w.bob, old);
-    const add = await propose(w, w.bob, { addAsset: { mint: C } });
+    const add = await propose(w, w.alice, { addAsset: { mint: C } });
     await vote(w, w.bob, add);
     warp(w.ctx, VOTE + WAIT);
     await executeAdd(w, add, C, vault);
@@ -514,26 +556,96 @@ describe("community: what a vote does", () => {
     await expectError(propose(w, w.bob, { creatorFee: { mgmtFeeBps: 20 } }), "BadProposal");
     await expectError(propose(w, w.bob, { creatorFee: { mgmtFeeBps: 21 } }), "BadProposal");
     const id = await passed(w, { creatorFee: { mgmtFeeBps: 5 } });
-    await execute(w, id);
+    // Run alone it would forfeit what the old fee streamed since the last accrual (L4).
+    await expectError(execute(w, id), "FeeNotAccrued");
+    const creatorShares = ata(w.shareMint, w.creator.publicKey, w.shareProgram);
+    const before = balance(w.ctx, creatorShares);
+    const accrue = await w.ctx.vault.methods
+      .accrueFees()
+      .accountsPartial({ basket: w.basket, shareMint: w.shareMint, creatorShares, shareTokenProgram: w.shareProgram })
+      .remainingAccounts([w.vaultA, w.vaultB].map((pubkey) => ({ pubkey, isSigner: false, isWritable: false })))
+      .instruction();
+    const run = await w.ctx.vault.methods
+      .communityExecute()
+      .accountsPartial({ basket: w.basket, community: pda.community(w.basket), proposal: pda.proposal(w.basket, id) })
+      .instruction();
+    await send(w.ctx, [accrue, run]);
+    assert.ok(balance(w.ctx, creatorShares) > before, "the old fee was paid up to the change");
     assert.equal((await basketOf(w)).mgmtFeeBps, 5);
   });
 
-  it("sets stops, and a stop fires with no vote", async () => {
+  it("sets stops, and a stop fires with no vote, within the Reweight caps (M1)", async () => {
+    // Four assets at 25%, set by the creator before handing it over; B, C and D Verified.
+    const w = await communityWorld();
+    const extra: PublicKey[] = [];
+    for (let i = 0; i < 2; i++) {
+      const { C, vault } = await assetC(w);
+      await rpc(w.ctx, w.ctx.vault.methods.addConstituent().accountsPartial({ ...NO_GRAVI, authority: w.creator.publicKey, basket: w.basket, mint: C, assetEntry: pda.asset(C), vault }), [w.creator]);
+      extra.push(C);
+    }
+    await rpc(w.ctx, w.ctx.vault.methods.setTargets([2_500, 2_500, 2_500, 2_500]).accountsPartial({ authority: w.creator.publicKey, basket: w.basket }), [w.creator]);
+    for (const m of [w.mintB, ...extra]) await rpc(w.ctx, w.ctx.vault.methods.setVerified(true).accountsPartial({ authority: w.ctx.payer.publicKey, protocol: pda.protocol(), mint: m, verified: pda.verified(m) }));
+    await openDoor(w);
+    await enter(w);
+    await bobReady(w);
+    const keeper = fund(w.ctx);
+    await rpc(w.ctx, w.ctx.vault.methods.initKeepers(keeper.publicKey, keeper.publicKey).accountsPartial({ authority: w.ctx.payer.publicKey, keepers: pda.keepers() }));
+    // Proposed at a reference of $1.20 (A's price when it opened, say); A is at $1 when it runs.
+    const stops = [{ mint: w.mintA, pctBps: 1_000, trailing: false, referenceE12: new BN("1200000000000") }];
+    const id = await passed(w, { stops: { stops } });
+    await postPrices(w.ctx, keeper, [[w.mintA, 1_000_000_000_000n]]);
+    const run = (prices: PublicKey[]) =>
+      rpc(
+        w.ctx,
+        w.ctx.vault.methods
+          .communityExecuteStops()
+          .accountsPartial({ payer: w.ctx.payer.publicKey, basket: w.basket, community: pda.community(w.basket), proposal: pda.proposal(w.basket, id), stopLoss: pda.stop(w.basket) })
+          .remainingAccounts(prices.map((pubkey) => ({ pubkey, isSigner: false, isWritable: false }))),
+      );
+    await expectError(run([]), "BadRemainingAccounts");
+    await run([pda.price(w.mintA)]);
+    // Lowered to the price: it doesn't start out armed (at $1.20 its level, $1.08, is above $1).
+    const st = (await w.ctx.vault.account.stopLoss.fetch(pda.stop(w.basket))) as any;
+    assert.equal(st.stops[0].referenceE12.toString(), "1000000000000");
+
+    const records = (await verifiedOf(w)).map((pubkey) => ({ pubkey, isSigner: false, isWritable: false }));
+    const check = (named = records) => rpc(w.ctx, w.ctx.vault.methods.checkStop().accountsPartial({ basket: w.basket, stopLoss: pda.stop(w.basket), assetPrice: pda.price(w.mintA) }).remainingAccounts(named));
+    await check();
+    assert.equal(((await w.ctx.vault.account.stopLoss.fetch(pda.stop(w.basket))) as any).stops[0].armedAt.toString(), "0");
+    await postPrices(w.ctx, keeper, [[w.mintA, 800_000_000_000n]]);
+    await check();
+    warp(w.ctx, 300);
+    await postPrices(w.ctx, keeper, [[w.mintA, 800_000_000_000n]]);
+    await expectError(check([]), "BadRemainingAccounts");
+    await check();
+    // 25% each to 33.3%, under the 35% Verified cap.
+    assert.deepEqual(await targets(w), [0, 3_334, 3_333, 3_333]);
+  });
+
+  it("a vote's stop moves no weight past the caps: a two-asset basket's can't fire (M1)", async () => {
     const w = await goCommunity();
     await bobReady(w);
     const keeper = fund(w.ctx);
     await rpc(w.ctx, w.ctx.vault.methods.initKeepers(keeper.publicKey, keeper.publicKey).accountsPartial({ authority: w.ctx.payer.publicKey, keepers: pda.keepers() }));
     await postPrices(w.ctx, keeper, [[w.mintA, 1_000_000_000_000n]]);
-    const stops = [{ mint: w.mintA, pctBps: 1_000, trailing: false, referenceE12: new BN("1000000000000") }];
-    const id = await passed(w, { stops: { stops } });
-    await rpc(w.ctx, w.ctx.vault.methods.communityExecuteStops().accountsPartial({ payer: w.ctx.payer.publicKey, basket: w.basket, community: pda.community(w.basket), proposal: pda.proposal(w.basket, id), stopLoss: pda.stop(w.basket) }));
+    const id = await passed(w, { stops: { stops: [{ mint: w.mintA, pctBps: 1_000, trailing: false, referenceE12: new BN("1000000000000") }] } });
+    await postPrices(w.ctx, keeper, [[w.mintA, 1_000_000_000_000n]]);
+    await rpc(
+      w.ctx,
+      w.ctx.vault.methods
+        .communityExecuteStops()
+        .accountsPartial({ payer: w.ctx.payer.publicKey, basket: w.basket, community: pda.community(w.basket), proposal: pda.proposal(w.basket, id), stopLoss: pda.stop(w.basket) })
+        .remainingAccounts([{ pubkey: pda.price(w.mintA), isSigner: false, isWritable: false }]),
+    );
+    const records = (await verifiedOf(w)).map((pubkey) => ({ pubkey, isSigner: false, isWritable: false }));
+    const check = () => rpc(w.ctx, w.ctx.vault.methods.checkStop().accountsPartial({ basket: w.basket, stopLoss: pda.stop(w.basket), assetPrice: pda.price(w.mintA) }).remainingAccounts(records));
     await postPrices(w.ctx, keeper, [[w.mintA, 800_000_000_000n]]);
-    const check = () => rpc(w.ctx, w.ctx.vault.methods.checkStop().accountsPartial({ basket: w.basket, stopLoss: pda.stop(w.basket), assetPrice: pda.price(w.mintA) }));
     await check();
     warp(w.ctx, 300);
     await postPrices(w.ctx, keeper, [[w.mintA, 800_000_000_000n]]);
-    await check();
-    assert.deepEqual(await targets(w), [0, 10_000]);
+    // B (40%, Unverified) would go to 100%, which no Reweight could do: refused, still armed.
+    await expectError(check(), "StopNoRoom");
+    assert.deepEqual(await targets(w), [6_000, 4_000]);
   });
 
   it("splits", async () => {
@@ -544,12 +656,23 @@ describe("community: what a vote does", () => {
     await expectError(rpc(w.ctx, w.ctx.vault.methods.split(2, 1).accountsPartial({ authority: w.creator.publicKey, basket: w.basket, shareMint: w.shareMint, tokenProgram: TOKEN_2022_PROGRAM_ID }), [w.creator]), "CommunityManaged");
   });
 
-  it("removes a sold-out asset with no vote, for anyone", async () => {
+  it("removes a sold-out asset with no vote, for anyone, but not one a vote just added (M2)", async () => {
     const w = await goCommunity();
     await bobReady(w);
     const { C, vault } = await assetC(w);
-    await executeAdd(w, await passed(w, { addAsset: { mint: C } }), C, vault);
-    const remove = (i: number) => rpc(w.ctx, w.ctx.vault.methods.communityRemove(i).accountsPartial({ basket: w.basket }));
+    const add = await passed(w, { addAsset: { mint: C } });
+    await executeAdd(w, add, C, vault);
+    const remove = (i: number) => rpc(w.ctx, w.ctx.vault.methods.communityRemove(i).accountsPartial({ basket: w.basket, community: pda.community(w.basket) }));
+    // C sits at 0% with nothing in it until a Reweight weights it: nobody may remove it meanwhile.
+    await expectError(remove(2), "RemovalWaitsForVotes");
+    await close(w, add, w.bob.publicKey);
+    await expectError(remove(2), "AssetJustAdded");
+    // A Reweight in the works pins the assets: nothing goes while it's open.
+    warp(w.ctx, VOTE + WAIT + 7 * DAY);
+    const rw = await propose(w, w.bob, await reweight(w, [5_000, 4_000, 1_000]));
+    await expectError(remove(2), "RemovalWaitsForVotes");
+    warp(w.ctx, VOTE);
+    await close(w, rw, w.bob.publicKey); // nobody voted: failed
     await expectError(remove(0), "ConstituentNotEmpty");
     await remove(2);
     assert.equal((await basketOf(w)).constituentCount, 2);
@@ -558,8 +681,8 @@ describe("community: what a vote does", () => {
 
   it("leaving hands it back and voids what was passed before", async () => {
     const w = await goCommunity();
-    await bobReady(w);
-    const policy = await propose(w, w.bob, { policy: { rebalanceMode: { hybrid: {} }, intervalSecs: new BN(2 * DAY), driftBps: 600 } });
+    await crewReady(w);
+    const policy = await propose(w, w.alice, { policy: { rebalanceMode: { hybrid: {} }, intervalSecs: new BN(2 * DAY), driftBps: 600 } });
     await vote(w, w.bob, policy);
     const id = await passed(w, { leave: {} });
     await execute(w, id);
@@ -570,7 +693,7 @@ describe("community: what a vote does", () => {
 
     await enter(w);
     await expectError(execute(w, policy), "NotExecutable");
-    await close(w, policy, w.bob.publicKey);
+    await close(w, policy, w.alice.publicKey);
   });
 });
 
@@ -616,6 +739,7 @@ describe("community: handing it to the strategist", () => {
     const mandate = hash('{"goal":"momentum"}');
     const id = await passed(w, { goSmart: { mandateHash: mandate, guard: GUARD } });
     await executeSmart(w, id);
+    await close(w, id, w.bob.publicKey);
     const b = await basketOf(w);
     assert.ok(b.control.smart);
     assert.equal(b.community, 1);
@@ -632,6 +756,7 @@ describe("community: handing it to the strategist", () => {
     const next = hash('{"goal":"value"}');
     const m = await passed(w, { mandate: { mandateHash: next, guard: { ...GUARD, maxDayBps: 1_000 } } });
     await executeSmart(w, m);
+    await close(w, m, w.bob.publicKey);
     const s2: any = await w.ctx.vault.account.smart.fetch(pda.smart(w.basket));
     assert.deepEqual(Array.from(s2.mandateHash), next);
     assert.equal(s2.guard.maxDayBps, 1_000);

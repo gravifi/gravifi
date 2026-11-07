@@ -234,4 +234,18 @@ pub enum VaultError {
     ProposalStillOpen,
     #[msg("The basket's assets changed since this proposal opened")]
     AssetsChanged,
+    #[msg("A stop's reference can't be above the asset's fresh posted price")]
+    StopAbovePrice,
+    #[msg("The guardrails leave no room for this stop's weight")]
+    StopNoRoom,
+    #[msg("Nothing else of GraviFi's may run between a slice's start and its finish")]
+    SliceInterleaved,
+    #[msg("An asset a vote added can't be removed until its reweight vote has had its time")]
+    AssetJustAdded,
+    #[msg("An asset can't be removed while a proposal is open")]
+    RemovalWaitsForVotes,
+    #[msg("You already have an open proposal on this basket")]
+    ProposerHasOpenProposal,
+    #[msg("Accrue the creator's fee in the same transaction first")]
+    FeeNotAccrued,
 }

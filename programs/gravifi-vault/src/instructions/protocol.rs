@@ -489,7 +489,7 @@ pub struct TreasuryWithdraw<'info> {
 
     pub share_mint: InterfaceAccount<'info, MintI>,
 
-    #[account(mut, token::mint = share_mint, token::authority = protocol)]
+    #[account(mut, token::mint = share_mint, token::authority = protocol, constraint = is_ata(&treasury_shares.to_account_info(), &protocol.key(), &share_mint.key()) @ VaultError::NotBasketVault)]
     pub treasury_shares: InterfaceAccount<'info, TokenAccountI>,
 
     #[account(mut, token::mint = share_mint)]

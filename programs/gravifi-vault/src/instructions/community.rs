@@ -12,7 +12,7 @@ use crate::errors::VaultError;
 use crate::instructions::basket::{apply_split, burn_gravi, check_addable, check_policy, drop_emptied, GraviAccounts};
 use crate::instructions::smart::{check_guardrails, is_verified};
 use crate::instructions::staking::{burn_skip, set_protocol_flag, FreeUse};
-use crate::instructions::stops::{check_stops, write_stops};
+use crate::instructions::stops::{check_stops, hold_to_price, write_stops};
 use crate::state::*;
 use crate::token_util::*;
 
@@ -87,6 +87,7 @@ pub fn enter_community(ctx: Context<EnterCommunity>) -> Result<()> {
     require!(b.control == ControlMode::Creator && b.seeded && b.access == AccessMode::Public, VaultError::CommunityNotAllowed);
     b.control = ControlMode::Community;
     b.community = 1;
+    b.set_vote_added_at(0);
     let c = &mut a.community;
     c.bump = ctx.bumps.community;
     c.basket = b.key();
@@ -139,10 +140,12 @@ fn check_action(basket: &Basket, action: &ProposalAction) -> Result<()> {
     Ok(())
 }
 
-/// Opens a proposal. The proposer's staked shares must carry 1% of the supply right now. Adding an
-/// asset or going Smart burns what the creator would have, from the proposer, unless their GRAVI
-/// stake has a free basket left today, which this uses (its accounts follow in the remaining
-/// accounts); it's burned win or lose.
+/// Opens a proposal. The proposer's staked shares must carry 1% of the supply right now, and they
+/// may have one open proposal on the basket at a time (`OpenProposal`, whose rent they pay and get
+/// back at `community_close`): keeping all MAX_OPEN_PROPOSALS slots full takes three wallets with
+/// 1% each, not one. Adding an asset or going Smart burns what the creator would have, from the
+/// proposer, unless their GRAVI stake has a free basket left today, which this uses (its accounts
+/// follow in the remaining accounts); it's burned win or lose.
 pub fn community_propose<'info>(ctx: Context<'_, '_, 'info, 'info, CommunityPropose<'info>>, action: ProposalAction) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     let a = &mut *ctx.accounts;
@@ -152,6 +155,8 @@ pub fn community_propose<'info>(ctx: Context<'_, '_, 'info, 'info, CommunityProp
     let supply = a.share_mint.supply;
     let need = (supply as u128 * PROPOSE_MIN_BPS).div_ceil(BPS_DENOM);
     require!(a.share_stake.power_at(now)? as u128 >= need, VaultError::BelowProposalWeight);
+    // Created here, or still open from an earlier proposal of theirs.
+    require!(a.open_proposal.basket == Pubkey::default(), VaultError::ProposerHasOpenProposal);
 
     let protocol = a.protocol.to_account_info();
     let burn = match action {
@@ -181,6 +186,10 @@ pub fn community_propose<'info>(ctx: Context<'_, '_, 'info, 'info, CommunityProp
     p.votes_against = 0;
     p.executed = false;
     p.action = action;
+    let o = &mut a.open_proposal;
+    o.bump = ctx.bumps.open_proposal;
+    o.basket = a.basket.key();
+    o.id = p.id;
     let c = &mut a.community;
     c.next_id = c.next_id.checked_add(1).ok_or(VaultError::MathOverflow)?;
     c.open += 1;
@@ -230,8 +239,9 @@ fn leave(basket: &mut Basket, community: &mut Community) -> Result<()> {
 
 /// Runs a passed Reweight, Policy, CreatorFee, CreatorCut, or Leave of a basket not handed to the strategist.
 /// Permissionless. For a Reweight, remaining accounts: each asset's Verified record address, in
-/// order. Before a CreatorFee, the keeper runs `accrue_fees` in the same transaction, as the
-/// creator's app does before `set_policy`: what the old fee streamed is otherwise forfeit.
+/// order. A CreatorFee needs `accrue_fees` earlier in the same transaction (the creator's fee
+/// accrued this second), as the creator's app runs it before `set_policy`: what the old fee
+/// streamed would otherwise be forfeit, and anyone can execute.
 pub fn community_execute<'info>(ctx: Context<'_, '_, 'info, 'info, CommunityExecute<'info>>) -> Result<()> {
     let a = &mut *ctx.accounts;
     take_ready(&a.basket, &a.community, &mut a.proposal)?;
@@ -271,8 +281,10 @@ pub fn community_execute<'info>(ctx: Context<'_, '_, 'info, 'info, CommunityExec
         ProposalAction::CreatorFee { mgmt_fee_bps } => {
             let b = &mut a.basket;
             require!(*mgmt_fee_bps < b.mgmt_fee_bps, VaultError::BadProposal);
+            let now = Clock::get()?.unix_timestamp;
+            require!(b.last_fee_accrual == now, VaultError::FeeNotAccrued);
             b.mgmt_fee_bps = *mgmt_fee_bps;
-            b.last_fee_accrual = Clock::get()?.unix_timestamp;
+            b.last_fee_accrual = now;
         }
         ProposalAction::CreatorCut { bps } => {
             let b = &mut a.basket;
@@ -289,7 +301,8 @@ pub fn community_execute<'info>(ctx: Context<'_, '_, 'info, 'info, CommunityExec
 }
 
 /// Runs a passed AddAsset, at 0% like any added asset: a Reweight then gives it a weight. The
-/// basket's vault for it must exist. Permissionless.
+/// basket's vault for it must exist. Permissionless. Nothing can be removed from the basket for
+/// REMOVE_GRACE_SECS after (`community_remove`), so the Reweight has time to run.
 pub fn community_execute_add(ctx: Context<CommunityExecuteAdd>) -> Result<()> {
     let a = &mut *ctx.accounts;
     take_ready(&a.basket, &a.community, &mut a.proposal)?;
@@ -299,6 +312,7 @@ pub fn community_execute_add(ctx: Context<CommunityExecuteAdd>) -> Result<()> {
     check_addable(&a.basket, &a.mint.to_account_info(), &a.asset_entry.to_account_info(), &a.vault.to_account_info())?;
     a.basket.constituents.push(Constituent { mint, target_bps: 0, units_per_share: 0 });
     a.basket.constituent_count += 1;
+    a.basket.set_vote_added_at(Clock::get()?.unix_timestamp);
     Ok(())
 }
 
@@ -311,12 +325,16 @@ pub fn community_execute_split(ctx: Context<CommunityExecuteSplit>) -> Result<()
 }
 
 /// Runs a passed Stops. The payer covers the stop account's rent the first time. Permissionless.
-pub fn community_execute_stops(ctx: Context<CommunityExecuteStops>) -> Result<()> {
+/// Remaining accounts: each stop's `AssetPrice`, in order, fresh; a reference above its price is
+/// lowered to it, so no stop starts out armed.
+pub fn community_execute_stops<'info>(ctx: Context<'_, '_, 'info, 'info, CommunityExecuteStops<'info>>) -> Result<()> {
     let a = &mut *ctx.accounts;
     take_ready(&a.basket, &a.community, &mut a.proposal)?;
     let ProposalAction::Stops { stops } = &a.proposal.action else { return err!(VaultError::BadProposal) };
-    check_stops(&a.basket, stops)?;
-    write_stops(&mut a.stop_loss, a.basket.key(), ctx.bumps.stop_loss, stops);
+    let mut stops = stops.clone();
+    check_stops(&a.basket, &stops)?;
+    hold_to_price(&mut stops, ctx.remaining_accounts, true)?;
+    write_stops(&mut a.stop_loss, a.basket.key(), ctx.bumps.stop_loss, &stops);
     Ok(())
 }
 
@@ -354,21 +372,41 @@ pub fn community_execute_smart(ctx: Context<CommunityExecuteSmart>) -> Result<()
 }
 
 /// Drops an asset a community basket has sold out (0% target, no units). Permissionless: no holder's
-/// claim changes.
+/// claim changes. Not while a proposal is open (a Reweight pins the basket's assets, and removing
+/// one would void it), nor for REMOVE_GRACE_SECS after a vote added an asset (which sits at 0%
+/// with nothing in it until the Reweight that weights it runs). Close finished proposals first.
 pub fn community_remove(ctx: Context<CommunityRemove>, index: u8) -> Result<()> {
     require!(ctx.accounts.basket.control == ControlMode::Community, VaultError::NotCommunity);
+    require!(ctx.accounts.community.open == 0, VaultError::RemovalWaitsForVotes);
+    let now = Clock::get()?.unix_timestamp;
+    require!(now >= ctx.accounts.basket.vote_added_at() + REMOVE_GRACE_SECS, VaultError::AssetJustAdded);
     drop_emptied(&mut ctx.accounts.basket, index)
 }
 
 /// Closes a proposal that's done (run, failed, lapsed, or voided by the basket leaving Community),
-/// its rent back to the proposer. Permissionless.
+/// its rent back to the proposer, and their `OpenProposal` with it, so they can propose again.
+/// Permissionless. A proposal opened before `OpenProposal` existed has none to close.
 pub fn community_close(ctx: Context<CommunityClose>) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     let p = &ctx.accounts.proposal;
     let done = p.executed || p.epoch != ctx.accounts.community.epoch || now > p.exec_until() || (now >= p.vote_end() && !p.passed());
     require!(done, VaultError::ProposalStillOpen);
+    let (id, basket) = (p.id, p.basket);
     let c = &mut ctx.accounts.community;
     c.open = c.open.saturating_sub(1);
+
+    let o = ctx.accounts.open_proposal.to_account_info();
+    if o.owner == &crate::ID && o.data_len() > 0 {
+        let marker = OpenProposal::try_deserialize(&mut &o.try_borrow_data()?[..])?;
+        if marker.basket == basket && marker.id == id {
+            let proposer = ctx.accounts.proposer.to_account_info();
+            let lamports = o.lamports();
+            **o.try_borrow_mut_lamports()? = 0;
+            **proposer.try_borrow_mut_lamports()? = proposer.lamports().checked_add(lamports).ok_or(VaultError::MathOverflow)?;
+            o.resize(0)?;
+            o.assign(&anchor_lang::solana_program::system_program::ID);
+        }
+    }
     Ok(())
 }
 
@@ -459,6 +497,9 @@ pub struct CommunityPropose<'info> {
     pub share_stake: Box<Account<'info, ShareStake>>,
     #[account(mut, seeds = [COMMUNITY_SEED, basket.key().as_ref()], bump = community.bump)]
     pub community: Box<Account<'info, Community>>,
+    /// The proposer's one open proposal on this basket: refused if it's still there.
+    #[account(init_if_needed, payer = proposer, space = 8 + OpenProposal::INIT_SPACE, seeds = [OPEN_SEED, basket.key().as_ref(), proposer.key().as_ref()], bump)]
+    pub open_proposal: Box<Account<'info, OpenProposal>>,
     #[account(
         init,
         payer = proposer,
@@ -573,6 +614,8 @@ pub struct CommunityExecuteSmart<'info> {
 pub struct CommunityRemove<'info> {
     #[account(mut)]
     pub basket: Box<Account<'info, Basket>>,
+    #[account(seeds = [COMMUNITY_SEED, basket.key().as_ref()], bump = community.bump)]
+    pub community: Box<Account<'info, Community>>,
 }
 
 #[derive(Accounts)]
@@ -584,6 +627,10 @@ pub struct CommunityClose<'info> {
     /// CHECK: the proposer, who gets the rent back.
     #[account(mut, address = proposal.proposer)]
     pub proposer: UncheckedAccount<'info>,
+    /// CHECK: the proposer's `OpenProposal` on this basket, closed by hand if it's this proposal's
+    /// (a proposal opened before they existed has none).
+    #[account(mut, seeds = [OPEN_SEED, proposal.basket.as_ref(), proposal.proposer.as_ref()], bump)]
+    pub open_proposal: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]

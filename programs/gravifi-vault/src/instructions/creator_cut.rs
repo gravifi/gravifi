@@ -13,6 +13,7 @@ use anchor_spl::token_interface::{self, Mint as MintI, TokenAccount as TokenAcco
 use crate::errors::VaultError;
 use crate::instructions::basket::authorise_mandate;
 use crate::state::*;
+use crate::token_util::is_ata;
 
 /// A cut replaces the yearly fee. The app runs `accrue_fees` earlier in the same transaction to
 /// collect what's streamed so far, as it does for `set_policy`.
@@ -77,13 +78,16 @@ pub fn apply_cut_rise(ctx: Context<ApplyCutRise>) -> Result<()> {
 }
 
 /// Moves what the creator is owed from the treasury's shares to theirs. Permissionless, like
-/// `accrue_fees`: the destination is pinned to the creator.
+/// `accrue_fees`: the destination is pinned to the creator. Pays what the treasury's account holds
+/// of it, the rest staying owed (shares a side account took before the treasury's was pinned
+/// aren't in it).
 pub fn claim_creator_cut(ctx: Context<ClaimCreatorCut>) -> Result<()> {
-    let amount = ctx.accounts.basket.owed_to_creator();
+    let owed = ctx.accounts.basket.owed_to_creator();
+    let amount = owed.min(ctx.accounts.treasury_shares.amount);
     if amount == 0 {
         return Ok(());
     }
-    ctx.accounts.basket.creator_unclaimed = 0;
+    ctx.accounts.basket.creator_unclaimed = owed - amount;
     let bump = [ctx.accounts.protocol.bump];
     let seeds: [&[u8]; 2] = [PROTOCOL_SEED, &bump];
     token_interface::transfer_checked(
@@ -147,7 +151,7 @@ pub struct ClaimCreatorCut<'info> {
 
     pub share_mint: InterfaceAccount<'info, MintI>,
 
-    #[account(mut, token::mint = share_mint, token::authority = protocol)]
+    #[account(mut, token::mint = share_mint, token::authority = protocol, constraint = is_ata(&treasury_shares.to_account_info(), &protocol.key(), &share_mint.key()) @ VaultError::NotBasketVault)]
     pub treasury_shares: InterfaceAccount<'info, TokenAccountI>,
 
     /// Pinned to the creator: anyone may call this, and it must not pay anyone else.

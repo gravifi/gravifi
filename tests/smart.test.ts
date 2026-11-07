@@ -64,14 +64,27 @@ async function setVerified(ctx: Ctx, mint: PublicKey, verified: boolean, authori
 
 type Gravi = { mint: PublicKey; account: PublicKey };
 
-/** enable_smart, naming the creator's GRAVI accounts given (null leaves them out). */
-function enableSmart(ctx: Ctx, basket: PublicKey, creator: Keypair, guard: Guard = GUARD, mandate = MANDATE, gravi: Gravi | null = null) {
+/** enable_smart, naming the creator's GRAVI accounts given (null leaves them out) and the Verified
+ *  records of `verified` mints. */
+function enableSmart(ctx: Ctx, basket: PublicKey, creator: Keypair, guard: Guard = GUARD, mandate = MANDATE, gravi: Gravi | null = null, verified: PublicKey[] = []) {
   const accounts = gravi ? { graviMint: gravi.mint, creatorGravi: gravi.account, graviTokenProgram: TOKEN_PROGRAM_ID } : NO_GRAVI;
   return rpc(
     ctx,
-    ctx.vault.methods.enableSmart(mandate, guard).accountsPartial({ creator: creator.publicKey, basket, smart: pda.smart(basket), protocol: pda.protocol(), creationBurn: pda.creationBurn(), ...accounts }),
+    ctx.vault.methods
+      .enableSmart(mandate, guard)
+      .accountsPartial({ creator: creator.publicKey, basket, smart: pda.smart(basket), protocol: pda.protocol(), creationBurn: pda.creationBurn(), ...accounts })
+      .remainingAccounts(verified.map((m) => ({ pubkey: pda.verified(m), isSigner: false, isWritable: false }))),
     [creator],
   );
+}
+
+/** Makes a basket smart without enable_smart, as one made smart before it checked the basket's
+ *  targets (a two-asset basket can't be within a 35% cap): the control byte, at offset 122. */
+function forceSmart(ctx: Ctx, basket: PublicKey) {
+  const acc = ctx.svm.getAccount(basket)!;
+  const data = Buffer.from(acc.data);
+  data[122] = 3;
+  ctx.svm.setAccount(basket, { ...acc, data });
 }
 
 async function setSmartBurn(ctx: Ctx, graviMint: PublicKey, amount: bigint, authority = ctx.payer) {
@@ -83,8 +96,8 @@ async function setSmartBurn(ctx: Ctx, graviMint: PublicKey, amount: bigint, auth
 }
 
 /** Four listed assets at 25% each, A and B Verified, C and D not, and a fifth (E) listed with the
- *  basket's vault ready, for adding. The basket is smart and not seeded. */
-async function smartWorld(guard: Guard = GUARD) {
+ *  basket's vault ready, for adding. The basket is creator-managed and not seeded. */
+async function fourAssets(targetBps = [2_500, 2_500, 2_500, 2_500]) {
   const ctx = setup();
   const graviMint = await initProtocol(ctx, 40);
   const mints: PublicKey[] = [];
@@ -117,15 +130,21 @@ async function smartWorld(guard: Guard = GUARD) {
         driftBps: 500,
         mgmtFeeBps: 0,
         mints: [A, B, C, D],
-        targetBps: [2_500, 2_500, 2_500, 2_500],
+        targetBps,
       })
       .accountsPartial({ ...NO_GRAVI, creator: creator.publicKey, basket, shareMint: pda.share(basket), shareTokenProgram: TOKEN_PROGRAM_ID })
       .remainingAccounts([A, B, C, D].flatMap((m) => [m, pda.asset(m)].map((pubkey) => ({ pubkey, isSigner: false, isWritable: false })))),
     [creator],
   );
   for (const m of mints) await createAta(ctx, m, basket, TOKEN_PROGRAM_ID);
-  await enableSmart(ctx, basket, creator, guard);
   return { ctx, graviMint, A, B, C, D, E, creator, strategist, guardian, basket };
+}
+
+/** `fourAssets`, made smart. */
+async function smartWorld(guard: Guard = GUARD) {
+  const w = await fourAssets();
+  await enableSmart(w.ctx, w.basket, w.creator, guard);
+  return w;
 }
 type SW = Awaited<ReturnType<typeof smartWorld>>;
 
@@ -181,7 +200,7 @@ const apply = (w: SW) =>
 
 describe("smart baskets: becoming smart", () => {
   it("is the creator's, before the first deposit, with guardrails in range", async () => {
-    const w = await world({ seed: false });
+    const w = await fourAssets();
     const stranger = fund(w.ctx);
     await expectError(enableSmart(w.ctx, w.basket, stranger), "NotMandateAuthority");
     const bad: [Partial<Guard>, string][] = [
@@ -209,6 +228,22 @@ describe("smart baskets: becoming smart", () => {
     const s = (await w.ctx.vault.account.smart.fetch(pda.smart(w.basket))) as any;
     assert.deepEqual(s.mandateHash, MANDATE);
     assert.equal(s.guard.maxDayBps, 2_000);
+  });
+
+  it("only on a basket already within its guardrails: weights and asset count (L7)", async () => {
+    // 40% in A, over the 35% cap.
+    const heavy = await fourAssets([4_000, 2_000, 2_000, 2_000]);
+    await expectError(enableSmart(heavy.ctx, heavy.basket, heavy.creator, GUARD, MANDATE, null, [heavy.A, heavy.B]), "WeightAboveCap");
+    // 35% in A is its Verified cap, but only with A's record named; without it, A is held to 30%.
+    const w = await fourAssets([3_500, 2_500, 2_000, 2_000]);
+    await expectError(enableSmart(w.ctx, w.basket, w.creator), "WeightAboveCap");
+    // C has no record: 35% in C is over its 30% whatever is named.
+    const c = await fourAssets([2_000, 2_500, 3_500, 2_000]);
+    await expectError(enableSmart(c.ctx, c.basket, c.creator, GUARD, MANDATE, null, [c.A, c.B, c.C, c.D]), "WeightAboveCap");
+    // Four assets held, three the most allowed.
+    await expectError(enableSmart(w.ctx, w.basket, w.creator, { ...GUARD, minAssets: 3, maxAssets: 3 }, MANDATE, null, [w.A]), "AssetCountOutOfRange");
+    await enableSmart(w.ctx, w.basket, w.creator, GUARD, MANDATE, null, [w.A]);
+    assert.deepEqual((await w.ctx.vault.account.basket.fetch(w.basket)).control, { smart: {} });
   });
 
   it("can't happen once a basket has holders, nor to an immutable basket, nor at creation", async () => {
@@ -441,16 +476,53 @@ describe("smart baskets: pause and mandate", () => {
       w.ctx.vault.methods.setStops([{ mint: w.A, pctBps: 2_000, trailing: false, referenceE12: new BN(E12.toString()) }]).accountsPartial({ creator: w.creator.publicKey, basket: w.basket, stopLoss: pda.stop(w.basket) }),
       [w.creator],
     );
-    const check = () => rpc(w.ctx, w.ctx.vault.methods.checkStop().accountsPartial({ basket: w.basket, stopLoss: pda.stop(w.basket), assetPrice: pda.price(w.A) }));
+    const check = () =>
+      rpc(
+        w.ctx,
+        w.ctx.vault.methods
+          .checkStop()
+          .accountsPartial({ basket: w.basket, stopLoss: pda.stop(w.basket), assetPrice: pda.price(w.A) })
+          .remainingAccounts([pda.smart(w.basket), ...[w.A, w.B, w.C, w.D].map((m) => pda.verified(m))].map((pubkey) => ({ pubkey, isSigner: false, isWritable: false }))),
+      );
     await postPrices(w.ctx, keeper, [[w.A, (E12 * 75n) / 100n]]);
     await check();
     warp(w.ctx, 301);
     await postPrices(w.ctx, keeper, [[w.A, (E12 * 75n) / 100n]]);
     await check();
-    assert.equal((await targets(w))[0], 0, "the stop fired while paused");
+    // Fired while paused, as far as the caps let it: B to its 35%, C and D to their 30%; the 5%
+    // nothing has room for stays on A.
+    assert.deepEqual(await targets(w), [500, 3_500, 3_000, 3_000], "the stop fired while paused");
 
     await pause(w, false, w.guardian);
-    await setTargets(w, [0, 3_500, 3_500, 3_000]);
+    await setTargets(w, [1_000, 3_500, 2_500, 3_000]);
+  });
+
+  it("a stop can't move a smart basket's weights past its guardrails (M1)", async () => {
+    const w = await smartWorld();
+    warp(w.ctx, DAY); // off LiteSVM's clock at 0, where an arming time reads as none
+    const keeper = fund(w.ctx);
+    await rpc(w.ctx, w.ctx.vault.methods.initKeepers(keeper.publicKey, keeper.publicKey).accountsPartial({ authority: w.ctx.payer.publicKey, keepers: pda.keepers() }));
+    await postPrices(w.ctx, keeper, [[w.A, E12]]);
+    // Before the first deposit a reference isn't checked against the price: the creator writes
+    // one a hundred times A's price, so the stop arms at once.
+    await rpc(
+      w.ctx,
+      w.ctx.vault.methods.setStops([{ mint: w.A, pctBps: 2_000, trailing: false, referenceE12: new BN((100n * E12).toString()) }]).accountsPartial({ creator: w.creator.publicKey, basket: w.basket, stopLoss: pda.stop(w.basket) }),
+      [w.creator],
+    );
+    const accounts = { basket: w.basket, stopLoss: pda.stop(w.basket), assetPrice: pda.price(w.A) };
+    const metas = (keys: PublicKey[]) => keys.map((pubkey) => ({ pubkey, isSigner: false, isWritable: false }));
+    const records = [w.A, w.B, w.C, w.D].map((m) => pda.verified(m));
+    await rpc(w.ctx, w.ctx.vault.methods.checkStop().accountsPartial(accounts));
+    warp(w.ctx, 301);
+    await postPrices(w.ctx, keeper, [[w.A, E12]]);
+    // Firing needs the rules and every record, so it can't be made to move less than its rule.
+    await expectError(rpc(w.ctx, w.ctx.vault.methods.checkStop().accountsPartial(accounts)), "BadRemainingAccounts");
+    await expectError(rpc(w.ctx, w.ctx.vault.methods.checkStop().accountsPartial(accounts).remainingAccounts(metas(records))), "BadRemainingAccounts");
+    await expectError(rpc(w.ctx, w.ctx.vault.methods.checkStop().accountsPartial(accounts).remainingAccounts(metas([pda.smart(w.basket), ...records.slice(1)]))), "BadRemainingAccounts");
+    await rpc(w.ctx, w.ctx.vault.methods.checkStop().accountsPartial(accounts).remainingAccounts(metas([...records.reverse(), pda.smart(w.basket)])));
+    // Scaled up in proportion, C and D (Unverified) would be 33% each, over their 30%.
+    assert.deepEqual(await targets(w), [500, 3_500, 3_000, 3_000]);
   });
 
   it("changes the mandate only after a day's notice, and the guardrails with it", async () => {
@@ -499,7 +571,7 @@ describe("smart baskets: pause and mandate", () => {
 describe("smart baskets: the fee", () => {
   async function seededSmart(protocolFeeBps = 40) {
     const w = await world({ seed: false, protocolFeeBps });
-    await enableSmart(w.ctx, w.basket, w.creator, { ...GUARD, minAssets: 2 });
+    forceSmart(w.ctx, w.basket);
     const seed = (shares: bigint) =>
       rpc(
         w.ctx,
@@ -597,7 +669,7 @@ describe("smart baskets: the smart burn", () => {
   const creationBurned = async (ctx: Ctx) => BigInt(((await (ctx.vault.account as any).creationBurn.fetch(pda.creationBurn())) as any).totalBurned.toString());
 
   it("starts off: a basket becomes smart without any GRAVI", async () => {
-    const w = await world({ seed: false });
+    const w = await fourAssets();
     await enableSmart(w.ctx, w.basket, w.creator, { ...GUARD, minAssets: 2 });
     assert.ok(await w.ctx.vault.account.smart.fetch(pda.smart(w.basket)));
   });
@@ -612,7 +684,7 @@ describe("smart baskets: the smart burn", () => {
   });
 
   it("burns once from the creator on becoming smart, counted with the creation burn; never without the GRAVI", async () => {
-    const w = await world({ seed: false });
+    const w = await fourAssets();
     const amount = 50_000n * GRAVI;
     await setSmartBurn(w.ctx, w.graviMint, amount);
     const guard = { ...GUARD, minAssets: 2 };
@@ -637,7 +709,7 @@ describe("smart baskets: the smart burn", () => {
   });
 
   it("burns nothing from the burn-exempt wallet (the team's)", async () => {
-    const w = await world({ seed: false });
+    const w = await fourAssets();
     await setSmartBurn(w.ctx, w.graviMint, 50_000n * GRAVI);
     await rpc(w.ctx, w.ctx.vault.methods.setBurnExempt(w.creator.publicKey).accountsPartial({ authority: w.ctx.payer.publicKey, protocol: pda.protocol() }));
     await enableSmart(w.ctx, w.basket, w.creator, { ...GUARD, minAssets: 2 });

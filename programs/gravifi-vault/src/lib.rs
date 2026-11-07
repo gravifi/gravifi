@@ -225,8 +225,9 @@ pub mod gravifi_vault {
 
     /// Replaces the basket's stop losses (each a percentage below a reference price, fixed or
     /// trailing). The creator of a creator-managed basket at any time; of an immutable one only
-    /// before its first deposit.
-    pub fn set_stops(ctx: Context<SetStops>, stops: Vec<StopArgs>) -> Result<()> {
+    /// before its first deposit. Once seeded, no reference may be above its asset's fresh posted
+    /// price (remaining accounts: each stop's AssetPrice, in order).
+    pub fn set_stops<'info>(ctx: Context<'_, '_, 'info, 'info, SetStops<'info>>, stops: Vec<StopArgs>) -> Result<()> {
         instructions::stops::set_stops(ctx, stops)
     }
 
@@ -236,9 +237,9 @@ pub mod gravifi_vault {
     }
 
     /// Checks one asset's stop against its posted price: arms it below the stop, fires it if still
-    /// below STOP_CONFIRM_SECS later (its target to 0%, the others scaled up), disarms it above.
-    /// Permissionless.
-    pub fn check_stop(ctx: Context<CheckStop>) -> Result<()> {
+    /// below STOP_CONFIRM_SECS to STOP_ARM_WINDOW_SECS later (its target to 0%, the others scaled
+    /// up, within the guardrails on a smart or vote-run basket), disarms it above. Permissionless.
+    pub fn check_stop<'info>(ctx: Context<'_, '_, 'info, 'info, CheckStop<'info>>) -> Result<()> {
         instructions::stops::check_stop(ctx)
     }
 
@@ -420,7 +421,7 @@ pub mod gravifi_vault {
     /// Makes a creator-managed basket smart, before its first deposit, with its mandate's hash
     /// and guardrails, burning the smart burn (`set_smart_burn`) from the creator's GRAVI.
     /// Creator only.
-    pub fn enable_smart(ctx: Context<EnableSmart>, mandate_hash: [u8; 32], guard: Guardrails) -> Result<()> {
+    pub fn enable_smart<'info>(ctx: Context<'_, '_, 'info, 'info, EnableSmart<'info>>, mandate_hash: [u8; 32], guard: Guardrails) -> Result<()> {
         instructions::smart::enable_smart(ctx, mandate_hash, guard)
     }
 
@@ -609,7 +610,7 @@ pub mod gravifi_vault {
     }
 
     /// Runs a passed Stops. Permissionless.
-    pub fn community_execute_stops(ctx: Context<CommunityExecuteStops>) -> Result<()> {
+    pub fn community_execute_stops<'info>(ctx: Context<'_, '_, 'info, 'info, CommunityExecuteStops<'info>>) -> Result<()> {
         instructions::community::community_execute_stops(ctx)
     }
 

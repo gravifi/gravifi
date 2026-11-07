@@ -195,9 +195,28 @@ pub(crate) fn check_guardrails(g: &Guardrails, mandate_hash: &[u8; 32]) -> Resul
 /// strategist sets its targets and assets, within `guard`, and its mints and redeems pay the
 /// Smart-mode fee. The creator pays the rules account's rent and burns the smart burn
 /// (`set_smart_burn`) from their GRAVI, unless they're the burn-exempt wallet.
-pub fn enable_smart(ctx: Context<EnableSmart>, mandate_hash: [u8; 32], guard: Guardrails) -> Result<()> {
+///
+/// The basket must already be within `guard`: every target within its weight cap, and between
+/// `min_assets` and `max_assets` assets with a target, so the guardrails holders read describe the
+/// basket they buy. Remaining accounts: the Verified record address of each asset that has one
+/// (found by address; an asset without its record among them is held to the Unverified cap), and
+/// the creator's stake and the stake pool as before, to skip the burn.
+pub fn enable_smart<'info>(ctx: Context<'_, '_, 'info, 'info, EnableSmart<'info>>, mandate_hash: [u8; 32], guard: Guardrails) -> Result<()> {
     require!(ctx.accounts.basket.control == ControlMode::Creator && !ctx.accounts.basket.seeded, VaultError::SmartNotAllowed);
     check_guardrails(&guard, &mandate_hash)?;
+
+    let mut records = Vec::new();
+    let held = ctx.accounts.basket.active().iter().filter(|c| c.target_bps > 0).count();
+    require!((guard.min_assets as usize..=guard.max_assets as usize).contains(&held), VaultError::AssetCountOutOfRange);
+    for c in ctx.accounts.basket.active() {
+        let (expected, _) = Pubkey::find_program_address(&[VERIFIED_SEED, c.mint.as_ref()], &crate::ID);
+        let record = ctx.remaining_accounts.iter().find(|a| *a.key == expected);
+        let verified = record.is_some_and(|a| a.owner == &crate::ID && a.data_len() > 0);
+        let cap = if verified { guard.max_weight_bps } else { guard.max_unverified_bps };
+        require!(c.target_bps <= cap, VaultError::WeightAboveCap);
+        records.extend(record.map(|a| *a.key));
+    }
+    let stake: Vec<AccountInfo<'info>> = ctx.remaining_accounts.iter().filter(|a| !records.contains(a.key)).cloned().collect();
 
     let a = &mut *ctx.accounts;
     let protocol = a.protocol.to_account_info();
@@ -208,7 +227,7 @@ pub fn enable_smart(ctx: Context<EnableSmart>, mandate_hash: [u8; 32], guard: Gu
         a.creator.to_account_info(),
         smart_burn(&protocol),
         false,
-        burn_skip(&a.creator.key(), ctx.remaining_accounts, &protocol, smart_burn(&protocol), FreeUse::HaveOne)?,
+        burn_skip(&a.creator.key(), &stake, &protocol, smart_burn(&protocol), FreeUse::HaveOne)?,
     )?;
 
     let basket = &mut ctx.accounts.basket;

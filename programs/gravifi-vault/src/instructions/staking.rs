@@ -188,24 +188,39 @@ pub fn stake_refresh(ctx: Context<StakeRefresh>) -> Result<()> {
     a.stake.sync(&mut a.pool, now)
 }
 
-/// Starts the next month's pot from whatever SOL the rewards PDA holds beyond what's already
-/// promised, once the last month's has paid out. Anyone may call it, and anyone may add SOL to the
-/// pot first by sending wrapped SOL to the account.
+/// Streams whatever SOL the rewards PDA holds beyond what's already promised over the next
+/// STAKE_PERIOD_SECS. Anyone may call it, and anyone may add SOL to the pot first by sending
+/// wrapped SOL to the account.
+///
+/// Once the last month's has paid out, it starts the next month's. While one is running, it tops
+/// it up: what's left of it and the new SOL are spread over a fresh STAKE_PERIOD_SECS, so SOL that
+/// arrives after a month was started early (by a dust donation) waits for nothing. A top-up must
+/// bring at least what the running month has paid out so far, so the rate never falls: a dust
+/// top-up can't stretch a month's payout out.
 pub fn stake_fund(ctx: Context<StakeFund>) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     let a = &mut *ctx.accounts;
-    require!(now >= a.pool.stream_end, VaultError::StreamRunning);
     a.pool.accrue(now)?;
     let held = read_vault(&a.pot.to_account_info(), &a.rewards.key(), &NATIVE_MINT)?.amount;
     let p = &mut a.pool;
     let promised = p.funded.saturating_sub(p.claimed);
     let new = held.saturating_sub(promised);
     require!(new > 0, VaultError::NothingToTake);
-    p.rate = new as u128 * STAKE_RATE_SCALE / STAKE_PERIOD_SECS as u128;
+    let new_scaled = new as u128 * STAKE_RATE_SCALE;
+    let rate = if now < p.stream_end {
+        // Still to stream, and what the month has streamed so far, both at the running rate.
+        let left = p.rate.checked_mul((p.stream_end - now) as u128).ok_or(VaultError::MathOverflow)?;
+        let streamed = p.rate.checked_mul((STAKE_PERIOD_SECS - (p.stream_end - now)) as u128).ok_or(VaultError::MathOverflow)?;
+        require!(new_scaled >= streamed, VaultError::StreamRunning);
+        left.checked_add(new_scaled).ok_or(VaultError::MathOverflow)? / STAKE_PERIOD_SECS as u128
+    } else {
+        p.periods = p.periods.saturating_add(1);
+        new_scaled / STAKE_PERIOD_SECS as u128
+    };
+    p.rate = rate;
     p.last_update = now;
     p.stream_end = now + STAKE_PERIOD_SECS;
     p.funded = p.funded.checked_add(new).ok_or(VaultError::MathOverflow)?;
-    p.periods = p.periods.saturating_add(1);
     Ok(())
 }
 

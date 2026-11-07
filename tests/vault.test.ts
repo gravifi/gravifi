@@ -620,8 +620,47 @@ describe("fees", () => {
           shareTokenProgram: TOKEN_PROGRAM_ID,
         }),
       ),
-      "ConstraintTokenOwner",
+      "NotBasketVault",
     );
+  });
+
+  test("fees land only in the treasury's own share account, not a side account it also owns (L2)", async () => {
+    const w = await world({ protocolFeeBps: 40 });
+    const alice = fund(w.ctx);
+    await fundHolder(w, alice);
+    // Anyone can open another share account owned by the protocol PDA.
+    const side = Keypair.generate();
+    const { createInitializeAccount3Instruction, getMinimumBalanceForRentExemptAccount, ACCOUNT_SIZE } = await import("@solana/spl-token");
+    const { SystemProgram } = await import("@solana/web3.js");
+    await send(
+      w.ctx,
+      [
+        SystemProgram.createAccount({ fromPubkey: w.ctx.payer.publicKey, newAccountPubkey: side.publicKey, lamports: 10_000_000, space: ACCOUNT_SIZE, programId: TOKEN_PROGRAM_ID }),
+        createInitializeAccount3Instruction(side.publicKey, w.shareMint, pda.protocol(), TOKEN_PROGRAM_ID),
+      ],
+      [side],
+    );
+    void getMinimumBalanceForRentExemptAccount;
+    const viaSide = (ix: any) => ix.accountsPartial({ treasuryShares: side.publicKey });
+    await expectError(rpc(w.ctx, viaSide(mintIx(w, alice, ONE_SHARE)), [alice]), "NotBasketVault");
+    await rpc(w.ctx, mintIx(w, alice, ONE_SHARE), [alice]);
+    await expectError(rpc(w.ctx, viaSide(redeemIx(w, alice, ONE_SHARE / 2n)), [alice]), "NotBasketVault");
+    await expectError(
+      rpc(
+        w.ctx,
+        w.ctx.vault.methods.treasuryWithdraw(new BN(1)).accountsPartial({
+          authority: w.ctx.payer.publicKey,
+          protocol: pda.protocol(),
+          basket: w.basket,
+          shareMint: w.shareMint,
+          treasuryShares: side.publicKey,
+          destination: await createAta(w.ctx, w.shareMint, w.ctx.payer.publicKey),
+          shareTokenProgram: TOKEN_PROGRAM_ID,
+        }),
+      ),
+      "NotBasketVault",
+    );
+    assert.equal(balance(w.ctx, side.publicKey), 0n);
   });
 });
 

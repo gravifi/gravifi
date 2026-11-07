@@ -259,6 +259,14 @@ pub fn read_vault(ai: &AccountInfo, basket: &Pubkey, mint: &Pubkey) -> Result<To
     Ok(view)
 }
 
+/// Whether `ai` is `owner`'s associated token account for `mint`, under the token program that owns
+/// it: the one account of theirs an instruction may name, as `read_vault` pins a basket's vaults.
+/// The treasury's share accounts are pinned this way, so fees and the creator's cut can't be routed
+/// to a side account `stake_sweep` and the escrow checks don't see.
+pub fn is_ata(ai: &AccountInfo, owner: &Pubkey, mint: &Pubkey) -> bool {
+    Pubkey::find_program_address(&[owner.as_ref(), ai.owner.as_ref(), mint.as_ref()], &ATA_PROGRAM_ID).0 == *ai.key
+}
+
 pub fn mint_shares<'info>(
     token_program: &AccountInfo<'info>,
     mint: &AccountInfo<'info>,
