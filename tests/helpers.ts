@@ -212,6 +212,18 @@ export const pda = {
   verified: (mint: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("verified"), mint.toBuffer()], VAULT_ID)[0],
   stop: (basket: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("stop"), basket.toBuffer()], VAULT_ID)[0],
   cutNotice: (basket: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("cut_notice"), basket.toBuffer()], VAULT_ID)[0],
+  stakePool: () => PublicKey.findProgramAddressSync([Buffer.from("stake_pool")], VAULT_ID)[0],
+  stakeRewards: () => PublicKey.findProgramAddressSync([Buffer.from("stake_rewards")], VAULT_ID)[0],
+  stake: (wallet: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("stake"), wallet.toBuffer()], VAULT_ID)[0],
+  shareEscrow: () => PublicKey.findProgramAddressSync([Buffer.from("share_escrow")], VAULT_ID)[0],
+  shareStake: (basket: PublicKey, wallet: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("share_stake"), basket.toBuffer(), wallet.toBuffer()], VAULT_ID)[0],
+  community: (basket: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("community"), basket.toBuffer()], VAULT_ID)[0],
+  proposal: (basket: PublicKey, id: number) => {
+    const n = Buffer.alloc(4);
+    n.writeUInt32LE(id);
+    return PublicKey.findProgramAddressSync([Buffer.from("proposal"), basket.toBuffer(), n], VAULT_ID)[0];
+  },
+  vote: (proposal: PublicKey, wallet: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("vote"), proposal.toBuffer(), wallet.toBuffer()], VAULT_ID)[0],
 };
 
 /** Posts prices as the keeper does once they're bounded: a price more than 20% from its

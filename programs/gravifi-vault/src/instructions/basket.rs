@@ -14,6 +14,7 @@ use anchor_lang::system_program;
 use anchor_spl::token_2022::spl_token_2022;
 
 use crate::extensions;
+use crate::instructions::staking::{burn_skip, FreeUse};
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct InitBasketArgs {
@@ -49,8 +50,11 @@ pub fn initialize_basket<'info>(
     require!(args.control != ControlMode::Dao, VaultError::GovernanceRemoved);
     // A basket becomes smart after it's created (`enable_smart`), which writes its guardrails.
     require!(args.control != ControlMode::Smart, VaultError::SmartNotAllowed);
+    // A basket goes community once it's seeded (`enter_community`), when there are shares to vote.
+    require!(args.control != ControlMode::Community, VaultError::CommunityNotAllowed);
+    // The creator's stake and the stake pool may follow, to skip the burn.
     require!(
-        ctx.remaining_accounts.len() == n * 2,
+        ctx.remaining_accounts.len() == n * 2 || ctx.remaining_accounts.len() == n * 2 + 2,
         VaultError::BadRemainingAccounts
     );
 
@@ -86,7 +90,7 @@ pub fn initialize_basket<'info>(
     }
 
     let a = &mut *ctx.accounts;
-    let exempt = burn_exempt(&a.protocol.to_account_info());
+    let exempt = burn_skip(&a.creator.key(), &ctx.remaining_accounts[n * 2..], &a.protocol.to_account_info(), a.creation_burn.per_asset.saturating_mul(n as u64), FreeUse::TakeOne)?;
     burn_per_asset(
         &mut a.creation_burn,
         &a.protocol,
@@ -104,7 +108,9 @@ pub fn initialize_basket<'info>(
     b.creator = ctx.accounts.creator.key();
     b.share_mint = ctx.accounts.share_mint.key();
     b.rebalance_supply = 0;
-    b.reserved = [0; 14];
+    b.stake_owed = 0;
+    b.community = 0;
+    b.reserved = [0; 5];
     b.creator_cut_bps = 0;
     b.creator_unclaimed = 0;
     b.basket_id = args.basket_id;
@@ -215,7 +221,7 @@ pub fn add_constituent(ctx: Context<AddConstituent>) -> Result<()> {
 
     // An added asset pays its GRAVI burn as if the basket had started with it.
     let a = &mut *ctx.accounts;
-    let exempt = burn_exempt(&a.protocol.to_account_info());
+    let exempt = burn_skip(&a.authority.key(), ctx.remaining_accounts, &a.protocol.to_account_info(), a.creation_burn.per_asset, FreeUse::TakeOne)?;
     burn_per_asset(
         &mut a.creation_burn,
         &a.protocol,
@@ -322,7 +328,9 @@ pub fn restore_creator_control(ctx: Context<RestoreControl>) -> Result<()> {
     basket.control = ControlMode::Creator;
     // These bytes held its governor's address; clear them for their new use.
     basket.rebalance_supply = 0;
-    basket.reserved = [0; 14];
+    basket.stake_owed = 0;
+    basket.community = 0;
+    basket.reserved = [0; 5];
     basket.creator_cut_bps = 0;
     basket.creator_unclaimed = 0;
     Ok(())
@@ -334,13 +342,24 @@ pub fn restore_creator_control(ctx: Context<RestoreControl>) -> Result<()> {
 /// Only the creator of a creator-managed basket can split it.
 pub fn split(ctx: Context<Split>, numerator: u16, denominator: u16) -> Result<()> {
     authorise_mandate(&ctx.accounts.basket, &ctx.accounts.authority)?;
+    apply_split(&ctx.accounts.basket, ctx.accounts.share_mint.as_ref(), ctx.accounts.token_program.as_ref(), numerator, denominator)
+}
+
+/// The split itself, for whoever was allowed to ask for it.
+pub(crate) fn apply_split<'info>(
+    basket: &Account<'info, Basket>,
+    share_mint: &AccountInfo<'info>,
+    token_program: &AccountInfo<'info>,
+    numerator: u16,
+    denominator: u16,
+) -> Result<()> {
     require!(
         (1..=100).contains(&numerator) && (1..=100).contains(&denominator) && numerator != denominator,
         VaultError::BadParameter
     );
     let now = Clock::get()?.unix_timestamp;
     let current = {
-        let data = ctx.accounts.share_mint.try_borrow_data()?;
+        let data = share_mint.try_borrow_data()?;
         let last = extensions::last_split_at(&data).ok_or(VaultError::SplitUnsupported)?;
         require!(last == 0 || now >= last + SPLIT_COOLDOWN_SECS, VaultError::SplitTooSoon);
         extensions::current_multiplier(&data, now).ok_or(VaultError::SplitUnsupported)?
@@ -348,14 +367,13 @@ pub fn split(ctx: Context<Split>, numerator: u16, denominator: u16) -> Result<()
     let next = current * numerator as f64 / denominator as f64;
     require!(next.is_finite() && (1e-6..=1e6).contains(&next), VaultError::BadParameter);
 
-    let basket = &ctx.accounts.basket;
     let creator = basket.creator;
     let basket_id = basket.basket_id;
     let bump = [basket.bump];
     let seeds: [&[u8]; 4] = [b"basket", creator.as_ref(), basket_id.as_ref(), &bump];
     invoke_signed(
-        &extensions::update_multiplier(&ctx.accounts.token_program.key(), &ctx.accounts.share_mint.key(), &basket.key(), next, now),
-        &[ctx.accounts.share_mint.to_account_info(), ctx.accounts.basket.to_account_info()],
+        &extensions::update_multiplier(token_program.key, share_mint.key, &basket.key(), next, now),
+        &[share_mint.clone(), basket.to_account_info()],
         &[&seeds],
     )?;
     Ok(())
@@ -421,6 +439,8 @@ pub(crate) fn check_policy(mode: RebalanceMode, interval_secs: i64, drift_bps: u
 pub(crate) fn authorise_mandate(basket: &Account<Basket>, authority: &Signer) -> Result<()> {
     match basket.control {
         ControlMode::Immutable => Err(VaultError::BasketImmutable.into()),
+        ControlMode::Community => Err(VaultError::CommunityManaged.into()),
+        ControlMode::Smart if basket.by_vote() => Err(VaultError::CommunityManaged.into()),
         ControlMode::Creator | ControlMode::Smart => {
             require_keys_eq!(authority.key(), basket.creator, VaultError::NotMandateAuthority);
             Ok(())

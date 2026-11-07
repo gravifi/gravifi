@@ -51,7 +51,9 @@ describe("basket control without holder governance", () => {
     const b = await w.ctx.vault.account.basket.fetch(w.basket);
     assert.deepEqual(b.control, { creator: {} });
     assert.equal(b.rebalanceSupply.toString(), "0");
-    assert.deepEqual(b.reserved, new Array(14).fill(0));
+    assert.equal(b.stakeOwed.toString(), "0");
+    assert.equal(b.community, 0);
+    assert.deepEqual(b.reserved, new Array(5).fill(0));
     assert.equal(b.creatorCutBps, 0);
     assert.equal(b.creatorUnclaimed.toString(), "0");
     await rpc(w.ctx, setTargetsIx(w), [w.creator]);

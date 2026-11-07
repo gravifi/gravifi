@@ -28,6 +28,10 @@ test suite. How it all works is in the [whitepaper](WHITEPAPER.md)
   time already passed.
 - **The burn address has no key.** At least half of every protocol fee goes to it, a floor in
   the code, and it can only be spent buying GRAVI and burning it.
+- **Stakers' 10% is counted on chain.** Every protocol fee owes stakers a tenth of itself, out of the
+  treasury's side, and the treasury can't withdraw it. Staked GRAVI sits apart from what's sold for
+  stakers: only its staker's own withdrawal moves it. Community baskets' votes can't pass the limits
+  a smart basket's strategist is held to, and a passed change waits 24 hours.
 - **The creation burn has a ceiling.** Each asset in a basket burns GRAVI from its creator's
   wallet: for the assets it's created with, in the instruction that creates it, and for each
   asset added later. The amount can't exceed 1,000,000 GRAVI per asset. One team wallet, named
@@ -85,7 +89,7 @@ head -c "$(wc -c < target/deploy/gravifi_vault.so)" onchain.so | shasum -a 256
 shasum -a 256 target/deploy/gravifi_vault.so
 ```
 
-Both hashes start with `66db144e76888665`. A verified build (`solana-verify`), reproducible
+Both hashes start with `08467ba5c3af5a45`. A verified build (`solana-verify`), reproducible
 on any machine, comes with the move to a multisig.
 
 ## Status

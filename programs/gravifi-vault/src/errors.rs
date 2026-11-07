@@ -190,4 +190,48 @@ pub enum VaultError {
     CutNoticeRunning,
     #[msg("These treasury shares are owed to the basket's creator")]
     TreasuryOwedToCreator,
+    #[msg("Staking isn't set up on this cluster")]
+    StakingOff,
+    #[msg("Over the staking threshold's ceiling, or zero")]
+    BadStakeThreshold,
+    #[msg("That's more than is staked")]
+    NotEnoughStaked,
+    #[msg("This GRAVI is still waiting out its unstaking days")]
+    UnstakeWaiting,
+    #[msg("Nothing to withdraw or claim")]
+    NothingToTake,
+    #[msg("Close a stake only once it's empty and paid")]
+    StakeNotEmpty,
+    #[msg("This month's pot is still paying out")]
+    StreamRunning,
+    #[msg("Wrong stake account")]
+    BadStake,
+    #[msg("The treasury can't go below what stakers are owed")]
+    TreasuryOwedToStakers,
+    #[msg("Community baskets aren't open")]
+    CommunityClosed,
+    #[msg("Only a seeded, public, creator-managed basket can go community")]
+    CommunityNotAllowed,
+    #[msg("Holders run this basket by vote")]
+    CommunityManaged,
+    #[msg("This basket isn't run by vote")]
+    NotCommunity,
+    #[msg("Your staked shares carry too little weight to propose: 1% of the supply")]
+    BelowProposalWeight,
+    #[msg("This basket has as many open proposals as it can")]
+    TooManyProposals,
+    #[msg("That change isn't possible on this basket as it stands")]
+    BadProposal,
+    #[msg("Voting on this proposal has ended")]
+    VotingOver,
+    #[msg("Your staked shares had no weight when this proposal opened")]
+    NoVotingWeight,
+    #[msg("Shares that voted stay staked until the vote ends")]
+    SharesLocked,
+    #[msg("This proposal can't execute: it hasn't passed, is waiting, has lapsed or already ran")]
+    NotExecutable,
+    #[msg("This proposal can't close yet")]
+    ProposalStillOpen,
+    #[msg("The basket's assets changed since this proposal opened")]
+    AssetsChanged,
 }

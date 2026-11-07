@@ -13,7 +13,9 @@ GraviFi turns a mix of tokenized stocks, crypto and memecoins into a single toke
 share is always worth its exact slice of what the vault holds, and can always be swapped back
 for that slice. Anyone can buy a basket with USDC or SOL, or build one from 133 listed assets.
 Every basket mint and redeem pays a 0.40% protocol fee; half of it buys **GRAVI** on the open
-market and burns it. Creating a basket burns GRAVI too.
+market and burns it. Creating a basket burns GRAVI too. GRAVI stakers share 10% of the protocol
+fee, paid in SOL, and each 1,000,000 GRAVI staked makes one basket a day without burning. A basket's
+holders can also run it themselves, by vote.
 
 GraviFi has been live on Solana mainnet since 14 October 2026.
 
@@ -187,7 +189,7 @@ its first deposit and never change, and when one fires the basket follows that f
 
 | Fee | Rate | Who pays, when | Where it goes |
 |---|---|---|---|
-| **Protocol fee** | 0.40% | On every mint and redeem, including a creator's first deposit | Half to the GRAVI burn, half to the treasury |
+| **Protocol fee** | 0.40% | On every mint and redeem, including a creator's first deposit | Half to the GRAVI burn, a tenth to GRAVI stakers (section 6.4), the rest to the treasury |
 | **Creator's cut** | 0% to 0.60% | On each buy by someone else, on top of the protocol fee. Selling and holding don't pay it | The basket's creator |
 | **Yearly fee** | 0% to 0.20% a year | Holders, as share dilution while held, on baskets that haven't chosen a cut | The basket's creator |
 | **Creation burn** | 10,000 GRAVI per asset | The creator, for each asset a basket is created with or gets added | Burned |
@@ -218,9 +220,9 @@ pool someone else runs, pays the protocol nothing.
 
 ## 6. GRAVI
 
-GRAVI is GraviFi's token. It carries no vote and no claim on baskets; nothing to lock, nothing
-to stake. Its one job is to absorb the protocol's revenue through burns: the more GraviFi is
-used, the less GRAVI there is.
+GRAVI is GraviFi's token. It carries no vote and no claim on baskets. Its main job is to absorb
+the protocol's revenue through burns: the more GraviFi is used, the less GRAVI there is. Staking
+it (section 6.4) shares part of the protocol fee and removes the creation burn.
 
 | | |
 |---|---|
@@ -247,8 +249,8 @@ wait until they add up. Every burn is public on Solana, and the running total is
 
 ### 6.2 GRAVI's own trading fees
 
-GRAVI's pump.fun creator fees go the same way: claimed into the team's GRAVI wallet, half buys
-GRAVI and burns it, half goes to the treasury.
+GRAVI's pump.fun creator fees are claimed into the team's GRAVI wallet: half buys GRAVI and burns
+it, half goes to the treasury.
 
 **Burn #1** (15 October 2026): 3.80 SOL of creator fees claimed; 1.90 SOL bought and burned
 **10,611,685 GRAVI**, 1.06% of supply. Supply after: 989,388,314.
@@ -268,7 +270,31 @@ signing.
 One wallet can be exempt: the protocol authority can name a single team wallet whose baskets
 burn nothing, so the team can launch its own promotional baskets without spending GRAVI it
 doesn't have. Which wallet it is, if any, is public on-chain (right after the protocol
-account's fields), and the exemption applies to that wallet's baskets only.
+account's fields), and the exemption applies to that wallet's baskets only. A GRAVI stake also
+makes free baskets: one a day per 1,000,000 GRAVI staked (section 6.4).
+
+### 6.4 Staking
+
+Anyone can stake any amount of GRAVI. Two things follow:
+
+- **A share of the fee.** 10% of every protocol fee goes to stakers, out of the treasury's side:
+  50% burned, 10% to stakers, 40% to the treasury. The program counts it on each basket as fees
+  are paid, the treasury can't withdraw it, and anyone can move it to the rewards account, where it
+  is redeemed and sold for SOL. Every 30 days the SOL collected becomes a pot, paid out second by
+  second in proportion to each stake that counts, to claim at any time.
+- **Free baskets.** Each **1,000,000 GRAVI** staked makes one basket a day with no GRAVI burned:
+  1M gives one a day, 2M two, and so on. A free basket covers creating it, its assets, and making it
+  smart while it's created; adding an asset to a basket later uses one too. Unused ones don't carry
+  over. The protocol authority can move the 1,000,000, up to a ceiling of 10,000,000 in the code; a
+  raise applies only after 7 days' notice.
+
+Staked GRAVI counts 2 days after it's staked; a top-up waits its own 2 days, and what already counts
+keeps counting. Unstaking takes 7 days, during which that GRAVI earns nothing and makes no free
+basket. Staked GRAVI sits in the stake pool's own account, which only its staker's
+withdrawal moves: the account that sells for the pot can't reach it.
+
+What the pot pays depends only on what baskets earn in fees. It can be very little, and it is not
+a promise of any return. GRAVI's price can fall by more than a stake earns.
 
 ## 7. Assets
 
@@ -315,7 +341,8 @@ pools) can be promoted by the team. Every token shows its contract address.
 
 ## 8. Who controls what
 
-There is no governance and no vote. Control is split so that no role can reach holders' funds:
+A basket is run by its creator unless it goes community (section 8.1); there is no vote on the
+protocol. Control is split so that no role can reach holders' funds:
 
 | Role | Can | Can't |
 |---|---|---|
@@ -335,6 +362,32 @@ wrong way or fire a stop early, but it can't trade; the trading key alone trades
 prices the price service posted. Holders trust the team with these keys today. That is why the next steps (section 10) are a multisig, so no single
 key can upgrade it, and a verified build, so anyone can check that what runs on-chain is the
 published code.
+
+### 8.1 Community baskets
+
+A creator can hand a seeded, public basket to its holders. It is one way: only a vote can return
+it. The creator keeps any cut or yearly fee, which a vote can only lower, and loses every other
+power over the basket.
+
+Anyone holding a basket's shares can stake them, on any basket; they keep their value but can't be
+sold or redeemed until withdrawn. In a community basket, staked shares vote:
+
+- **Weight.** One share, one vote, built up over 3 days and read as of the moment a proposal
+  opened, so shares bought or staked after that carry nothing on it.
+- **Proposing.** Staked weight of 1% of the supply, and at most 3 open proposals per basket.
+  Proposals can change targets, add an asset, change the rebalancing policy, the stops or the
+  split, lower the creator's fee or cut, hand the basket to the strategist, or return it to its
+  creator.
+- **Passing.** At least 10% of the supply votes, and over half of those voting agree (66% to change
+  the creator's fee or cut, go smart, or leave). The vote takes 3 days and a passed change waits 24
+  hours, so anyone who disagrees can redeem first. Anyone can then run it, for 7 days.
+- **Limits.** Every change stays within the ceilings a smart basket's strategist is held to: 35%
+  in one asset (30% if not Verified), 40% of the targets changed in a day, 100% in a week. Stop
+  losses fire with no vote. Redeeming is always open.
+
+A majority can still do what its votes allow: within those limits it could replace a whole basket
+in about 6 days. A vote can be bought, and nothing on chain can stop that. Holders of a community
+basket are trusting its other holders, and can leave at any time.
 
 ## 9. Risks
 

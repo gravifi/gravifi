@@ -57,6 +57,14 @@ pub fn set_stops(ctx: Context<SetStops>, stops: Vec<StopArgs>) -> Result<()> {
     } else {
         authorise_mandate(basket, &ctx.accounts.creator)?;
     }
+    check_stops(basket, &stops)?;
+    let basket_key = basket.key();
+    write_stops(&mut ctx.accounts.stop_loss, basket_key, ctx.bumps.stop_loss, &stops);
+    Ok(())
+}
+
+/// One stop per asset at most, on assets the basket holds, in range.
+pub(crate) fn check_stops(basket: &Basket, stops: &[StopArgs]) -> Result<()> {
     let active = basket.active();
     require!(stops.len() <= active.len(), VaultError::BadStop);
     for (i, s) in stops.iter().enumerate() {
@@ -64,16 +72,17 @@ pub fn set_stops(ctx: Context<SetStops>, stops: Vec<StopArgs>) -> Result<()> {
         require!(stops[..i].iter().all(|o| o.mint != s.mint), VaultError::BadStop);
         require!((MIN_STOP_BPS..=MAX_STOP_BPS).contains(&s.pct_bps) && s.reference_e12 > 0, VaultError::BadStop);
     }
+    Ok(())
+}
 
-    let basket_key = basket.key();
-    let st = &mut ctx.accounts.stop_loss;
-    st.bump = ctx.bumps.stop_loss;
-    st.basket = basket_key;
+/// Replaces a basket's stops, each unarmed.
+pub(crate) fn write_stops(st: &mut StopLoss, basket: Pubkey, bump: u8, stops: &[StopArgs]) {
+    st.bump = bump;
+    st.basket = basket;
     st.stops = stops
         .iter()
         .map(|s| Stop { mint: s.mint, pct_bps: s.pct_bps, trailing: s.trailing, reference_e12: s.reference_e12, armed_at: 0 })
         .collect();
-    Ok(())
 }
 
 /// Closes a creator-managed basket's stop account, its rent back to the creator. An immutable

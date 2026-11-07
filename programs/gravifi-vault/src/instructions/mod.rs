@@ -9,6 +9,8 @@ pub mod invite;
 pub mod stops;
 pub mod smart;
 pub mod creator_cut;
+pub mod staking;
+pub mod community;
 
 pub use protocol::*;
 pub use basket::*;
@@ -21,3 +23,5 @@ pub use invite::*;
 pub use stops::*;
 pub use smart::*;
 pub use creator_cut::*;
+pub use staking::*;
+pub use community::*;

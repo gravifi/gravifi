@@ -67,6 +67,8 @@ pub fn propose_cut_rise(ctx: Context<ProposeCutRise>, bps: u16) -> Result<()> {
 pub fn apply_cut_rise(ctx: Context<ApplyCutRise>) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     require!(now >= ctx.accounts.notice.at, VaultError::CutNoticeRunning);
+    // Once holders run it, a vote can only lower the cut: a rise asked for before doesn't apply.
+    require!(!ctx.accounts.basket.by_vote(), VaultError::CommunityManaged);
     let bps = ctx.accounts.notice.bps;
     let basket = &mut ctx.accounts.basket;
     basket.creator_cut_bps = bps;

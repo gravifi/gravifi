@@ -195,8 +195,9 @@ pub fn set_asset_status<'info>(ctx: Context<'_, '_, 'info, 'info, SetAssetStatus
 /// PDA only signs inside the buyback instructions, so they can only ever be redeemed
 /// into the burn PDA's own accounts and sold for GRAVI that is burned.
 pub fn treasury_withdraw(ctx: Context<TreasuryWithdraw>, amount: u64) -> Result<()> {
-    let owed = ctx.accounts.basket.owed_to_creator();
-    require!(ctx.accounts.treasury_shares.amount.saturating_sub(owed) >= amount, VaultError::TreasuryOwedToCreator);
+    let basket = &ctx.accounts.basket;
+    require!(ctx.accounts.treasury_shares.amount.saturating_sub(basket.owed_to_creator()) >= amount, VaultError::TreasuryOwedToCreator);
+    require!(ctx.accounts.treasury_shares.amount.saturating_sub(basket.owed_to_creator()).saturating_sub(basket.owed_to_stakers()) >= amount, VaultError::TreasuryOwedToStakers);
     let bump = [ctx.accounts.protocol.bump];
     let seeds: [&[u8]; 2] = [PROTOCOL_SEED, &bump];
     let signer: &[&[&[u8]]] = &[&seeds];
@@ -482,7 +483,7 @@ pub struct TreasuryWithdraw<'info> {
     )]
     pub protocol: Account<'info, Protocol>,
 
-    /// Read for what its treasury shares owe its creator.
+    /// Read for what its treasury shares owe its creator and stakers.
     #[account(has_one = share_mint)]
     pub basket: Account<'info, Basket>,
 

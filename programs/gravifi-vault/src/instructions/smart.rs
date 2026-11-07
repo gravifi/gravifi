@@ -14,6 +14,7 @@ use anchor_spl::token_interface::{Mint as MintI, TokenInterface};
 
 use crate::errors::VaultError;
 use crate::instructions::basket::{burn_gravi, check_addable, drop_emptied, GraviAccounts};
+use crate::instructions::staking::{burn_skip, FreeUse};
 use crate::state::*;
 
 #[event]
@@ -207,7 +208,7 @@ pub fn enable_smart(ctx: Context<EnableSmart>, mandate_hash: [u8; 32], guard: Gu
         a.creator.to_account_info(),
         smart_burn(&protocol),
         false,
-        burn_exempt(&protocol),
+        burn_skip(&a.creator.key(), ctx.remaining_accounts, &protocol, smart_burn(&protocol), FreeUse::HaveOne)?,
     )?;
 
     let basket = &mut ctx.accounts.basket;
@@ -234,6 +235,7 @@ pub fn enable_smart(ctx: Context<EnableSmart>, mandate_hash: [u8; 32], guard: Gu
 /// waiting one and starts the day again, and an all-zero hash (not leaving) withdraws it.
 /// Creator only.
 pub fn propose_mandate(ctx: Context<CreatorSmart>, mandate_hash: [u8; 32], guard: Guardrails, leave: bool) -> Result<()> {
+    require!(!ctx.accounts.basket.by_vote(), VaultError::CommunityManaged);
     if !leave && mandate_hash == [0u8; 32] {
         let s = &mut ctx.accounts.smart;
         require!(s.pending_at != 0, VaultError::NoPendingMandate);
@@ -282,7 +284,7 @@ pub fn apply_mandate(ctx: Context<ApplyMandate>) -> Result<()> {
 /// pause is lifted by whoever made it, or by the guardian.
 pub fn set_smart_pause(ctx: Context<SetSmartPause>, paused: bool) -> Result<()> {
     let signer = ctx.accounts.signer.key();
-    let is_creator = signer == ctx.accounts.basket.creator;
+    let is_creator = signer == ctx.accounts.basket.creator && !ctx.accounts.basket.by_vote();
     let guardian = ctx.accounts.protocol.guardian;
     let is_guardian = guardian != Pubkey::default() && signer == guardian;
     require!(is_creator || is_guardian, VaultError::NotPauser);

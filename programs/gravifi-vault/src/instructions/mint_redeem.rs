@@ -151,6 +151,7 @@ pub fn redeem_in_kind<'info>(
 
     let (fee, burn_fee, treasury_fee) = protocol_cut(shares, &ctx.accounts.protocol, &ctx.accounts.basket, invited)?;
     require!(shares > fee, VaultError::BelowFee);
+    owe_stakers(&mut ctx.accounts.basket, &ctx.accounts.protocol, fee, treasury_fee)?;
     for (to, amount) in [
         (ctx.accounts.burn_shares.to_account_info(), burn_fee),
         (ctx.accounts.treasury_shares.to_account_info(), treasury_fee),
@@ -341,6 +342,7 @@ pub(crate) fn collect_and_mint<'info>(d: Deposit<'_, 'info>, remaining: &[Accoun
     let kept = fee.checked_add(cut).ok_or(VaultError::MathOverflow)?;
     require!(shares > kept, VaultError::BelowFee);
     d.basket.creator_unclaimed = d.basket.creator_unclaimed.checked_add(cut).ok_or(VaultError::MathOverflow)?;
+    owe_stakers(d.basket, d.protocol, fee, treasury_fee)?;
     let program = d.share_token_program.to_account_info();
     let mint = d.share_mint.to_account_info();
     let authority = d.basket.to_account_info();
@@ -409,6 +411,18 @@ pub(crate) fn protocol_cut(shares: u64, protocol: &Account<Protocol>, basket: &B
     let fee = flow_fee(shares, rate)?;
     let (burn, treasury) = split_protocol_fee(fee, protocol.burn_share_bps)?;
     Ok((fee, burn, treasury))
+}
+
+/// Counts the stakers' share of `fee` on the basket once staking is on: it stays in the treasury's
+/// shares, which `stake_sweep` moves it out of and `treasury_withdraw` leaves alone. Rounded up,
+/// never past the treasury's cut. A legacy Dao basket counts none (see `Basket::stake_owed`).
+fn owe_stakers(basket: &mut Basket, protocol: &Account<Protocol>, fee: u64, treasury_fee: u64) -> Result<()> {
+    if basket.control == ControlMode::Dao || protocol_flags(&protocol.to_account_info()) & FLAG_STAKING == 0 {
+        return Ok(());
+    }
+    let share = u64::try_from((fee as u128 * STAKER_SHARE_BPS).div_ceil(BPS_DENOM)).map_err(|_| VaultError::MathOverflow)?.min(treasury_fee);
+    basket.stake_owed = basket.stake_owed.checked_add(share).ok_or(VaultError::MathOverflow)?;
+    Ok(())
 }
 
 /// A mint's or redeem's remaining accounts: one quad per constituent, then what follows them

@@ -73,6 +73,9 @@ pub enum ControlMode {
     /// those with a day's notice, and the creator or the guardian can pause it. Mints and redeems
     /// pay the Smart-mode protocol fee (`smart_fee_bps`). Entered with `enable_smart`.
     Smart,
+    /// Holders who stake its shares vote on what it holds (`community_propose`). The creator keeps
+    /// the fee, which a vote can only lower, and nothing else. Entered with `enter_community`.
+    Community,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug, InitSpace)]
@@ -109,7 +112,13 @@ pub struct Basket {
     /// unchanged. (These 32 bytes held the governor's address before holder governance was
     /// removed, so the account layout is unchanged.)
     pub rebalance_supply: u64,
-    pub reserved: [u8; 14],
+    /// Treasury shares owed to GRAVI stakers (`stake_sweep` moves them). 0 on a legacy Dao
+    /// basket, which counts none: its spare bytes may still hold its old governor's.
+    pub stake_owed: u64,
+    /// 1 once holders run it by vote (`enter_community`). It stays 1 while a vote has handed it
+    /// to the strategist, when `control` reads Smart. Read through `by_vote`.
+    pub community: u8,
+    pub reserved: [u8; 5],
     /// The creator's cut of every mint by someone else, in bps of the shares (`creator_cut.rs`).
     /// These two read as 0 on a legacy Dao basket, whose spare bytes may still hold its old
     /// governor's: read them through `cut_bps` and `owed_to_creator`.
@@ -150,6 +159,16 @@ impl Basket {
     /// Treasury shares owed to the creator.
     pub fn owed_to_creator(&self) -> u64 {
         if self.control == ControlMode::Dao { 0 } else { self.creator_unclaimed }
+    }
+
+    /// Treasury shares owed to GRAVI stakers.
+    pub fn owed_to_stakers(&self) -> u64 {
+        if self.control == ControlMode::Dao { 0 } else { self.stake_owed }
+    }
+
+    /// Holders run this basket by vote: `Community`, or `Smart` after a vote handed it over.
+    pub fn by_vote(&self) -> bool {
+        self.community == 1 && matches!(self.control, ControlMode::Community | ControlMode::Smart)
     }
 
     pub fn active(&self) -> &[Constituent] {
@@ -442,27 +461,35 @@ pub struct Smart {
     pub changes: u32,
 }
 
+/// Moves a turnover window up to `now_hour`, emptying the buckets of hours that left it.
+pub fn advance_window(hour: &mut i64, turnover: &mut [u16; TURNOVER_HOURS], now_hour: i64) {
+    if now_hour <= *hour {
+        return;
+    }
+    if now_hour - *hour >= TURNOVER_HOURS as i64 {
+        *turnover = [0; TURNOVER_HOURS];
+    } else {
+        for h in (*hour + 1)..=now_hour {
+            turnover[h.rem_euclid(TURNOVER_HOURS as i64) as usize] = 0;
+        }
+    }
+    *hour = now_hour;
+}
+
+/// Changes in the last 24 hours (this one included) and the last 7 days, once advanced.
+pub fn window_used(hour: i64, turnover: &[u16; TURNOVER_HOURS]) -> (u32, u32) {
+    let day = (0..24).map(|k| turnover[(hour - k).rem_euclid(TURNOVER_HOURS as i64) as usize] as u32).sum();
+    let week = turnover.iter().map(|t| *t as u32).sum();
+    (day, week)
+}
+
 impl Smart {
-    /// Moves the window up to `now_hour`, emptying the buckets of hours that left it.
     pub fn advance(&mut self, now_hour: i64) {
-        if now_hour <= self.hour {
-            return;
-        }
-        if now_hour - self.hour >= TURNOVER_HOURS as i64 {
-            self.turnover = [0; TURNOVER_HOURS];
-        } else {
-            for h in (self.hour + 1)..=now_hour {
-                self.turnover[h.rem_euclid(TURNOVER_HOURS as i64) as usize] = 0;
-            }
-        }
-        self.hour = now_hour;
+        advance_window(&mut self.hour, &mut self.turnover, now_hour)
     }
 
-    /// Changes in the last 24 hours (this one included) and the last 7 days, once advanced.
     pub fn used(&self) -> (u32, u32) {
-        let day = (0..24).map(|k| self.turnover[(self.hour - k).rem_euclid(TURNOVER_HOURS as i64) as usize] as u32).sum();
-        let week = self.turnover.iter().map(|t| *t as u32).sum();
-        (day, week)
+        window_used(self.hour, &self.turnover)
     }
 }
 
@@ -718,4 +745,342 @@ pub struct BuybackSol {
     /// SOL these sales brought the burn PDA, all time, in lamports.
     pub total_sol: u64,
     pub slices: u32,
+}
+
+// ------------------------------------------------------------------------------ GRAVI staking
+
+/// Flags in the protocol account's tail, after the smart burn. Staking on means every protocol fee
+/// owes stakers their share, and it can't be turned off. Community open lets baskets enter
+/// Community mode; closing it stops new ones, and those already in carry on.
+pub const PROTOCOL_FLAGS_OFFSET: usize = SMART_BURN_OFFSET + SMART_BURN_LEN;
+pub const FLAG_STAKING: u8 = 1;
+pub const FLAG_COMMUNITY: u8 = 2;
+
+pub fn protocol_flags(protocol: &AccountInfo) -> u8 {
+    let Ok(data) = protocol.try_borrow_data() else { return 0 };
+    data.get(PROTOCOL_FLAGS_OFFSET).copied().unwrap_or(0)
+}
+
+/// The state of GRAVI staking, a singleton at `[STAKE_POOL_SEED]`, and the owner of the vault of
+/// staked GRAVI, which only a staker's own withdrawal moves.
+pub const STAKE_POOL_SEED: &[u8] = b"stake_pool";
+/// Owner of what stakers are paid from: the shares swept from the treasury, the tokens they redeem
+/// into, and the SOL pot. It holds no staked GRAVI, so a keeper selling for it can't reach any.
+pub const STAKE_REWARDS_SEED: &[u8] = b"stake_rewards";
+pub const STAKE_SEED: &[u8] = b"stake";
+/// Stakers' share of every protocol fee, out of the treasury's side, in bps of the fee.
+pub const STAKER_SHARE_BPS: u128 = 1_000;
+/// Each this much warmed-up GRAVI staked gives one basket a day with no GRAVI burned (the
+/// threshold). The authority moves it up to the ceiling.
+pub const STAKE_THRESHOLD_TOKENS: u64 = 1_000_000;
+pub const MAX_STAKE_THRESHOLD_TOKENS: u64 = 10_000_000;
+/// A raised threshold applies after this notice, so stakers can top up first.
+pub const STAKE_THRESHOLD_NOTICE_SECS: i64 = 7 * 86_400;
+/// How long staked GRAVI waits before it counts, for the pot and for free baskets.
+pub const STAKE_WARMUP_SECS: i64 = 2 * 86_400;
+pub const DAY_SECS: i64 = 86_400;
+/// How long unstaked GRAVI waits before it can be withdrawn, earning nothing.
+pub const STAKE_UNSTAKE_SECS: i64 = 7 * 86_400;
+/// How long one month's pot takes to pay out.
+pub const STAKE_PERIOD_SECS: i64 = 30 * 86_400;
+/// The reward index is lamports per GRAVI base unit x1e18; the rate lamports per second x1e9.
+pub const STAKE_INDEX_SCALE: u128 = 1_000_000_000_000_000_000;
+pub const STAKE_RATE_SCALE: u128 = 1_000_000_000;
+
+#[account]
+#[derive(InitSpace)]
+pub struct StakePool {
+    pub bump: u8,
+    pub gravi_mint: Pubkey,
+    /// Base units in one GRAVI, for the threshold's ceiling.
+    pub one_gravi: u64,
+    pub threshold: u64,
+    /// A raise waiting out its notice, from `next_threshold_at` (0: none).
+    pub next_threshold: u64,
+    pub next_threshold_at: i64,
+    /// GRAVI that counts right now: the sum of every stake's `counted`.
+    pub total_counted: u64,
+    pub index: u128,
+    pub rate: u128,
+    pub stream_end: i64,
+    pub last_update: i64,
+    /// Lamports promised to stakers, all time, less any no stake was there to earn.
+    pub funded: u64,
+    /// Lamports stakers have claimed, all time. The pot holds at least `funded - claimed`.
+    pub claimed: u64,
+    pub periods: u32,
+    /// A sale to SOL, as `BuybackSol`.
+    pub sale_pending: bool,
+    pub sale_slot: u64,
+    pub sale_min_sol: u64,
+    pub sale_sol_before: u64,
+    pub total_sol: u64,
+}
+
+impl StakePool {
+    pub fn threshold_at(&self, now: i64) -> u64 {
+        if self.next_threshold_at != 0 && now >= self.next_threshold_at { self.next_threshold } else { self.threshold }
+    }
+
+    /// Brings the index up to `now`. While nothing counts, what the stream would have paid goes
+    /// back to the pot for the next month.
+    pub fn accrue(&mut self, now: i64) -> Result<()> {
+        let to = now.min(self.stream_end);
+        if to <= self.last_update {
+            return Ok(());
+        }
+        let paid = self.rate.checked_mul((to - self.last_update) as u128).ok_or(VaultError::MathOverflow)?;
+        if self.total_counted > 0 {
+            let step = paid
+                .checked_mul(STAKE_INDEX_SCALE / STAKE_RATE_SCALE)
+                .ok_or(VaultError::MathOverflow)?
+                / self.total_counted as u128;
+            self.index = self.index.checked_add(step).ok_or(VaultError::MathOverflow)?;
+        } else {
+            self.funded = self.funded.saturating_sub((paid / STAKE_RATE_SCALE) as u64);
+        }
+        self.last_update = to;
+        Ok(())
+    }
+}
+
+/// One wallet's stake, at `[STAKE_SEED, wallet]`.
+#[account]
+#[derive(InitSpace)]
+pub struct Stake {
+    pub bump: u8,
+    pub wallet: Pubkey,
+    /// All of it that's staked, warmed up or not.
+    pub amount: u64,
+    /// What was staked in the last STAKE_WARMUP_SECS and doesn't count yet, and when the newest of
+    /// it came in: a top-up restarts the wait for what's still warming, never for what counts.
+    pub pending: u64,
+    pub pending_at: i64,
+    /// How much counts toward the pot, as of the last `sync`: `amount` less what's warming.
+    pub counted: u64,
+    /// GRAVI on its way out, withdrawable from `unstake_at`.
+    pub unstaking: u64,
+    pub unstake_at: i64,
+    pub index_paid: u128,
+    /// SOL earned and not yet claimed, in lamports.
+    pub owed: u64,
+    /// The day (unix time / DAY_SECS) of `free_used`: baskets made with no burn that day.
+    pub free_day: i64,
+    pub free_used: u16,
+}
+
+impl Stake {
+    /// What's warmed up at `now`, whether or not a `sync` has booked it yet.
+    pub fn warm(&self, now: i64) -> u64 {
+        if self.pending > 0 && now < self.pending_at + STAKE_WARMUP_SECS { self.amount.saturating_sub(self.pending) } else { self.amount }
+    }
+
+    /// Baskets a day this stake makes with no burn: one per whole threshold warmed up.
+    pub fn free_per_day(&self, threshold: u64, now: i64) -> u64 {
+        if threshold == 0 { 0 } else { self.warm(now) / threshold }
+    }
+
+    /// Uses one of today's free baskets if one is left.
+    pub fn take_free(&mut self, threshold: u64, now: i64) -> bool {
+        let day = now.div_euclid(DAY_SECS);
+        if self.free_day != day {
+            self.free_day = day;
+            self.free_used = 0;
+        }
+        if (self.free_used as u64) < self.free_per_day(threshold, now) {
+            self.free_used += 1;
+            return true;
+        }
+        false
+    }
+
+    /// Books what it earned up to the pool's index. Call after `pool.accrue`.
+    pub fn settle(&mut self, pool: &StakePool) -> Result<()> {
+        let earned = pool
+            .index
+            .saturating_sub(self.index_paid)
+            .checked_mul(self.counted as u128)
+            .ok_or(VaultError::MathOverflow)?
+            / STAKE_INDEX_SCALE;
+        self.owed = self.owed.checked_add(u64::try_from(earned).map_err(|_| VaultError::MathOverflow)?).ok_or(VaultError::MathOverflow)?;
+        self.index_paid = pool.index;
+        Ok(())
+    }
+
+    /// Books what has warmed up, and lines up `counted` and the pool's total with it. Call after
+    /// `settle`.
+    pub fn sync(&mut self, pool: &mut StakePool, now: i64) -> Result<()> {
+        self.pending = self.pending.min(self.amount);
+        if self.pending > 0 && now >= self.pending_at + STAKE_WARMUP_SECS {
+            self.pending = 0;
+        }
+        let counted = self.amount - self.pending;
+        pool.total_counted = pool
+            .total_counted
+            .checked_sub(self.counted)
+            .and_then(|t| t.checked_add(counted))
+            .ok_or(VaultError::MathOverflow)?;
+        self.counted = counted;
+        Ok(())
+    }
+}
+
+// --------------------------------------------------------------------- share staking, voting
+
+/// Owner of every basket's staked shares, one canonical token account per share mint. It's not the
+/// basket, whose stray tokens the keeper may sweep; only a staker's own withdrawal moves these.
+pub const SHARE_ESCROW_SEED: &[u8] = b"share_escrow";
+pub const SHARE_STAKE_SEED: &[u8] = b"share_stake";
+pub const COMMUNITY_SEED: &[u8] = b"community";
+pub const PROPOSAL_SEED: &[u8] = b"proposal";
+pub const VOTE_SEED: &[u8] = b"vote";
+/// How long staked shares take to reach full voting weight.
+pub const VOTE_RAMP_SECS: i64 = 3 * 86_400;
+pub const VOTE_PERIOD_SECS: i64 = 3 * 86_400;
+/// The wait between a vote passing and its change, so holders who disagree can redeem first.
+pub const VOTE_TIMELOCK_SECS: i64 = 86_400;
+/// How long a passed proposal stays executable before it lapses.
+pub const VOTE_GRACE_SECS: i64 = 7 * 86_400;
+pub const PROPOSE_MIN_BPS: u128 = 100;
+pub const QUORUM_BPS: u128 = 1_000;
+/// Fee, Go Smart and leaving need this much of For + Against; the rest need over half.
+pub const SUPERMAJORITY_BPS: u128 = 6_600;
+pub const MAX_OPEN_PROPOSALS: u8 = 3;
+
+/// A wallet's staked shares of one basket, at `[SHARE_STAKE_SEED, basket, wallet]`. Any basket's
+/// holders may stake; votes count only in community baskets.
+#[account]
+#[derive(InitSpace)]
+pub struct ShareStake {
+    pub bump: u8,
+    pub basket: Pubkey,
+    pub wallet: Pubkey,
+    pub amount: u64,
+    /// Where its weight's ramp started. A top-up moves it forward, by the shares' share.
+    pub since: i64,
+    /// Shares that voted can't be withdrawn until the vote ends.
+    pub locked_until: i64,
+}
+
+impl ShareStake {
+    /// Voting weight at `at`: rises linearly to `amount` over VOTE_RAMP_SECS. Never more than the
+    /// shares staked at `at` had: a later top-up moves `since` so that it only lowers this.
+    pub fn power_at(&self, at: i64) -> Result<u64> {
+        let held = (at - self.since).clamp(0, VOTE_RAMP_SECS);
+        let power = (self.amount as u128).checked_mul(held as u128).ok_or(VaultError::MathOverflow)? / VOTE_RAMP_SECS as u128;
+        Ok(power as u64)
+    }
+
+    /// Adds `more` shares at `now`, keeping today's weight: `since` first catches up to the end of
+    /// the ramp, or new shares would inherit age that old ones earned long ago.
+    pub fn add(&mut self, more: u64, now: i64) -> Result<()> {
+        let since = self.since.max(now - VOTE_RAMP_SECS);
+        let total = self.amount.checked_add(more).ok_or(VaultError::MathOverflow)?;
+        let held = (now - since) as u128 * self.amount as u128 / total as u128;
+        self.since = now - held as i64;
+        self.amount = total;
+        Ok(())
+    }
+}
+
+/// A community basket's voting state, at `[COMMUNITY_SEED, basket]`.
+#[account]
+#[derive(InitSpace)]
+pub struct Community {
+    pub bump: u8,
+    pub basket: Pubkey,
+    /// Proposal ids count up from here, for good, so an address is never reused.
+    pub next_id: u32,
+    pub open: u8,
+    /// Goes up each time the basket leaves Community, which voids what was passed before.
+    pub epoch: u32,
+    pub hour: i64,
+    pub turnover: [u16; TURNOVER_HOURS],
+    pub changes: u32,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub enum ProposalAction {
+    /// Back to creator control. First, so a new proposal account, all zeros, reads as a valid one
+    /// whatever size the real action gave it.
+    Leave,
+    /// New targets, one per asset; `mints_hash` pins which assets they mean.
+    Reweight { target_bps: Vec<u16>, mints_hash: [u8; 32] },
+    AddAsset { mint: Pubkey },
+    Policy { rebalance_mode: RebalanceMode, interval_secs: i64, drift_bps: u16 },
+    Stops { stops: Vec<crate::instructions::stops::StopArgs> },
+    /// Lower only.
+    CreatorFee { mgmt_fee_bps: u16 },
+    /// Lower only.
+    CreatorCut { bps: u16 },
+    Split { numerator: u16, denominator: u16 },
+    /// Hands the basket to the strategist. The vote holds the creator's Smart powers from then on.
+    GoSmart { mandate_hash: [u8; 32], guard: Guardrails },
+    /// A new mandate, on a basket a vote handed to the strategist.
+    Mandate { mandate_hash: [u8; 32], guard: Guardrails },
+}
+
+impl ProposalAction {
+    pub fn needs_supermajority(&self) -> bool {
+        matches!(self, Self::CreatorFee { .. } | Self::CreatorCut { .. } | Self::GoSmart { .. } | Self::Leave)
+    }
+}
+
+/// One proposal, at `[PROPOSAL_SEED, basket, id]`. Its proposer pays the rent and gets it back at
+/// `community_close`.
+#[account]
+pub struct Proposal {
+    pub bump: u8,
+    pub basket: Pubkey,
+    pub id: u32,
+    pub epoch: u32,
+    pub proposer: Pubkey,
+    /// Weight is read as of this moment, and quorum from the supply then.
+    pub created_at: i64,
+    pub supply: u64,
+    pub votes_for: u64,
+    pub votes_against: u64,
+    pub executed: bool,
+    pub action: ProposalAction,
+}
+
+impl Proposal {
+    /// Everything before `action`, discriminator included.
+    pub const BASE_SPACE: usize = 8 + 1 + 32 + 4 + 4 + 32 + 8 + 8 + 8 + 8 + 1;
+
+    pub fn vote_end(&self) -> i64 {
+        self.created_at + VOTE_PERIOD_SECS
+    }
+
+    pub fn exec_after(&self) -> i64 {
+        self.vote_end() + VOTE_TIMELOCK_SECS
+    }
+
+    pub fn exec_until(&self) -> i64 {
+        self.exec_after() + VOTE_GRACE_SECS
+    }
+
+    /// Enough of the supply voted, and enough of them for it. Final once voting has ended.
+    pub fn passed(&self) -> bool {
+        let (yes, no) = (self.votes_for as u128, self.votes_against as u128);
+        let total = yes + no;
+        if total * BPS_DENOM < self.supply as u128 * QUORUM_BPS {
+            return false;
+        }
+        if self.action.needs_supermajority() {
+            yes * BPS_DENOM >= total * SUPERMAJORITY_BPS
+        } else {
+            yes > no
+        }
+    }
+}
+
+/// One wallet's vote, at `[VOTE_SEED, proposal, wallet]`: that it exists is what stops a second.
+#[account]
+#[derive(InitSpace)]
+pub struct VoteRecord {
+    pub bump: u8,
+    pub wallet: Pubkey,
+    pub vote_end: i64,
+    pub support: bool,
 }

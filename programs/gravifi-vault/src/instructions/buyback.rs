@@ -30,59 +30,70 @@ pub fn buyback_redeem<'info>(
         anchor_lang::solana_program::instruction::get_stack_height() == anchor_lang::solana_program::instruction::TRANSACTION_LEVEL_STACK_HEIGHT,
         VaultError::BuybackInterleaved
     );
-    let count = ctx.accounts.basket.constituent_count as usize;
-    require!(ctx.remaining_accounts.len() == count * 4, VaultError::BadRemainingAccounts);
-    let supply_before = ctx.accounts.share_mint.supply;
+    let bump = [ctx.bumps.burn_authority];
+    redeem_into(
+        &mut ctx.accounts.basket,
+        &ctx.accounts.share_mint,
+        &ctx.accounts.burn_shares,
+        ctx.accounts.burn_authority.as_ref(),
+        &[BURN_SEED, &bump],
+        &ctx.accounts.share_token_program,
+        ctx.remaining_accounts,
+        shares,
+    )
+}
 
-    let burn_bump = [ctx.bumps.burn_authority];
-    let burn_seeds: [&[u8]; 2] = [BURN_SEED, &burn_bump];
+/// Redeems `shares` of a basket held by a PDA (`owner`, signing with `owner_seeds`) into token
+/// accounts it owns. Remaining accounts: one `[vault_ata, owner_ata, mint, token_program]` quad
+/// per constituent.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn redeem_into<'info>(
+    basket: &mut Account<'info, Basket>,
+    share_mint: &InterfaceAccount<'info, MintI>,
+    owner_shares: &InterfaceAccount<'info, TokenAccountI>,
+    owner: &AccountInfo<'info>,
+    owner_seeds: &[&[u8]],
+    share_token_program: &Interface<'info, TokenInterface>,
+    remaining: &[AccountInfo<'info>],
+    shares: u64,
+) -> Result<()> {
+    let count = basket.constituent_count as usize;
+    require!(remaining.len() == count * 4, VaultError::BadRemainingAccounts);
+    let supply_before = share_mint.supply;
+
     token_interface::burn(
         CpiContext::new_with_signer(
-            ctx.accounts.share_token_program.to_account_info(),
-            token_interface::Burn {
-                mint: ctx.accounts.share_mint.to_account_info(),
-                from: ctx.accounts.burn_shares.to_account_info(),
-                authority: ctx.accounts.burn_authority.to_account_info(),
-            },
-            &[&burn_seeds],
+            share_token_program.to_account_info(),
+            token_interface::Burn { mint: share_mint.to_account_info(), from: owner_shares.to_account_info(), authority: owner.clone() },
+            &[owner_seeds],
         ),
         shares,
     )?;
 
-    let basket_key = ctx.accounts.basket.key();
-    let burn_key = ctx.accounts.burn_authority.key();
-    let creator = ctx.accounts.basket.creator;
-    let basket_id = ctx.accounts.basket.basket_id;
-    let bump = [ctx.accounts.basket.bump];
+    let basket_key = basket.key();
+    let creator = basket.creator;
+    let basket_id = basket.basket_id;
+    let bump = [basket.bump];
     let seeds: [&[u8]; 4] = [b"basket", creator.as_ref(), basket_id.as_ref(), &bump];
     for i in 0..count {
-        let c = ctx.accounts.basket.constituents[i];
-        let vault_ata = &ctx.remaining_accounts[i * 4];
-        let burn_ata = &ctx.remaining_accounts[i * 4 + 1];
-        let mint_ai = &ctx.remaining_accounts[i * 4 + 2];
-        let token_program = &ctx.remaining_accounts[i * 4 + 3];
+        let c = basket.constituents[i];
+        let vault_ata = &remaining[i * 4];
+        let owner_ata = &remaining[i * 4 + 1];
+        let mint_ai = &remaining[i * 4 + 2];
+        let token_program = &remaining[i * 4 + 3];
         require_keys_eq!(*mint_ai.key, c.mint, VaultError::ConstituentMismatch);
         require_keys_eq!(*token_program.key, *mint_ai.owner, VaultError::ConstituentMismatch);
         let vault_view = read_vault(vault_ata, &basket_key, &c.mint)?;
-        let burn_view = read_token_account(burn_ata)?;
-        require_keys_eq!(burn_view.mint, c.mint, VaultError::ConstituentMismatch);
-        require_keys_eq!(burn_view.owner, burn_key, VaultError::ConstituentMismatch);
+        let owner_view = read_token_account(owner_ata)?;
+        require_keys_eq!(owner_view.mint, c.mint, VaultError::ConstituentMismatch);
+        require_keys_eq!(owner_view.owner, *owner.key, VaultError::ConstituentMismatch);
 
         // As redeem_in_kind: a slice of what the vault holds, not of stored units.
         let amount = Basket::slice_of(vault_view.amount, shares, supply_before, false)?;
         require!(vault_view.amount >= amount, VaultError::VaultUndercollateralised);
-        transfer_from_vault(
-            mint_ai,
-            vault_ata,
-            burn_ata,
-            &ctx.accounts.basket.to_account_info(),
-            token_program,
-            amount,
-            mint_decimals(mint_ai)?,
-            &[&seeds],
-        )?;
+        transfer_from_vault(mint_ai, vault_ata, owner_ata, &basket.to_account_info(), token_program, amount, mint_decimals(mint_ai)?, &[&seeds])?;
     }
-    crate::instructions::mint_redeem::resync_units(&mut ctx.accounts.basket, ctx.remaining_accounts, 4, &basket_key, supply_before - shares)
+    crate::instructions::mint_redeem::resync_units(basket, remaining, 4, &basket_key, supply_before - shares)
 }
 
 /// First half of a buyback slice: lends `sell_amount` of a token the burn PDA holds to
@@ -177,7 +188,7 @@ pub fn buyback_sol_finish(ctx: Context<BuybackSolFinish>) -> Result<()> {
 /// oracle value less `max_slippage_bps`, and less the sold token's transfer fee, which isn't
 /// slippage. Never zero, which would accept nothing back. Both prices must be fresh, and the
 /// keeper's `refund` within MAX_BUYBACK_REFUND_E12.
-fn oracle_floor(sell_amount: u64, sell_price: &AssetPrice, out_price: &AssetPrice, max_slippage_bps: u16, refund: u64, sell_mint: &AccountInfo) -> Result<u64> {
+pub(crate) fn oracle_floor(sell_amount: u64, sell_price: &AssetPrice, out_price: &AssetPrice, max_slippage_bps: u16, refund: u64, sell_mint: &AccountInfo) -> Result<u64> {
     let now = Clock::get()?.unix_timestamp;
     for p in [sell_price, out_price] {
         require!(p.price_e12 > 0 && now - p.updated_at <= MAX_PRICE_AGE_SECS, VaultError::BadPrice);
@@ -203,7 +214,7 @@ fn oracle_floor(sell_amount: u64, sell_price: &AssetPrice, out_price: &AssetPric
 /// The finish (`discriminator`) must come later in this very transaction, with nothing of this
 /// program's in between: a burn redeem landing there would count the burn PDA's own tokens as
 /// what the sale brought back.
-fn finish_follows(instructions: &AccountInfo, discriminator: &[u8]) -> Result<()> {
+pub(crate) fn finish_follows(instructions: &AccountInfo, discriminator: &[u8]) -> Result<()> {
     let mut i = load_current_index_checked(instructions)? as usize + 1;
     while let Ok(ix) = load_instruction_at_checked(i, instructions) {
         if ix.program_id == crate::ID {

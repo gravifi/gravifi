@@ -488,4 +488,148 @@ pub mod gravifi_vault {
     pub fn split(ctx: Context<Split>, numerator: u16, denominator: u16) -> Result<()> {
         instructions::basket::split(ctx, numerator, denominator)
     }
+
+    // ------------------------------------------------------------------------- GRAVI staking
+
+    /// Sets up the stake pool and turns staking on, for good. Protocol authority, once.
+    pub fn init_staking(ctx: Context<InitStaking>) -> Result<()> {
+        instructions::staking::init_staking(ctx)
+    }
+
+    /// Moves the staking threshold, up to its ceiling; a raise applies after a week's notice.
+    pub fn set_stake_threshold(ctx: Context<SetStakeThreshold>, threshold: u64) -> Result<()> {
+        instructions::staking::set_stake_threshold(ctx, threshold)
+    }
+
+    /// Stakes GRAVI. Perks start two days after the stake reaches the threshold.
+    pub fn stake(ctx: Context<StakeMove>, amount: u64) -> Result<()> {
+        instructions::staking::stake(ctx, amount)
+    }
+
+    /// Starts staked GRAVI on its seven days out. It earns and skips nothing meanwhile.
+    pub fn unstake(ctx: Context<StakeUpdate>, amount: u64) -> Result<()> {
+        instructions::staking::unstake(ctx, amount)
+    }
+
+    /// Pays out GRAVI that has waited out its days.
+    pub fn stake_withdraw(ctx: Context<StakeWithdraw>) -> Result<()> {
+        instructions::staking::stake_withdraw(ctx)
+    }
+
+    /// Pays a stake the SOL it has earned, as wrapped SOL.
+    pub fn stake_claim(ctx: Context<StakeClaim>) -> Result<()> {
+        instructions::staking::stake_claim(ctx)
+    }
+
+    /// Closes an empty, paid-out stake, its rent back to the wallet.
+    pub fn stake_close(ctx: Context<StakeClose>) -> Result<()> {
+        instructions::staking::stake_close(ctx)
+    }
+
+    /// Brings a stake in line with the clock and the threshold. Permissionless.
+    pub fn stake_refresh(ctx: Context<StakeRefresh>) -> Result<()> {
+        instructions::staking::stake_refresh(ctx)
+    }
+
+    /// Starts the next month's pot once the last has paid out. Permissionless.
+    pub fn stake_fund(ctx: Context<StakeFund>) -> Result<()> {
+        instructions::staking::stake_fund(ctx)
+    }
+
+    /// Moves the shares a basket owes stakers from its treasury to the rewards PDA. Permissionless.
+    pub fn stake_sweep(ctx: Context<StakeSweep>) -> Result<()> {
+        instructions::staking::stake_sweep(ctx)
+    }
+
+    /// Redeems swept shares into tokens the rewards PDA holds. Permissionless.
+    pub fn stake_redeem<'info>(ctx: Context<'_, '_, 'info, 'info, StakeRedeem<'info>>, shares: u64) -> Result<()> {
+        instructions::staking::stake_redeem(ctx, shares)
+    }
+
+    /// First half of a sale to SOL for the pot. Rebalancer only.
+    pub fn stake_sell_start(ctx: Context<StakeSellStart>, sell_amount: u64, max_slippage_bps: u16, refund: u64) -> Result<()> {
+        instructions::staking::stake_sell_start(ctx, sell_amount, max_slippage_bps, refund)
+    }
+
+    /// Second half of a sale to SOL: checks the oracle floor. Rebalancer only.
+    pub fn stake_sell_finish(ctx: Context<StakeSellFinish>) -> Result<()> {
+        instructions::staking::stake_sell_finish(ctx)
+    }
+
+    /// Closes an empty token account the rewards PDA owns. Rebalancer only.
+    pub fn stake_close_account(ctx: Context<StakeCloseAccount>) -> Result<()> {
+        instructions::staking::stake_close_account(ctx)
+    }
+
+    // ------------------------------------------------------------- share staking, community
+
+    /// Opens or closes the door to Community mode. Protocol authority.
+    pub fn set_community_open(ctx: Context<SetCommunityOpen>, open: bool) -> Result<()> {
+        instructions::community::set_community_open(ctx, open)
+    }
+
+    /// Stakes a basket's shares. Any basket; votes count only in community ones.
+    pub fn share_stake(ctx: Context<ShareStakeIn>, amount: u64) -> Result<()> {
+        instructions::community::share_stake(ctx, amount)
+    }
+
+    /// Takes staked shares back, unless they voted in a vote still running.
+    pub fn share_unstake(ctx: Context<ShareStakeOut>, amount: u64) -> Result<()> {
+        instructions::community::share_unstake(ctx, amount)
+    }
+
+    /// Hands a seeded, public, creator-managed basket to its holders. Creator only.
+    pub fn enter_community(ctx: Context<EnterCommunity>) -> Result<()> {
+        instructions::community::enter_community(ctx)
+    }
+
+    /// Opens a proposal; needs 1% of the supply in staked weight.
+    pub fn community_propose<'info>(ctx: Context<'_, '_, 'info, 'info, CommunityPropose<'info>>, action: ProposalAction) -> Result<()> {
+        instructions::community::community_propose(ctx, action)
+    }
+
+    /// Votes a wallet's weight as of the proposal's opening.
+    pub fn community_vote(ctx: Context<CommunityVote>, support: bool) -> Result<()> {
+        instructions::community::community_vote(ctx, support)
+    }
+
+    /// Runs a passed Reweight, Policy, CreatorFee or Leave. Permissionless.
+    pub fn community_execute<'info>(ctx: Context<'_, '_, 'info, 'info, CommunityExecute<'info>>) -> Result<()> {
+        instructions::community::community_execute(ctx)
+    }
+
+    /// Runs a passed AddAsset. Permissionless.
+    pub fn community_execute_add(ctx: Context<CommunityExecuteAdd>) -> Result<()> {
+        instructions::community::community_execute_add(ctx)
+    }
+
+    /// Runs a passed Split. Permissionless.
+    pub fn community_execute_split(ctx: Context<CommunityExecuteSplit>) -> Result<()> {
+        instructions::community::community_execute_split(ctx)
+    }
+
+    /// Runs a passed Stops. Permissionless.
+    pub fn community_execute_stops(ctx: Context<CommunityExecuteStops>) -> Result<()> {
+        instructions::community::community_execute_stops(ctx)
+    }
+
+    /// Runs a passed GoSmart, Mandate, or a smart basket's Leave. Permissionless.
+    pub fn community_execute_smart(ctx: Context<CommunityExecuteSmart>) -> Result<()> {
+        instructions::community::community_execute_smart(ctx)
+    }
+
+    /// Drops an asset a community basket has sold out. Permissionless.
+    pub fn community_remove(ctx: Context<CommunityRemove>, index: u8) -> Result<()> {
+        instructions::community::community_remove(ctx, index)
+    }
+
+    /// Closes a finished proposal, its rent back to the proposer. Permissionless.
+    pub fn community_close(ctx: Context<CommunityClose>) -> Result<()> {
+        instructions::community::community_close(ctx)
+    }
+
+    /// Closes a vote record once its vote has ended. Permissionless.
+    pub fn community_close_vote(ctx: Context<CommunityCloseVote>) -> Result<()> {
+        instructions::community::community_close_vote(ctx)
+    }
 }
