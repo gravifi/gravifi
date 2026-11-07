@@ -14,7 +14,7 @@ share is always worth its exact slice of what the vault holds, and can always be
 for that slice. Anyone can buy a basket with USDC or SOL, or build one from 133 listed assets.
 Every basket mint and redeem pays a 0.40% protocol fee; half of it buys **GRAVI** on the open
 market and burns it. Creating a basket burns GRAVI too. GRAVI stakers share 10% of the protocol
-fee, paid in SOL, and each 1,000,000 GRAVI staked makes one basket a day without burning. A basket's
+fee, paid in SOL, and each 5,000,000 GRAVI staked makes one basket a day without burning. A basket's
 holders can also run it themselves, by vote.
 
 GraviFi has been live on Solana mainnet since 14 October 2026.
@@ -271,7 +271,7 @@ One wallet can be exempt: the protocol authority can name a single team wallet w
 burn nothing, so the team can launch its own promotional baskets without spending GRAVI it
 doesn't have. Which wallet it is, if any, is public on-chain (right after the protocol
 account's fields), and the exemption applies to that wallet's baskets only. A GRAVI stake also
-makes free baskets: one a day per 1,000,000 GRAVI staked (section 6.4).
+makes free baskets: one a day per 5,000,000 GRAVI staked (section 6.4).
 
 ### 6.4 Staking
 
@@ -282,8 +282,8 @@ Anyone can stake any amount of GRAVI. Two things follow:
   are paid, the treasury can't withdraw it, and anyone can move it to the rewards account, where it
   is redeemed and sold for SOL. Every 30 days the SOL collected becomes a pot, paid out second by
   second in proportion to each stake that counts, to claim at any time.
-- **Free baskets.** Each **1,000,000 GRAVI** staked makes one basket a day with no GRAVI burned:
-  1M gives one a day, 2M two, and so on. A free basket covers creating it, its assets, and making it
+- **Free baskets.** Each **5,000,000 GRAVI** staked makes one basket a day with no GRAVI burned:
+  5M gives one a day, 10M two, and so on. A free basket covers creating it, its assets, and making it
   smart while it's created; adding an asset to a basket later uses one too. Unused ones don't carry
   over. The protocol authority can move the 1,000,000, up to a ceiling of 10,000,000 in the code; a
   raise applies only after 7 days' notice.
