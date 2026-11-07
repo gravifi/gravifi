@@ -83,6 +83,7 @@ export async function initProtocol(ctx: Ctx, protocolFeeBps = 10, burnShareBps =
 /** Sets the GRAVI burned to create a basket, as the protocol authority (the payer). */
 export async function setCreationBurn(ctx: Ctx, graviMint: PublicKey, amount: bigint, authority = ctx.payer) {
   await rpc(ctx, setParamIx(ctx, CONFIG.creationBurn, amount, [pda.creationBurn(), graviMint], authority.publicKey), [authority]);
+  skipNotices(ctx);
 }
 
 // ------------------------------------------------------------------- roles and params
@@ -141,12 +142,92 @@ export function setParamIx(ctx: Ctx, id: number, value: bigint | number, remaini
     .remainingAccounts(remaining.map((pubkey, i) => ({ pubkey, isWritable: writable(i), isSigner: false })));
 }
 
-export async function setRole(ctx: Ctx, role: number, key: PublicKey, authority = ctx.payer) {
-  await rpc(ctx, setRoleIx(ctx, role, key, authority.publicKey), [authority]);
+/** A key named by `set_role` acts after a day; a fee or burn raise by `set_param` after a week. */
+export const ROLE_NOTICE = 86_400;
+export const FEE_NOTICE = 7 * 86_400;
+
+/** Where changes wait (programs' state.rs): the protocol account's tail after the flags holds the
+ *  four fee slots [value u64][applies_at i64] (protocol fees, creation burn, Smart fee, Smart burn),
+ *  then the keys waiting [key 32][applies_at i64] for the authority, guardian and burn-exempt
+ *  wallet; the lister's and strategist's accounts hold theirs at 41, the keepers' at 73 and 113. */
+export const PENDING_FEES_OFFSET = 157;
+export const PENDING_ROLES_OFFSET = PENDING_FEES_OFFSET + 4 * 16;
+export const FEE_SLOT = { protocolFees: 0, creationBurn: 1, smartFee: 2, smartBurn: 3 } as const;
+
+/** Every key that can wait, as `[account, offset of the key in force, offset of the key waiting]`. */
+function roleSlots(): [PublicKey, number, number][] {
+  return [
+    [pda.protocol(), 9, PENDING_ROLES_OFFSET],
+    [pda.protocol(), 41, PENDING_ROLES_OFFSET + 40],
+    [pda.protocol(), 113, PENDING_ROLES_OFFSET + 80],
+    [pda.lister(), 9, 41],
+    [pda.strategist(), 9, 41],
+    [pda.keepers(), 9, 73],
+    [pda.keepers(), 41, 113],
+  ];
 }
 
-export async function setParam(ctx: Ctx, id: number, value: bigint | number, remaining: PublicKey[] = [], authority = ctx.payer) {
+function edit(ctx: Ctx, key: PublicKey, change: (data: Buffer) => boolean) {
+  const acct = ctx.svm.getAccount(key);
+  if (!acct) return;
+  const data = Buffer.from(acct.data);
+  if (change(data)) ctx.svm.setAccount(key, { ...acct, data });
+}
+
+/** Applies every waiting role key and fee raise now, as the program does once its notice has run
+ *  out (the key or value moves into place, the slot empties): for tests about something else, so
+ *  they keep their clock. The notices' own tests don't use it. */
+export function skipNotices(ctx: Ctx) {
+  for (const [key, at, pending] of roleSlots()) {
+    edit(ctx, key, (d) => {
+      if (d.length < pending + 40 || d.readBigInt64LE(pending + 32) === 0n) return false;
+      d.copy(d, at, pending, pending + 32);
+      d.fill(0, pending, pending + 40);
+      return true;
+    });
+  }
+  // Where each fee lives: the protocol's fee and burn share (u16s at 105 and 107), the creation
+  // burn account's per_asset (u64 at 9), the Smart fee ([u16][1] at 145), the Smart burn (u64 at 148).
+  for (const slot of [0, 1, 2, 3]) {
+    const o = PENDING_FEES_OFFSET + 16 * slot;
+    const { value, at } = pendingFee(ctx, slot);
+    if (at === 0n) continue;
+    if (slot === FEE_SLOT.creationBurn) edit(ctx, pda.creationBurn(), (d) => (d.writeBigUInt64LE(value, 9), true));
+    edit(ctx, pda.protocol(), (d) => {
+      if (slot === FEE_SLOT.protocolFees) {
+        d.writeUInt16LE(Number(value & 0xffffn), 105);
+        d.writeUInt16LE(Number((value >> 16n) & 0xffffn), 107);
+      } else if (slot === FEE_SLOT.smartFee) {
+        d.writeUInt16LE(Number(value), 145);
+        d[147] = 1;
+      } else if (slot === FEE_SLOT.smartBurn) {
+        d.writeBigUInt64LE(value, 148);
+      }
+      d.fill(0, o, o + 16);
+      return true;
+    });
+  }
+}
+
+/** A waiting slot in the protocol account's tail: `[value, applies_at]` (zeros when none). */
+export function pendingFee(ctx: Ctx, slot: number) {
+  const acct = ctx.svm.getAccount(pda.protocol());
+  const o = PENDING_FEES_OFFSET + 16 * slot;
+  if (!acct || acct.data.length < o + 16) return { value: 0n, at: 0n };
+  const d = Buffer.from(acct.data);
+  return { value: d.readBigUInt64LE(o), at: d.readBigInt64LE(o + 8) };
+}
+
+/** `set_role`, its day skipped (`skipNotices`) unless `wait`. */
+export async function setRole(ctx: Ctx, role: number, key: PublicKey, authority = ctx.payer, wait = false) {
+  await rpc(ctx, setRoleIx(ctx, role, key, authority.publicKey), [authority]);
+  if (!wait) skipNotices(ctx);
+}
+
+/** `set_param`; a fee or burn raise's week is skipped (`skipNotices`) unless `wait`. */
+export async function setParam(ctx: Ctx, id: number, value: bigint | number, remaining: PublicKey[] = [], authority = ctx.payer, wait = false) {
   await rpc(ctx, setParamIx(ctx, id, value, remaining, authority.publicKey), [authority]);
+  if (id >= 1_000 && !wait) skipNotices(ctx);
 }
 
 /** Names the price authority and the rebalancer (`set_role` twice). */

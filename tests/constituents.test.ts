@@ -19,6 +19,7 @@ import {
   pda,
   rpc,
   send,
+  seedPrices,
 } from "./helpers.ts";
 import { NO_GRAVI, feeShares, fundHolder, listAsset, mintIx, quads, redeemIx, world, type World, initKeepers } from "./fixtures.ts";
 
@@ -57,6 +58,7 @@ const removeIx = (w: CW, index: number) =>
 
 async function setPrices(w: CW, mints: PublicKey[]) {
   const by = new Map([[w.mintA.toBase58(), PRICE.A], [w.mintB.toBase58(), PRICE.B], [w.mintC.toBase58(), PRICE.C]]);
+  await seedPrices(w.ctx, w.keeper, mints.map((mint): [PublicKey, bigint] => [mint, by.get(mint.toBase58())!]));
   for (const mint of mints) {
     await rpc(
       w.ctx,

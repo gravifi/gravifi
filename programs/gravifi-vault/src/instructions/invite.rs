@@ -61,7 +61,7 @@ pub struct SetInvite<'info> {
     #[account(mut)]
     pub wallet: Signer<'info>,
     pub rebalancer: Signer<'info>,
-    #[account(seeds = [KEEPERS_SEED], bump = keepers.bump, constraint = keepers.rebalancer == rebalancer.key() @ VaultError::NotRebalancer)]
+    #[account(seeds = [KEEPERS_SEED], bump = keepers.bump, constraint = rebalancer_of(&keepers.to_account_info()) == rebalancer.key() @ VaultError::NotRebalancer)]
     pub keepers: Account<'info, Keepers>,
     #[account(init, payer = wallet, space = 8 + Invite::INIT_SPACE, seeds = [INVITE_SEED, wallet.key().as_ref()], bump)]
     pub invite: Account<'info, Invite>,

@@ -42,14 +42,16 @@ pub mod gravifi_vault {
 
     /// Names the key for a role (`ROLE_*` in `instructions/protocol.rs`): the authority, the
     /// guardian, the GRAVI mint (once), the burn-exempt wallet, the lister, the strategist, the
-    /// price authority or the rebalancer. Protocol authority only.
+    /// price authority or the rebalancer. A key named acts after a day; removing a role is at
+    /// once. Protocol authority only.
     pub fn set_role<'info>(ctx: Context<'_, '_, 'info, 'info, ProtocolConfig<'info>>, role: u8, key: Pubkey) -> Result<()> {
         instructions::protocol::set_role(ctx, role, key)
     }
 
     /// Sets one of the protocol's tunables (`params.rs`), within the bounds and under the notice
     /// written in the code, or one of its settings kept elsewhere (`CONFIG_*`: fees, burns, the
-    /// staking threshold, Community's door). Protocol authority only.
+    /// staking threshold, Community's door; a fee or burn raise waits a week, lowering is at
+    /// once). Protocol authority only.
     pub fn set_param<'info>(ctx: Context<'_, '_, 'info, 'info, ProtocolConfig<'info>>, id: u16, value: u64) -> Result<()> {
         instructions::protocol::set_param(ctx, id, value)
     }
@@ -182,8 +184,8 @@ pub mod gravifi_vault {
     }
 
     /// Sets the creator's cut of every mint (at most `MAX_CREATOR_CUT_BPS`) at once: down at any
-    /// time, or to anything before the first deposit. Passing a pending rise's notice cancels it.
-    /// A cut stops the yearly fee. Creator only.
+    /// time, or to anything before the first deposit. It calls off a pending rise (passing the
+    /// rise's notice closes it). A cut stops the yearly fee. Creator only.
     pub fn set_creator_cut(ctx: Context<SetCreatorCut>, bps: u16) -> Result<()> {
         instructions::creator_cut::set_creator_cut(ctx, bps)
     }
@@ -193,7 +195,8 @@ pub mod gravifi_vault {
         instructions::creator_cut::propose_cut_rise(ctx, bps)
     }
 
-    /// Applies a rise whose day's notice has run out. Permissionless.
+    /// Applies a rise whose day's notice has run out, unless the cut was set or lowered since it
+    /// was asked for. Permissionless.
     pub fn apply_cut_rise(ctx: Context<ApplyCutRise>) -> Result<()> {
         instructions::creator_cut::apply_cut_rise(ctx)
     }
@@ -238,7 +241,7 @@ pub mod gravifi_vault {
 
     /// Posts an asset's USD price (per whole token, x1e12). Bounded by its guard: within Pyth's
     /// confidence of a fresh Pyth price where the asset has a feed, else within 20% of an hourly
-    /// reference.
+    /// reference, which an asset's first price only seeds.
     pub fn set_price(ctx: Context<SetPrice>, price_e12: u64) -> Result<()> {
         instructions::protocol::set_price(ctx, price_e12)
     }

@@ -15,6 +15,10 @@ pub const RECEIVER_ID: Pubkey = pubkey!("rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5
 /// sha256("account:PriceUpdateV2")[..8]
 const DISCRIMINATOR: [u8; 8] = [34, 241, 35, 99, 157, 126, 244, 205];
 const FULL: u8 = 1;
+/// How far ahead of the cluster's clock a publish time may be: validators' clocks and Pyth's
+/// publishers drift by a few seconds, never more. Further ahead, the age check below would let the
+/// price stand for longer than `max_age`, so it's refused.
+pub const MAX_AHEAD_SECS: i64 = 10;
 
 pub struct PythPrice {
     pub price: i64,
@@ -39,7 +43,7 @@ impl PythPrice {
 }
 
 /// The price in a `PriceUpdateV2` account for `feed_id`: fully verified, and no older than
-/// `max_age` seconds at `now`.
+/// `max_age` seconds at `now`, nor more than `MAX_AHEAD_SECS` ahead of it.
 pub fn read(ai: &AccountInfo, feed_id: &[u8; 32], now: i64, max_age: i64) -> Result<PythPrice> {
     require_keys_eq!(*ai.owner, RECEIVER_ID, VaultError::PythPriceInvalid);
     let d = ai.try_borrow_data()?;
@@ -56,5 +60,6 @@ pub fn read(ai: &AccountInfo, feed_id: &[u8; 32], now: i64, max_age: i64) -> Res
     };
     require!(p.price > 0, VaultError::PythPriceInvalid);
     require!(now - p.publish_time <= max_age, VaultError::PythPriceStale);
+    require!(p.publish_time <= now.saturating_add(MAX_AHEAD_SECS), VaultError::PythPriceAhead);
     Ok(p)
 }

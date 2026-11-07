@@ -226,9 +226,34 @@ export const pda = {
   vote: (proposal: PublicKey, wallet: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("vote"), proposal.toBuffer(), wallet.toBuffer()], VAULT_ID)[0],
 };
 
-/** Posts prices as the keeper does once they're bounded: a price more than 20% from its
- *  guard's reference is approached in steps of 20%, an hour apart, then every price is posted
- *  again at the end so all are fresh together. */
+/** How long after an asset's first price (which only seeds its guard) a post that agrees with it
+ *  makes the price usable: a quarter of the hour's reference window. */
+export const PRICE_SEED_SECS = 900;
+
+/** Whether an asset has a usable posted price (a first post only seeds its guard). */
+export function priced(ctx: Ctx, mint: PublicKey) {
+  const acc = ctx.svm.getAccount(pda.price(mint));
+  return !!acc && BigInt(ctx.vault.coder.accounts.decode("assetPrice", Buffer.from(acc.data)).priceE12.toString()) > 0n;
+}
+
+/** Seeds the guard of each asset here with no usable price yet (its first post), then lets the
+ *  quarter hour pass, so the next post of that price is usable. Prices posted before it age by it. */
+export async function seedPrices(ctx: Ctx, keeper: Keypair, prices: [PublicKey, bigint][]) {
+  const unseeded = prices.filter(([mint]) => !priced(ctx, mint));
+  for (const [mint, price] of unseeded) {
+    await rpc(
+      ctx,
+      ctx.vault.methods.setPrice(new BN(price.toString())).accountsPartial({ priceAuthority: keeper.publicKey, keepers: pda.keepers(), mint, assetPrice: pda.price(mint), pythPrice: null }),
+      [keeper],
+    );
+  }
+  if (unseeded.length) warp(ctx, PRICE_SEED_SECS);
+}
+
+/** Posts prices as the keeper does once they're bounded: an asset with no usable price yet is
+ *  seeded first, and confirmed a quarter of an hour later; a price more than 20% from its guard's
+ *  reference is approached in steps of 20%, an hour apart, then every price is posted again at
+ *  the end so all are fresh together. */
 export async function postPrices(ctx: Ctx, keeper: Keypair, prices: [PublicKey, bigint][]) {
   const post = (mint: PublicKey, price: bigint) =>
     rpc(
@@ -236,6 +261,7 @@ export async function postPrices(ctx: Ctx, keeper: Keypair, prices: [PublicKey, 
       ctx.vault.methods.setPrice(new BN(price.toString())).accountsPartial({ priceAuthority: keeper.publicKey, keepers: pda.keepers(), mint, assetPrice: pda.price(mint), pythPrice: null }),
       [keeper],
     );
+  await seedPrices(ctx, keeper, prices);
   for (;;) {
     let stepped = false;
     for (const [mint, target] of prices) {

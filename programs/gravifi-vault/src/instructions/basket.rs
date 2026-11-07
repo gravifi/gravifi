@@ -93,6 +93,8 @@ pub fn initialize_basket<'info>(
     }
 
     let a = &mut *ctx.accounts;
+    // A raise whose week has passed is the value now.
+    a.creation_burn.per_asset = creation_burn_per_asset(&a.protocol.to_account_info(), &a.creation_burn);
     let exempt = burn_skip(&a.creator.key(), &ctx.remaining_accounts[n * 2..], &a.protocol.to_account_info(), a.creation_burn.per_asset.saturating_mul(n as u64), FreeUse::TakeOne)?;
     burn_per_asset(
         &mut a.creation_burn,
@@ -226,6 +228,7 @@ pub fn add_constituent(ctx: Context<AddConstituent>) -> Result<()> {
 
     // An added asset pays its GRAVI burn as if the basket had started with it.
     let a = &mut *ctx.accounts;
+    a.creation_burn.per_asset = creation_burn_per_asset(&a.protocol.to_account_info(), &a.creation_burn);
     let exempt = burn_skip(&a.authority.key(), ctx.remaining_accounts, &a.protocol.to_account_info(), a.creation_burn.per_asset, FreeUse::TakeOne)?;
     burn_per_asset(
         &mut a.creation_burn,

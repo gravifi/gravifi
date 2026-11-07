@@ -368,7 +368,7 @@ pub struct InitStaking<'info> {
     #[account(mut)]
     pub authority: Signer<'info>,
     /// Grown by hand to hold the flags after its fields (see PROTOCOL_FLAGS_OFFSET).
-    #[account(mut, seeds = [PROTOCOL_SEED], bump = protocol.bump, has_one = authority @ VaultError::NotProtocolAuthority)]
+    #[account(mut, seeds = [PROTOCOL_SEED], bump = protocol.bump, constraint = authority_of(&protocol.to_account_info()) == authority.key() @ VaultError::NotProtocolAuthority)]
     pub protocol: Box<Account<'info, Protocol>>,
     #[account(address = protocol.gravi_mint @ VaultError::GraviMintNotSet)]
     pub gravi_mint: Box<InterfaceAccount<'info, MintI>>,
@@ -518,7 +518,7 @@ pub struct StakeRedeem<'info> {
 pub struct StakeSellStart<'info> {
     #[account(mut)]
     pub rebalancer: Signer<'info>,
-    #[account(seeds = [KEEPERS_SEED], bump = keepers.bump, constraint = keepers.rebalancer == rebalancer.key() @ VaultError::NotRebalancer)]
+    #[account(seeds = [KEEPERS_SEED], bump = keepers.bump, constraint = rebalancer_of(&keepers.to_account_info()) == rebalancer.key() @ VaultError::NotRebalancer)]
     pub keepers: Box<Account<'info, Keepers>>,
     #[account(mut, seeds = [STAKE_POOL_SEED], bump = pool.bump)]
     pub pool: Box<Account<'info, StakePool>>,
@@ -550,7 +550,7 @@ pub struct StakeSellStart<'info> {
 #[derive(Accounts)]
 pub struct StakeSellFinish<'info> {
     pub rebalancer: Signer<'info>,
-    #[account(seeds = [KEEPERS_SEED], bump = keepers.bump, constraint = keepers.rebalancer == rebalancer.key() @ VaultError::NotRebalancer)]
+    #[account(seeds = [KEEPERS_SEED], bump = keepers.bump, constraint = rebalancer_of(&keepers.to_account_info()) == rebalancer.key() @ VaultError::NotRebalancer)]
     pub keepers: Box<Account<'info, Keepers>>,
     #[account(mut, seeds = [STAKE_POOL_SEED], bump = pool.bump)]
     pub pool: Box<Account<'info, StakePool>>,
@@ -565,7 +565,7 @@ pub struct StakeSellFinish<'info> {
 pub struct StakeCloseAccount<'info> {
     #[account(mut)]
     pub rebalancer: Signer<'info>,
-    #[account(seeds = [KEEPERS_SEED], bump = keepers.bump, constraint = keepers.rebalancer == rebalancer.key() @ VaultError::NotRebalancer)]
+    #[account(seeds = [KEEPERS_SEED], bump = keepers.bump, constraint = rebalancer_of(&keepers.to_account_info()) == rebalancer.key() @ VaultError::NotRebalancer)]
     pub keepers: Box<Account<'info, Keepers>>,
     /// CHECK: address-only PDA; signs as the account's owner.
     #[account(seeds = [STAKE_REWARDS_SEED], bump)]

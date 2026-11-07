@@ -25,6 +25,7 @@ import {
   setup,
   warp,
   postPrices,
+  seedPrices,
 } from "./helpers.ts";
 import { NO_GRAVI, createFeeAccounts, feeShares, initProtocol, listAsset, world, type World, initKeepers, setParam, PARAM, PARAM_NOTICE, FAMILY } from "./fixtures.ts";
 
@@ -350,6 +351,7 @@ async function fourWorld() {
   const keeper = fund(ctx);
   await initKeepers(ctx, keeper.publicKey, keeper.publicKey);
   const keeperAtas: PublicKey[] = [];
+  await seedPrices(ctx, keeper, mints.map((m): [PublicKey, bigint] => [m, PRICE_A]));
   for (const m of mints) {
     await rpc(
       ctx,
@@ -406,11 +408,7 @@ async function strayWorld() {
   const stray = await createMint(w.ctx, 6, TOKEN_PROGRAM_ID);
   const strayVault = await createAta(w.ctx, stray, w.basket, TOKEN_PROGRAM_ID);
   await mintTo(w.ctx, stray, strayVault, 3n * ONE_A, TOKEN_PROGRAM_ID);
-  await rpc(
-    w.ctx,
-    w.ctx.vault.methods.setPrice(new BN(PRICE_S.toString())).accountsPartial({ priceAuthority: w.keeper.publicKey, keepers: pda.keepers(), mint: stray, assetPrice: pda.price(stray), pythPrice: null }),
-    [w.keeper],
-  );
+  await postPrices(w.ctx, w.keeper, [[w.mintA, PRICE_A], [w.mintB, PRICE_B], [stray, PRICE_S]]);
   const keeperStray = await createAta(w.ctx, stray, w.keeper.publicKey, TOKEN_PROGRAM_ID);
   return { ...w, stray, strayVault, keeperStray };
 }
@@ -484,11 +482,7 @@ describe("sweeping stray tokens", () => {
       "NotStray",
     );
     const sharesHeld = await createAta(w.ctx, w.shareMint, w.basket, TOKEN_PROGRAM_ID);
-    await rpc(
-      w.ctx,
-      w.ctx.vault.methods.setPrice(new BN(PRICE_A.toString())).accountsPartial({ priceAuthority: w.keeper.publicKey, keepers: pda.keepers(), mint: w.shareMint, assetPrice: pda.price(w.shareMint), pythPrice: null }),
-      [w.keeper],
-    );
+    await postPrices(w.ctx, w.keeper, [[w.mintA, PRICE_A], [w.mintB, PRICE_B], [w.stray, PRICE_S], [w.shareMint, PRICE_A]]);
     const keeperShares = await createAta(w.ctx, w.shareMint, w.keeper.publicKey, TOKEN_PROGRAM_ID);
     await expectError(
       send(w.ctx, [await sweepIx(w, 1n, { mint: w.shareMint, vault: sharesHeld, receive: keeperShares }), deliverA(w, ONE_A), await finishIx(w)], [w.keeper]),

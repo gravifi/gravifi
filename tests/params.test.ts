@@ -219,6 +219,9 @@ describe("params: effects", () => {
     const post = (price: bigint) =>
       rpc(w.ctx, w.ctx.vault.methods.setPrice(new BN(price.toString())).accountsPartial({ priceAuthority: keeper.publicKey, keepers: pda.keepers(), mint: w.mintA, assetPrice: pda.price(w.mintA), pythPrice: null }), [keeper]);
     const E12 = 1_000_000_000_000n;
+    // The first price seeds the band; a quarter of an hour later it's confirmed.
+    await post(E12);
+    warp(w.ctx, 900);
     await post(E12);
     await setParam(w.ctx, P.PRICE_MOVE_BPS, 1_000n);
     await expectError(post((E12 * 115n) / 100n), "PriceMoveTooLarge");

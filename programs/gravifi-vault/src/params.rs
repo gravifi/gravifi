@@ -19,6 +19,10 @@
 //!   to the rules as documented. Redeeming, unstaking and every other way out are behind none.
 //! - A new feature shipped dark (`FEATURES`) waits the notice to be turned on, and turns off at once.
 //!
+//! Outside this account, by the same rule: a fee or burn raise (`set_param` CONFIG_*) waits a week
+//! in the protocol account's tail (`state::FEE_NOTICE_SECS`), lowering is at once; a key named for a
+//! role (`set_role`) waits a day (`state::ROLE_NOTICE_SECS`), removing one is at once.
+//!
 //! Durations are read when a window opens and stored on the account it belongs to (a proposal's
 //! vote and execution window, a stake's warm-up, a cut rise, a mandate, an unstaking), so a change
 //! never moves a window already open.

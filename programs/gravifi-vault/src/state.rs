@@ -121,7 +121,8 @@ pub struct Basket {
     /// to the strategist, when `control` reads Smart. Read through `by_vote`.
     pub community: u8,
     /// Bytes 0..4: when a vote last added an asset (`community_execute_add`), unix seconds as a
-    /// u32, read through `vote_added_at`; 0 for never. The fifth byte is spare.
+    /// u32, read through `vote_added_at`; 0 for never. Byte 4: 1 once the cut was set or lowered
+    /// after the pending rise was asked for, which calls that rise off (`cut_rise_void`).
     pub reserved: [u8; 5],
     /// The creator's cut of every mint by someone else, in bps of the shares (`creator_cut.rs`).
     /// (No basket handed to holder governance (`ControlMode::Dao`) exists on mainnet, whose spare
@@ -178,6 +179,16 @@ impl Basket {
     /// When a vote last added an asset to this basket (0: never). Only a Community basket writes it.
     pub fn vote_added_at(&self) -> i64 {
         u32::from_le_bytes([self.reserved[0], self.reserved[1], self.reserved[2], self.reserved[3]]) as i64
+    }
+
+    /// Whether the creator's pending cut rise, if any, was called off: the cut was set or lowered
+    /// since it was asked for (`propose_cut_rise` clears it).
+    pub fn cut_rise_void(&self) -> bool {
+        self.reserved[4] != 0
+    }
+
+    pub fn set_cut_rise_void(&mut self, void: bool) {
+        self.reserved[4] = void as u8;
     }
 
     pub fn set_vote_added_at(&mut self, now: i64) {
@@ -303,11 +314,138 @@ pub struct CreationBurn {
 /// the account is only ever created once (`init_protocol`), so nothing checks its size.
 pub const BURN_EXEMPT_OFFSET: usize = 8 + Protocol::INIT_SPACE;
 
+/// The burn-exempt wallet in force, if any (a wallet named waits `ROLE_NOTICE_SECS`).
 pub fn burn_exempt(protocol: &AccountInfo) -> Option<Pubkey> {
-    let data = protocol.try_borrow_data().ok()?;
-    let bytes: [u8; 32] = data.get(BURN_EXEMPT_OFFSET..BURN_EXEMPT_OFFSET + 32)?.try_into().ok()?;
-    let wallet = Pubkey::new_from_array(bytes);
+    let wallet = key_in_force(protocol, BURN_EXEMPT_OFFSET, PENDING_ROLES_OFFSET + 2 * PENDING_KEY_LEN);
     (wallet != Pubkey::default()).then_some(wallet)
+}
+
+// ------------------------------------------------------------- changes waiting their notice
+
+/// How long a key named for a role (`set_role`) waits before it acts: a day, so a key swapped in
+/// is public before it can do anything. Clearing a role applies at once (an emergency stop).
+pub const ROLE_NOTICE_SECS: i64 = 86_400;
+/// How long a fee or burn raise (`set_param` CONFIG_*) waits: the week user-facing params wait
+/// (`params::PARAM_NOTICE_SECS`), so anyone who'd pay more can leave first. Lowering is at once.
+pub const FEE_NOTICE_SECS: i64 = 7 * 86_400;
+/// A key waiting to replace a role's: [key 32][applies_at i64], applies_at 0 for none.
+pub const PENDING_KEY_LEN: usize = 40;
+/// A fee waiting to replace one in force: [value u64][applies_at i64], applies_at 0 for none.
+pub const PENDING_FEE_LEN: usize = 16;
+/// In the protocol account's tail after the flags: the fee and burn raises waiting, one slot each
+/// (`FEE_*`), then the keys waiting for the authority, the guardian and the burn-exempt wallet.
+pub const PENDING_FEES_OFFSET: usize = PROTOCOL_FLAGS_OFFSET + 1;
+/// The protocol fee and burn share, as `set_param` packs them: `fee | burn_share << 16`.
+pub const FEE_PROTOCOL: usize = 0;
+pub const FEE_CREATION_BURN: usize = 1;
+pub const FEE_SMART: usize = 2;
+pub const FEE_SMART_BURN: usize = 3;
+pub const PENDING_ROLES_OFFSET: usize = PENDING_FEES_OFFSET + 4 * PENDING_FEE_LEN;
+/// The protocol account's full length with everything kept after its fields.
+pub const PROTOCOL_TAIL_END: usize = PENDING_ROLES_OFFSET + 3 * PENDING_KEY_LEN;
+/// Where the protocol account keeps the authority and the guardian: after its discriminator and bump.
+pub const AUTHORITY_AT: usize = 9;
+pub const GUARDIAN_AT: usize = 41;
+/// The lister's and strategist's accounts: [discriminator][bump][key][pending key], `ROLE_ACCOUNT_LEN`.
+pub const ROLE_KEY_AT: usize = 9;
+pub const ROLE_PENDING_AT: usize = 41;
+pub const ROLE_ACCOUNT_LEN: usize = ROLE_PENDING_AT + PENDING_KEY_LEN;
+/// The keepers' account: [discriminator][bump][price authority][rebalancer], then each one's
+/// pending key, `KEEPERS_LEN`.
+pub const PRICE_AUTHORITY_AT: usize = 9;
+pub const REBALANCER_AT: usize = 41;
+pub const PRICE_AUTHORITY_PENDING_AT: usize = 73;
+pub const REBALANCER_PENDING_AT: usize = PRICE_AUTHORITY_PENDING_AT + PENDING_KEY_LEN;
+pub const KEEPERS_LEN: usize = REBALANCER_PENDING_AT + PENDING_KEY_LEN;
+
+fn clock_now() -> i64 {
+    // 0 if the clock can't be read: nothing waiting has come due then.
+    Clock::get().map(|c| c.unix_timestamp).unwrap_or(0)
+}
+
+fn word(d: &[u8], o: usize) -> i64 {
+    i64::from_le_bytes(d[o..o + 8].try_into().unwrap())
+}
+
+/// The key a role acts with: the one at `at`, or the pending one at `pending_at` once its day has
+/// passed. An account without the pending slot (from before it existed) has nothing waiting, and
+/// one too short for the key has none (`Pubkey::default()`, which nobody can sign as).
+#[inline(never)]
+pub fn key_in_force(ai: &AccountInfo, at: usize, pending_at: usize) -> Pubkey {
+    let Ok(d) = ai.try_borrow_data() else { return Pubkey::default() };
+    if let Some(s) = d.get(pending_at..pending_at + PENDING_KEY_LEN) {
+        let due = word(s, 32);
+        if due != 0 && clock_now() >= due {
+            return Pubkey::new_from_array(s[..32].try_into().unwrap());
+        }
+    }
+    d.get(at..at + 32).map(|k| Pubkey::new_from_array(k.try_into().unwrap())).unwrap_or_default()
+}
+
+/// The protocol authority in force.
+pub fn authority_of(protocol: &AccountInfo) -> Pubkey {
+    key_in_force(protocol, AUTHORITY_AT, PENDING_ROLES_OFFSET)
+}
+
+/// The guardian in force (`Pubkey::default()`: none).
+pub fn guardian_of(protocol: &AccountInfo) -> Pubkey {
+    key_in_force(protocol, GUARDIAN_AT, PENDING_ROLES_OFFSET + PENDING_KEY_LEN)
+}
+
+/// The lister's or the strategist's key in force, from its account.
+pub fn role_key(ai: &AccountInfo) -> Pubkey {
+    key_in_force(ai, ROLE_KEY_AT, ROLE_PENDING_AT)
+}
+
+/// The price authority in force, from the keepers' account.
+pub fn price_authority_of(keepers: &AccountInfo) -> Pubkey {
+    key_in_force(keepers, PRICE_AUTHORITY_AT, PRICE_AUTHORITY_PENDING_AT)
+}
+
+/// The rebalancer in force, from the keepers' account.
+pub fn rebalancer_of(keepers: &AccountInfo) -> Pubkey {
+    key_in_force(keepers, REBALANCER_AT, REBALANCER_PENDING_AT)
+}
+
+/// Names `key` for a role whose key sits at `at` in `data` and its pending one at `pending_at`.
+/// A pending key whose day has passed becomes the key first. Clearing the role
+/// (`Pubkey::default()`) or naming the key in force applies at once and withdraws any key waiting;
+/// any other key waits `ROLE_NOTICE_SECS`. `data` must hold both slots.
+pub fn name_key(data: &mut [u8], at: usize, pending_at: usize, key: Pubkey, now: i64) {
+    let due = word(data, pending_at + 32);
+    if due != 0 && now >= due {
+        data.copy_within(pending_at..pending_at + 32, at);
+    }
+    let current = Pubkey::new_from_array(data[at..at + 32].try_into().unwrap());
+    if key == Pubkey::default() || key == current {
+        data[at..at + 32].copy_from_slice(key.as_ref());
+        data[pending_at..pending_at + PENDING_KEY_LEN].fill(0);
+    } else {
+        data[pending_at..pending_at + 32].copy_from_slice(key.as_ref());
+        data[pending_at + 32..pending_at + PENDING_KEY_LEN].copy_from_slice(&(now + ROLE_NOTICE_SECS).to_le_bytes());
+    }
+}
+
+/// A fee raise in the protocol account's tail whose week has passed, if any.
+pub fn fee_due(protocol: &AccountInfo, slot: usize) -> Option<u64> {
+    let d = protocol.try_borrow_data().ok()?;
+    let o = PENDING_FEES_OFFSET + slot * PENDING_FEE_LEN;
+    let s = d.get(o..o + PENDING_FEE_LEN)?;
+    let due = word(s, 8);
+    (due != 0 && clock_now() >= due).then(|| word(s, 0) as u64)
+}
+
+/// The protocol fee and the burn's share of it in force: `(fee_bps, burn_share_bps)`.
+pub fn protocol_fees(protocol: &Account<Protocol>) -> (u16, u16) {
+    match fee_due(&protocol.to_account_info(), FEE_PROTOCOL) {
+        Some(v) => (v as u16, (v >> 16) as u16),
+        None => (protocol.protocol_fee_bps, protocol.burn_share_bps),
+    }
+}
+
+/// The GRAVI burned per asset on creating a basket, in force.
+pub fn creation_burn_per_asset(protocol: &AccountInfo, c: &CreationBurn) -> u64 {
+    fee_due(protocol, FEE_CREATION_BURN).unwrap_or(c.per_asset)
 }
 
 /// The one key, besides the protocol authority, that may list assets (`register_asset`), at
@@ -371,7 +509,11 @@ pub const SMART_BURN_LEN: usize = 8;
 /// Its ceiling, in whole GRAVI.
 pub const MAX_SMART_BURN_TOKENS: u64 = 1_000_000;
 
+/// The smart burn in force (a raise waits `FEE_NOTICE_SECS`).
 pub fn smart_burn(protocol: &AccountInfo) -> u64 {
+    if let Some(v) = fee_due(protocol, FEE_SMART_BURN) {
+        return v;
+    }
     let Ok(data) = protocol.try_borrow_data() else { return 0 };
     data.get(SMART_BURN_OFFSET..SMART_BURN_OFFSET + SMART_BURN_LEN)
         .and_then(|b| b.try_into().ok())
@@ -379,7 +521,11 @@ pub fn smart_burn(protocol: &AccountInfo) -> u64 {
         .unwrap_or(0)
 }
 
+/// The Smart-mode fee in force (a raise waits `FEE_NOTICE_SECS`).
 pub fn smart_fee_bps(protocol: &AccountInfo) -> u16 {
+    if let Some(v) = fee_due(protocol, FEE_SMART) {
+        return v as u16;
+    }
     let Ok(data) = protocol.try_borrow_data() else { return SMART_FEE_DEFAULT_BPS };
     match data.get(SMART_FEE_OFFSET..SMART_FEE_OFFSET + SMART_FEE_LEN) {
         Some([lo, hi, 1]) => u16::from_le_bytes([*lo, *hi]),
@@ -585,7 +731,10 @@ pub const SESSION_IDLE_SLOTS: u64 = 216_000;
 pub const SPLIT_COOLDOWN_SECS: i64 = 30 * 86_400;
 
 /// Who may post prices and run rebalances: the app's keeper today, on every cluster. What a
-/// posted price may be is bounded by its `PriceGuard`.
+/// posted price may be is bounded by its `PriceGuard`. A key named for either waits a day after the
+/// fields, in the account's tail (`KEEPERS_LEN`); every check reads the key in force through
+/// `price_authority_of` / `rebalancer_of`, never these fields alone. (The same goes for the lister,
+/// the strategist, the authority and the guardian: `role_key`, `authority_of`, `guardian_of`.)
 #[account]
 #[derive(InitSpace)]
 pub struct Keepers {

@@ -262,4 +262,8 @@ pub enum VaultError {
     BadExt,
     #[msg("The basket's extension account is full")]
     ExtFull,
+    #[msg("This rise was called off: the cut was lowered after it was asked for, or it's no higher than the cut now")]
+    CutRiseVoid,
+    #[msg("The Pyth price is published in the future")]
+    PythPriceAhead,
 }

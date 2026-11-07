@@ -23,8 +23,9 @@ import {
   supply,
   warp,
   type Ctx,
+  seedPrices,
 } from "./helpers.ts";
-import { NO_GRAVI, feeShares, fundHolder, listAsset, mintIx, setCreationBurn, world, initKeepers, protocolFeesIx, setParamIx, CONFIG, setParam, PARAM, PARAM_NOTICE, FAMILY } from "./fixtures.ts";
+import { NO_GRAVI, feeShares, fundHolder, listAsset, mintIx, setCreationBurn, world, initKeepers, protocolFeesIx, setParamIx, CONFIG, setParam, PARAM, PARAM_NOTICE, FAMILY, skipNotices } from "./fixtures.ts";
 
 const GRAVI_PROGRAM = TOKEN_2022_PROGRAM_ID;
 const ONE_GRAVI = 1_000_000n; // mainnet's: Token-2022, 6 decimals
@@ -44,7 +45,7 @@ async function stakeWorld(opts: { on?: boolean } = {}) {
   const w = await world({ gravi: { program: GRAVI_PROGRAM, decimals: 6 } });
   const { ctx } = w;
   warp(ctx, 1_000_000); // LiteSVM's clock starts at 0, which a real one never reads
-  await rpc(ctx, protocolFeesIx(ctx, 40, 5_000));
+  await rpc(ctx, protocolFeesIx(ctx, 40, 5_000)); skipNotices(ctx);
   nativeMint(ctx);
   const keeper = fund(ctx);
   await initKeepers(ctx, keeper.publicKey, keeper.publicKey);
@@ -473,6 +474,7 @@ describe("staking: selling for the pot", () => {
     const rewardB = await createAta(w.ctx, w.mintB, pda.stakeRewards(), TOKEN_2022_PROGRAM_ID);
     const keeperA = await createAta(w.ctx, w.mintA, w.keeper.publicKey, TOKEN_PROGRAM_ID);
     const post = (mint: PublicKey, price: bigint) => rpc(w.ctx, w.ctx.vault.methods.setPrice(new BN(price.toString())).accountsPartial({ priceAuthority: w.keeper.publicKey, keepers: pda.keepers(), mint, assetPrice: pda.price(mint), pythPrice: null }), [w.keeper]);
+    await seedPrices(w.ctx, w.keeper, [[w.mintA, PRICE_A], [NATIVE_MINT, PRICE_SOL]]);
     await post(w.mintA, PRICE_A);
     await post(NATIVE_MINT, PRICE_SOL);
     return { ...w, rewardShares, rewardA, rewardB, keeperA, post };
@@ -687,7 +689,7 @@ describe("staking: free baskets", () => {
   it("making a basket smart while creating it is free with a free basket a day, without using one", async () => {
     const w = await stakeWorld();
     await setCreationBurn(w.ctx, w.graviMint, BURN);
-    await rpc(w.ctx, setParamIx(w.ctx, CONFIG.smartBurn, 50_000n * ONE_GRAVI, [w.graviMint]));
+    await rpc(w.ctx, setParamIx(w.ctx, CONFIG.smartBurn, 50_000n * ONE_GRAVI, [w.graviMint])); skipNotices(w.ctx);
     const who = await warmed(w);
     // Four assets at 25%, within the guardrails (two can't be: 35% each is 70%).
     const more: PublicKey[] = [];

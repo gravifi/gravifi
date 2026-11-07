@@ -1,6 +1,6 @@
 // Bounded prices: an asset with a Pyth feed is held within Pyth's confidence of a fresh, fully
-// verified Pyth price; any other within 20% of a reference that rolls forward hourly. Pyth's
-// accounts are written into LiteSVM byte for byte.
+// verified Pyth price; any other within 20% of a reference that rolls forward hourly, which an
+// asset's first price only seeds. Pyth's accounts are written into LiteSVM byte for byte.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { Keypair, PublicKey, SystemProgram, TransactionInstruction } from "@solana/web3.js";
@@ -28,6 +28,13 @@ const priceIx = (w: PW, mint: PublicKey, price: bigint, pyth: PublicKey | null =
     .accountsPartial({ priceAuthority: w.keeper.publicKey, keepers: pda.keepers(), mint, assetPrice: pda.price(mint), pythPrice: pyth });
 const post = (w: PW, mint: PublicKey, price: bigint, pyth: PublicKey | null = null) => rpc(w.ctx, priceIx(w, mint, price, pyth), [w.keeper]);
 const posted = async (w: PW, mint: PublicKey) => BigInt((await w.ctx.vault.account.assetPrice.fetch(pda.price(mint))).priceE12.toString());
+const reference = async (w: PW, mint: PublicKey) => BigInt((await w.ctx.vault.account.priceGuard.fetch(pda.guard(mint))).referenceE12.toString());
+/** A first price without Pyth: seeded, then confirmed a quarter of an hour later. */
+async function seed(w: PW, mint: PublicKey, price: bigint) {
+  await post(w, mint, price);
+  warp(w.ctx, 900);
+  await post(w, mint, price);
+}
 
 const feedIx = (w: PW, mint: PublicKey, feed: Buffer, authority = w.ctx.payer) =>
   w.ctx.vault.methods.setPriceFeed(Array.from(feed)).accountsPartial({ authority: authority.publicKey, protocol: pda.protocol(), mint, priceGuard: pda.guard(mint) });
@@ -63,16 +70,51 @@ function pythAccount(ctx: Ctx, o: { price: bigint; conf?: bigint; expo?: number;
 }
 
 describe("price band", () => {
-  it("a new asset's first price is taken as it is, and becomes the reference", async () => {
+  it("a new asset's first price only seeds the reference: nothing trades at it until a post 15 minutes later agrees", async () => {
     const w = await priceWorld();
     await post(w, w.mintA, $(10));
-    const g = await w.ctx.vault.account.priceGuard.fetch(pda.guard(w.mintA));
-    assert.equal(BigInt(g.referenceE12.toString()), $(10));
+    assert.equal(await reference(w, w.mintA), $(10));
+    // No usable price: every reader (slices, stops, the buyback) wants one above zero and fresh.
+    const unusable = await w.ctx.vault.account.assetPrice.fetch(pda.price(w.mintA));
+    assert.equal(BigInt(unusable.priceE12.toString()), 0n);
+    assert.equal(unusable.updatedAt.toNumber(), 0);
+    // Agreeing too early changes nothing.
+    warp(w.ctx, 899);
+    await post(w, w.mintA, $(11));
+    assert.equal(await posted(w, w.mintA), 0n);
+    // A quarter of the reference window after the seed, a post within 20% of it is the price.
+    warp(w.ctx, 1);
+    await post(w, w.mintA, $(11));
+    assert.equal(await posted(w, w.mintA), $(11));
+    assert.equal(await reference(w, w.mintA), $(10));
+  });
+
+  it("a post that disagrees with an unconfirmed seed replaces it, and the quarter hour starts again", async () => {
+    const w = await priceWorld();
+    await post(w, w.mintA, $(1_000)); // a mistyped first price
+    warp(w.ctx, 900);
+    await post(w, w.mintA, $(10)); // 99% off: the new seed, nothing usable yet
+    assert.equal(await posted(w, w.mintA), 0n);
+    assert.equal(await reference(w, w.mintA), $(10));
+    await post(w, w.mintA, $(10));
+    assert.equal(await posted(w, w.mintA), 0n);
+    warp(w.ctx, 900);
+    await post(w, w.mintA, $(10));
+    assert.equal(await posted(w, w.mintA), $(10));
+    // Once there's a price, the band holds as before.
+    await expectError(post(w, w.mintA, $(1_000)), "PriceMoveTooLarge");
+  });
+
+  it("an asset that already has a price keeps working as before: no new quarter hour", async () => {
+    const w = await priceWorld();
+    await seed(w, w.mintA, $(10));
+    await post(w, w.mintA, $(11));
+    assert.equal(await posted(w, w.mintA), $(11));
   });
 
   it("a price may move up to 20% from the reference, and no further", async () => {
     const w = await priceWorld();
-    await post(w, w.mintA, $(10));
+    await seed(w, w.mintA, $(10));
     await post(w, w.mintA, $(12));
     await post(w, w.mintA, $(8));
     await expectError(post(w, w.mintA, $(12.01)), "PriceMoveTooLarge");
@@ -94,7 +136,7 @@ describe("price band", () => {
 
   it("a guard that starts after prices were posted is held to the last one", async () => {
     const w = await priceWorld();
-    await post(w, w.mintA, $(10));
+    await seed(w, w.mintA, $(10));
     // As on a cluster upgraded with prices already posted: the price stays, the guard is new.
     w.ctx.svm.setAccount(pda.guard(w.mintA), { lamports: 0, data: Buffer.alloc(0), owner: SystemProgram.programId, executable: false });
     await expectError(post(w, w.mintA, $(20)), "PriceMoveTooLarge");
@@ -134,6 +176,16 @@ describe("Pyth check", () => {
     await expectError(post(w, w.mintA, $(10), pythAccount(w.ctx, { price: 1_000_000_000n, full: false })), "PythPriceInvalid");
     await expectError(post(w, w.mintA, $(10), pythAccount(w.ctx, { price: 1_000_000_000n, age: 301 })), "PythPriceStale");
     await post(w, w.mintA, $(10), pythAccount(w.ctx, { price: 1_000_000_000n, age: 299 }));
+  });
+
+  it("a Pyth price published more than 10 seconds ahead of the cluster's clock is refused", async () => {
+    const w = await fed();
+    warp(w.ctx, 1_000);
+    // Ahead, the age check alone would let it stand for as long as it's ahead.
+    await expectError(post(w, w.mintA, $(10), pythAccount(w.ctx, { price: 1_000_000_000n, age: -11 })), "PythPriceAhead");
+    await expectError(post(w, w.mintA, $(10), pythAccount(w.ctx, { price: 1_000_000_000n, age: -86_400 })), "PythPriceAhead");
+    // A few seconds of clock drift are fine.
+    await post(w, w.mintA, $(10), pythAccount(w.ctx, { price: 1_000_000_000n, age: -10 }));
   });
 
   it("the price must be within 3% of Pyth's, or three times its confidence up to 5%", async () => {

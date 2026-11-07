@@ -19,7 +19,7 @@ import {
   supply,
   type Ctx,
 } from "./helpers.ts";
-import { listAsset, setCreationBurn, world, type World, protocolFeesIx, setRoleIx, ROLE } from "./fixtures.ts";
+import { listAsset, setCreationBurn, world, type World, protocolFeesIx, setRoleIx, ROLE, skipNotices } from "./fixtures.ts";
 import { Keypair, PublicKey } from "@solana/web3.js";
 
 // The test GRAVI mint has 9 decimals.
@@ -194,7 +194,7 @@ describe("burn-exempt wallet", () => {
     const perAsset = 100_000n * GRAVI;
     await setCreationBurn(w.ctx, w.graviMint, perAsset);
     const team = fund(w.ctx);
-    await rpc(w.ctx, exemptIx(w, team.publicKey));
+    await rpc(w.ctx, exemptIx(w, team.publicKey)); skipNotices(w.ctx);
     // The creation burn's own fields are untouched.
     assert.equal((await creationBurn(w.ctx)).perAsset, perAsset);
 
@@ -211,14 +211,14 @@ describe("burn-exempt wallet", () => {
   it("survives a change of the burn, and can be moved or removed", async () => {
     const w = await world();
     const team = fund(w.ctx);
-    await rpc(w.ctx, exemptIx(w, team.publicKey));
+    await rpc(w.ctx, exemptIx(w, team.publicKey)); skipNotices(w.ctx);
     await setCreationBurn(w.ctx, w.graviMint, GRAVI);
     // A protocol setting written after it leaves the wallet in place.
-    await rpc(w.ctx, protocolFeesIx(w.ctx, 10, 5_000));
+    await rpc(w.ctx, protocolFeesIx(w.ctx, 10, 5_000)); skipNotices(w.ctx);
     await rpc(w.ctx, createIx(w, team, null), [team]);
 
     const next = fund(w.ctx);
-    await rpc(w.ctx, exemptIx(w, next.publicKey));
+    await rpc(w.ctx, exemptIx(w, next.publicKey)); skipNotices(w.ctx);
     await expectError(rpc(w.ctx, createIx(w, team, null), [team]), "CreationBurnAccountsMissing");
     await rpc(w.ctx, createIx(w, next, null), [next]);
 
@@ -272,7 +272,7 @@ describe("adding an asset", () => {
     await rpc(
       w.ctx,
       setRoleIx(w.ctx, ROLE.burnExempt, w.creator.publicKey, w.ctx.payer.publicKey),
-    );
+    ); skipNotices(w.ctx);
     await rpc(w.ctx, addIx(w, await assetC(w), null), [w.creator]);
     assert.equal((await creationBurn(w.ctx)).totalBurned, 0n);
   });

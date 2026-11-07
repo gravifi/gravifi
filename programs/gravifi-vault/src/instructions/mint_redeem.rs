@@ -424,13 +424,14 @@ pub(crate) fn flow_fee(shares: u64, fee_bps: u16) -> Result<u64> {
 /// pays the Smart-mode fee (`smart_fee_bps`), split the same way. An invited payer pays half
 /// the rate, rounded up, all of it to the treasury.
 pub(crate) fn protocol_cut(shares: u64, protocol: &Account<Protocol>, basket: &Basket, invited: bool) -> Result<(u64, u64, u64)> {
-    let rate = if basket.control == ControlMode::Smart { smart_fee_bps(&protocol.to_account_info()) } else { protocol.protocol_fee_bps };
+    let (fee_bps, burn_share_bps) = protocol_fees(protocol);
+    let rate = if basket.control == ControlMode::Smart { smart_fee_bps(&protocol.to_account_info()) } else { fee_bps };
     if invited {
         let fee = flow_fee(shares, rate.div_ceil(2))?;
         return Ok((fee, 0, fee));
     }
     let fee = flow_fee(shares, rate)?;
-    let (burn, treasury) = split_protocol_fee(fee, protocol.burn_share_bps)?;
+    let (burn, treasury) = split_protocol_fee(fee, burn_share_bps)?;
     Ok((fee, burn, treasury))
 }
 

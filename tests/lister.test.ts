@@ -13,10 +13,10 @@ import {
   getMintLen,
 } from "@solana/spl-token";
 import { createMint, expectError, fund, pda, rpc, send, setup, type Ctx } from "./helpers.ts";
-import { initProtocol, listAsset, setRoleIx, ROLE, setParam, PARAM, FAMILY } from "./fixtures.ts";
+import { initProtocol, listAsset, setRoleIx, ROLE, setParam, PARAM, FAMILY, skipNotices } from "./fixtures.ts";
 
 async function setLister(ctx: Ctx, lister: PublicKey, authority = ctx.payer) {
-  await rpc(ctx, setRoleIx(ctx, ROLE.lister, lister, authority.publicKey), [authority]);
+  await rpc(ctx, setRoleIx(ctx, ROLE.lister, lister, authority.publicKey), [authority]); skipNotices(ctx);
 }
 
 /** A listing as the app makes it: the creator pays, the lister signs as authority. */

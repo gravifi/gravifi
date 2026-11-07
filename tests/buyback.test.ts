@@ -22,8 +22,9 @@ import {
   send,
   setup,
   supply,
+  seedPrices,
 } from "./helpers.ts";
-import { feeShares, fundHolder, mintIx, world, initKeepers, protocolFeesIx, setRoleIx, ROLE, setParam, PARAM, FAMILY } from "./fixtures.ts";
+import { feeShares, fundHolder, mintIx, world, initKeepers, protocolFeesIx, setRoleIx, ROLE, setParam, PARAM, FAMILY, skipNotices } from "./fixtures.ts";
 
 const PRICE_A = 1_000_000_000_000n; // $1.00
 const PRICE_B = 6_000_000_000_000n; // $6.00
@@ -34,7 +35,7 @@ async function buybackWorld() {
   // A 0.40% fee, half of it to the burn PDA: Alice minting 100 shares leaves 0.2 there.
   // (Seeded with no fee, then 0.40%, so the burn PDA holds exactly Alice's share of it.)
   const w = await world({ protocolFeeBps: 0 });
-  await rpc(w.ctx, protocolFeesIx(w.ctx, 40, 5_000));
+  await rpc(w.ctx, protocolFeesIx(w.ctx, 40, 5_000)); skipNotices(w.ctx);
   const keeper = fund(w.ctx);
   await initKeepers(w.ctx, keeper.publicKey, keeper.publicKey);
   const alice = fund(w.ctx);
@@ -125,6 +126,7 @@ const deliver = (w: BW, amount: bigint) =>
 
 async function redeemAll(w: BW) {
   await rpc(w.ctx, redeemIx(w, balance(w.ctx, burnShares(w))));
+  await seedPrices(w.ctx, w.keeper, [[w.mintA, PRICE_A], [w.mintB, PRICE_B], [w.graviMint, PRICE_GRAVI]]);
   await setPrice(w, w.mintA, PRICE_A);
   await setPrice(w, w.mintB, PRICE_B);
   await setPrice(w, w.graviMint, PRICE_GRAVI);
@@ -272,6 +274,7 @@ describe("selling the burn's tokens for SOL, then all the SOL for GRAVI", () => 
     // The keeper holds SOL to deliver as the "market", and receives SOL to sell for GRAVI.
     const keeperSol = await createAta(w.ctx, NATIVE_MINT, w.keeper.publicKey, TOKEN_PROGRAM_ID);
     await send(w.ctx, [SystemProgram.transfer({ fromPubkey: w.keeper.publicKey, toPubkey: keeperSol, lamports: 10_000_000_000 }), createSyncNativeInstruction(keeperSol)], [w.keeper]);
+    await seedPrices(w.ctx, w.keeper, [[NATIVE_MINT, PRICE_SOL]]);
     await redeemAll(w);
     await setPrice(w, NATIVE_MINT, PRICE_SOL);
     return { ...w, burnSol, keeperSol };

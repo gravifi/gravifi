@@ -26,7 +26,7 @@ import {
   warp,
   type Ctx,
 } from "./helpers.ts";
-import { NO_GRAVI, SEED_SHARES, UNITS_A, UNITS_B, feeShares, fundHolder, initProtocol, listAsset, mintIx, quads, redeemIx, setCreationBurn, world, initKeepers, protocolFeesIx, setRoleIx, setParamIx, ROLE, CONFIG, setParam, PARAM, PARAM_NOTICE, FAMILY } from "./fixtures.ts";
+import { NO_GRAVI, SEED_SHARES, UNITS_A, UNITS_B, feeShares, fundHolder, initProtocol, listAsset, mintIx, quads, redeemIx, setCreationBurn, world, initKeepers, protocolFeesIx, setRoleIx, setParamIx, ROLE, CONFIG, setParam, PARAM, PARAM_NOTICE, FAMILY, skipNotices } from "./fixtures.ts";
 
 const HOUR = 3_600;
 const DAY = 86_400;
@@ -45,11 +45,14 @@ type Guard = {
   stopBps: number;
   stopTrailing: boolean;
 };
+/** The Smart fee's [u16][1 once set] in the protocol account's tail (after the burn-exempt
+ *  wallet), the Smart burn's u64 right after it. */
+const SMART_FEE_AT = 145;
 const GUARD: Guard = { maxDayBps: 2_000, maxWeekBps: 5_000, maxWeightBps: 3_500, maxUnverifiedBps: 3_000, minAssets: 3, maxAssets: 6, stopBps: 3_500, stopTrailing: true };
 
 async function setSmartConfig(ctx: Ctx, strategist: PublicKey, feeBps: number, authority = ctx.payer) {
-  await rpc(ctx, setRoleIx(ctx, ROLE.strategist, strategist, authority.publicKey), [authority]);
-  await rpc(ctx, setParamIx(ctx, CONFIG.smartFee, feeBps, [], authority.publicKey), [authority]);
+  await rpc(ctx, setRoleIx(ctx, ROLE.strategist, strategist, authority.publicKey), [authority]); skipNotices(ctx);
+  await rpc(ctx, setParamIx(ctx, CONFIG.smartFee, feeBps, [], authority.publicKey), [authority]); skipNotices(ctx);
 }
 
 async function setVerified(ctx: Ctx, mint: PublicKey, verified: boolean, authority = ctx.payer) {
@@ -86,7 +89,7 @@ function forceSmart(ctx: Ctx, basket: PublicKey) {
 }
 
 async function setSmartBurn(ctx: Ctx, graviMint: PublicKey, amount: bigint, authority = ctx.payer) {
-  await rpc(ctx, setParamIx(ctx, CONFIG.smartBurn, amount, [graviMint], authority.publicKey), [authority]);
+  await rpc(ctx, setParamIx(ctx, CONFIG.smartBurn, amount, [graviMint], authority.publicKey), [authority]); skipNotices(ctx);
 }
 
 /** Four listed assets at 25% each, A and B Verified, C and D not, and a fifth (E) listed with the
@@ -104,7 +107,7 @@ async function fourAssets(targetBps = [2_500, 2_500, 2_500, 2_500]) {
   const creator = fund(ctx);
   const strategist = fund(ctx);
   const guardian = fund(ctx);
-  await rpc(ctx, setRoleIx(ctx, ROLE.guardian, guardian.publicKey, ctx.payer.publicKey));
+  await rpc(ctx, setRoleIx(ctx, ROLE.guardian, guardian.publicKey, ctx.payer.publicKey)); skipNotices(ctx);
   await setSmartConfig(ctx, strategist.publicKey, 80);
   await setVerified(ctx, A, true);
   await setVerified(ctx, B, true);
@@ -678,9 +681,9 @@ describe("smart baskets: the fee", () => {
       "FeeTooHigh",
     );
     // A burn-exempt wallet set afterwards keeps the fee in place.
-    await rpc(w.ctx, setRoleIx(w.ctx, ROLE.burnExempt, w.creator.publicKey, w.ctx.payer.publicKey));
+    await rpc(w.ctx, setRoleIx(w.ctx, ROLE.burnExempt, w.creator.publicKey, w.ctx.payer.publicKey)); skipNotices(w.ctx);
     const raw = Buffer.from(w.ctx.svm.getAccount(pda.protocol())!.data);
-    assert.equal(raw.readUInt16LE(raw.length - 3), 100);
+    assert.equal(raw.readUInt16LE(SMART_FEE_AT), 100);
   });
 
   it("leaves other baskets at the normal fee", async () => {
@@ -739,7 +742,7 @@ describe("smart baskets: the smart burn", () => {
   it("burns nothing from the burn-exempt wallet (the team's)", async () => {
     const w = await fourAssets();
     await setSmartBurn(w.ctx, w.graviMint, 50_000n * GRAVI);
-    await rpc(w.ctx, setRoleIx(w.ctx, ROLE.burnExempt, w.creator.publicKey, w.ctx.payer.publicKey));
+    await rpc(w.ctx, setRoleIx(w.ctx, ROLE.burnExempt, w.creator.publicKey, w.ctx.payer.publicKey)); skipNotices(w.ctx);
     await enableSmart(w.ctx, w.basket, w.creator, { ...GUARD, minAssets: 2 });
     assert.ok(await w.ctx.vault.account.smart.fetch(pda.smart(w.basket)));
   });
@@ -750,15 +753,15 @@ describe("smart baskets: the smart burn", () => {
     // Set before any fee: the fee's bytes stay unset, so it reads as the default.
     await setSmartBurn(w.ctx, w.graviMint, 7n);
     let r = raw();
-    assert.equal(r.readBigUInt64LE(r.length - 8), 7n);
-    assert.equal(r[r.length - 9], 0);
+    assert.equal(r.readBigUInt64LE(SMART_FEE_AT + 3), 7n);
+    assert.equal(r[SMART_FEE_AT + 2], 0);
     await setSmartConfig(w.ctx, fund(w.ctx).publicKey, 90);
     await setSmartBurn(w.ctx, w.graviMint, 9n);
     await setSmartConfig(w.ctx, fund(w.ctx).publicKey, 70);
     r = raw();
-    assert.equal(r.readBigUInt64LE(r.length - 8), 9n);
-    assert.equal(r.readUInt16LE(r.length - 11), 70);
-    assert.equal(r[r.length - 9], 1);
+    assert.equal(r.readBigUInt64LE(SMART_FEE_AT + 3), 9n);
+    assert.equal(r.readUInt16LE(SMART_FEE_AT), 70);
+    assert.equal(r[SMART_FEE_AT + 2], 1);
   });
 });
 

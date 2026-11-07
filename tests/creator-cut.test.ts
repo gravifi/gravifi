@@ -230,6 +230,36 @@ describe("creator cut: setting it", () => {
     assert.equal((await fetch(w)).creatorCutBps, 30);
   });
 
+  it("a lowering calls off a rise asked for before it, notice passed or not (bug bounty, 7 Nov)", async () => {
+    const w = await setupCut();
+    await cutOn(w, 50);
+    await propose(w, 60);
+    // Lowered without the notice: before the fix, the rise then applied over the lowered cut.
+    await setCut(w, 10);
+    warp(w.ctx, DAY + 1);
+    await expectError(apply(w), "CutRiseVoid");
+    assert.equal((await fetch(w)).creatorCutBps, 10);
+    // The creator closes the stale notice with the next set, rent back, and may ask again: a new
+    // rise waits its own day and applies.
+    await setCut(w, 10, w.creator, pda.cutNotice(w.basket));
+    assert.equal(w.ctx.svm.getAccount(pda.cutNotice(w.basket))?.lamports ?? 0, 0);
+    await propose(w, 20);
+    await expectError(apply(w), "CutNoticeRunning");
+    warp(w.ctx, DAY + 1);
+    await apply(w);
+    assert.equal((await fetch(w)).creatorCutBps, 20);
+  });
+
+  it("setting the same cut also calls off a rise waiting", async () => {
+    const w = await setupCut();
+    await cutOn(w, 30);
+    await propose(w, 60);
+    await setCut(w, 30);
+    warp(w.ctx, DAY + 1);
+    await expectError(apply(w), "CutRiseVoid");
+    assert.equal((await fetch(w)).creatorCutBps, 30);
+  });
+
   it("a basket has the yearly fee or the cut, never both", async () => {
     const w = await setupCut({ creatorFeeBps: 0 });
     await cutOn(w, 30);

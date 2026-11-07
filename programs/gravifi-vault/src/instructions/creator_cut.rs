@@ -1,7 +1,9 @@
 //! The creator's cut: a share of every mint of their basket, at most `MAX_CREATOR_CUT_BPS`, in
 //! place of the yearly fee. Redeems never pay it, so a holder already in can't be charged more
 //! by a later rise. A cut going up waits `CUT_NOTICE_SECS` once the basket has shares, as a buyer's
-//! slippage floor is checked before fees; going down applies at once.
+//! slippage floor is checked before fees; going down applies at once, and calls off any rise
+//! still waiting (the basket remembers it, so the rise is void whether or not its notice account
+//! was passed).
 //!
 //! What's owed sits in the basket's treasury shares and is counted on the basket
 //! (`Basket::creator_unclaimed`), so a mint names no new account. `claim_creator_cut` moves it to
@@ -26,8 +28,9 @@ fn stop_yearly_fee(basket: &mut Basket, now: i64) {
 }
 
 /// Sets the cut at once: down at any time, or to anything before the basket's first deposit (an
-/// immutable basket only then). Passing a pending rise's notice cancels it, the rent back to the
-/// creator. Creator only.
+/// immutable basket only then). It calls off a pending rise: passing the rise's notice closes it,
+/// the rent back to the creator; left out, the rise is void and `apply_cut_rise` refuses it.
+/// Creator only.
 pub fn set_creator_cut(ctx: Context<SetCreatorCut>, bps: u16) -> Result<()> {
     require!(bps <= MAX_CREATOR_CUT_BPS, VaultError::FeeTooHigh);
     let basket = &mut ctx.accounts.basket;
@@ -39,6 +42,7 @@ pub fn set_creator_cut(ctx: Context<SetCreatorCut>, bps: u16) -> Result<()> {
     }
     require!(!basket.seeded || bps <= basket.creator_cut_bps, VaultError::CutRiseNeedsNotice);
     basket.creator_cut_bps = bps;
+    basket.set_cut_rise_void(true);
     if bps > 0 {
         stop_yearly_fee(basket, Clock::get()?.unix_timestamp);
     }
@@ -57,6 +61,7 @@ pub fn propose_cut_rise(ctx: Context<ProposeCutRise>, bps: u16) -> Result<()> {
     require!(bps > basket.creator_cut_bps, VaultError::BadParameter);
     let now = Clock::get()?.unix_timestamp;
     stop_yearly_fee(basket, now);
+    basket.set_cut_rise_void(false);
     let notice = &mut ctx.accounts.notice;
     notice.bump = ctx.bumps.notice;
     notice.basket = basket.key();
@@ -66,7 +71,9 @@ pub fn propose_cut_rise(ctx: Context<ProposeCutRise>, bps: u16) -> Result<()> {
 }
 
 /// Applies a rise whose notice has run out, the notice's rent back to the creator. Permissionless:
-/// the creator already asked for it, and everyone has had the notice.
+/// the creator already asked for it, and everyone has had the notice. Refused once the cut was set
+/// or lowered after it was asked for (by the creator or a vote), and when it's no higher than the
+/// cut in force: a rise must never land on top of a later lowering.
 pub fn apply_cut_rise(ctx: Context<ApplyCutRise>) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     require!(now >= ctx.accounts.notice.at, VaultError::CutNoticeRunning);
@@ -74,6 +81,7 @@ pub fn apply_cut_rise(ctx: Context<ApplyCutRise>) -> Result<()> {
     require!(!ctx.accounts.basket.by_vote(), VaultError::CommunityManaged);
     let bps = ctx.accounts.notice.bps;
     let basket = &mut ctx.accounts.basket;
+    require!(!basket.cut_rise_void() && bps > basket.creator_cut_bps, VaultError::CutRiseVoid);
     basket.creator_cut_bps = bps;
     stop_yearly_fee(basket, now);
     Ok(())

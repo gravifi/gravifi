@@ -253,7 +253,7 @@ pub fn apply_mandate(ctx: Context<ApplyMandate>) -> Result<()> {
 pub fn set_smart_pause(ctx: Context<SetSmartPause>, paused: bool) -> Result<()> {
     let signer = ctx.accounts.signer.key();
     let is_creator = signer == ctx.accounts.basket.creator && !ctx.accounts.basket.by_vote();
-    let guardian = ctx.accounts.protocol.guardian;
+    let guardian = guardian_of(&ctx.accounts.protocol.to_account_info());
     let is_guardian = guardian != Pubkey::default() && signer == guardian;
     require!(is_creator || is_guardian, VaultError::NotPauser);
     let s = &mut ctx.accounts.smart;
@@ -382,7 +382,7 @@ pub fn smart_set_stop(ctx: Context<StrategistStop>) -> Result<()> {
 pub struct SetVerified<'info> {
     #[account(mut)]
     pub authority: Signer<'info>,
-    #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump, has_one = authority @ VaultError::NotProtocolAuthority)]
+    #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump, constraint = authority_of(&protocol.to_account_info()) == authority.key() @ VaultError::NotProtocolAuthority)]
     pub protocol: Account<'info, Protocol>,
     /// CHECK: any mint; only its address is recorded.
     pub mint: UncheckedAccount<'info>,
@@ -456,7 +456,7 @@ pub struct SetSmartPause<'info> {
 #[derive(Accounts)]
 pub struct StrategistBasket<'info> {
     pub strategist: Signer<'info>,
-    #[account(seeds = [STRATEGIST_SEED], bump = strategist_config.bump, constraint = strategist_config.strategist == strategist.key() @ VaultError::NotStrategist)]
+    #[account(seeds = [STRATEGIST_SEED], bump = strategist_config.bump, constraint = role_key(&strategist_config.to_account_info()) == strategist.key() @ VaultError::NotStrategist)]
     pub strategist_config: Account<'info, Strategist>,
     #[account(mut)]
     pub basket: Account<'info, Basket>,
@@ -470,7 +470,7 @@ pub struct StrategistBasket<'info> {
 #[derive(Accounts)]
 pub struct StrategistAdd<'info> {
     pub strategist: Signer<'info>,
-    #[account(seeds = [STRATEGIST_SEED], bump = strategist_config.bump, constraint = strategist_config.strategist == strategist.key() @ VaultError::NotStrategist)]
+    #[account(seeds = [STRATEGIST_SEED], bump = strategist_config.bump, constraint = role_key(&strategist_config.to_account_info()) == strategist.key() @ VaultError::NotStrategist)]
     pub strategist_config: Account<'info, Strategist>,
     #[account(mut)]
     pub basket: Account<'info, Basket>,
@@ -491,7 +491,7 @@ pub struct StrategistAdd<'info> {
 pub struct StrategistStop<'info> {
     #[account(mut)]
     pub strategist: Signer<'info>,
-    #[account(seeds = [STRATEGIST_SEED], bump = strategist_config.bump, constraint = strategist_config.strategist == strategist.key() @ VaultError::NotStrategist)]
+    #[account(seeds = [STRATEGIST_SEED], bump = strategist_config.bump, constraint = role_key(&strategist_config.to_account_info()) == strategist.key() @ VaultError::NotStrategist)]
     pub strategist_config: Account<'info, Strategist>,
     pub basket: Account<'info, Basket>,
     #[account(seeds = [SMART_SEED, basket.key().as_ref()], bump = smart.bump, has_one = basket)]

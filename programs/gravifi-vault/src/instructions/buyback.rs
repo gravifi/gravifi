@@ -337,7 +337,7 @@ pub struct BuybackRedeem<'info> {
 pub struct BuybackStart<'info> {
     #[account(mut)]
     pub rebalancer: Signer<'info>,
-    #[account(seeds = [KEEPERS_SEED], bump = keepers.bump, constraint = keepers.rebalancer == rebalancer.key() @ VaultError::NotRebalancer)]
+    #[account(seeds = [KEEPERS_SEED], bump = keepers.bump, constraint = rebalancer_of(&keepers.to_account_info()) == rebalancer.key() @ VaultError::NotRebalancer)]
     pub keepers: Account<'info, Keepers>,
     #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump)]
     pub protocol: Account<'info, Protocol>,
@@ -373,7 +373,7 @@ pub struct BuybackStart<'info> {
 pub struct BuybackSolStart<'info> {
     #[account(mut)]
     pub rebalancer: Signer<'info>,
-    #[account(seeds = [KEEPERS_SEED], bump = keepers.bump, constraint = keepers.rebalancer == rebalancer.key() @ VaultError::NotRebalancer)]
+    #[account(seeds = [KEEPERS_SEED], bump = keepers.bump, constraint = rebalancer_of(&keepers.to_account_info()) == rebalancer.key() @ VaultError::NotRebalancer)]
     pub keepers: Account<'info, Keepers>,
     #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump)]
     pub protocol: Account<'info, Protocol>,
@@ -409,7 +409,7 @@ pub struct BuybackSolStart<'info> {
 #[derive(Accounts)]
 pub struct BuybackSolFinish<'info> {
     pub rebalancer: Signer<'info>,
-    #[account(seeds = [KEEPERS_SEED], bump = keepers.bump, constraint = keepers.rebalancer == rebalancer.key() @ VaultError::NotRebalancer)]
+    #[account(seeds = [KEEPERS_SEED], bump = keepers.bump, constraint = rebalancer_of(&keepers.to_account_info()) == rebalancer.key() @ VaultError::NotRebalancer)]
     pub keepers: Account<'info, Keepers>,
     #[account(mut, seeds = [BUYBACK_SOL_SEED], bump = buyback_sol.bump)]
     pub buyback_sol: Account<'info, BuybackSol>,
@@ -424,7 +424,7 @@ pub struct BuybackSolFinish<'info> {
 pub struct BuybackClose<'info> {
     #[account(mut)]
     pub rebalancer: Signer<'info>,
-    #[account(seeds = [KEEPERS_SEED], bump = keepers.bump, constraint = keepers.rebalancer == rebalancer.key() @ VaultError::NotRebalancer)]
+    #[account(seeds = [KEEPERS_SEED], bump = keepers.bump, constraint = rebalancer_of(&keepers.to_account_info()) == rebalancer.key() @ VaultError::NotRebalancer)]
     pub keepers: Account<'info, Keepers>,
     #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump)]
     pub protocol: Account<'info, Protocol>,
@@ -443,7 +443,7 @@ pub struct BuybackClose<'info> {
 #[derive(Accounts)]
 pub struct BuybackFinish<'info> {
     pub rebalancer: Signer<'info>,
-    #[account(seeds = [KEEPERS_SEED], bump = keepers.bump, constraint = keepers.rebalancer == rebalancer.key() @ VaultError::NotRebalancer)]
+    #[account(seeds = [KEEPERS_SEED], bump = keepers.bump, constraint = rebalancer_of(&keepers.to_account_info()) == rebalancer.key() @ VaultError::NotRebalancer)]
     pub keepers: Account<'info, Keepers>,
     #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump)]
     pub protocol: Account<'info, Protocol>,

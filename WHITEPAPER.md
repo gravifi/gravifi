@@ -166,8 +166,10 @@ floor is only as good as the price it's checked against. A price service posts t
 with its own key, the program's price authority: it reads each price from Jupiter itself, so the
 app can ask it to post a price but never choose one. The program bounds what it may post. Where an asset has a Pyth
 feed (about 20 of them today: SOL, ETH, BTC, JUP, BONK, WIF and others), a posted price must be
-within 3-5% of a fresh, fully verified Pyth price. Any other asset's price may move at most 20%
-from the last accepted one per hour, so a false price can't appear at once. Within those bounds
+within 3-5% of a fresh, fully verified Pyth price that isn't dated in the future. Any other
+asset's price may move at most 20% from the last accepted one per hour, so a false price can't
+appear at once; its very first price only sets that reference, and nothing trades on it until a
+price posted at least 15 minutes later agrees with it within those 20%. Within those bounds
 a rebalance can't take value out of a basket as long as the prices posted are honest. Section 8
 says who holds that key.
 
@@ -397,10 +399,10 @@ or by its holders (section 8.1); there is no vote on the protocol. Control is sp
 | Role | Can | Can't |
 |---|---|---|
 | **Holders** | Redeem at any time, send or trade their shares | |
-| **A basket's creator** | Change their basket's weights, assets, rebalancing, cut (within the caps; a rise waits a day), stop losses, split; on a Smart basket, set its mandate and tighter limits (each waits a day) and pause it; set how wallets show its shares (name, ticker, picture); set an immutable basket's stop losses before its first deposit | Touch the vault's tokens; once the basket is immutable, anything but how wallets show its shares |
+| **A basket's creator** | Change their basket's weights, assets, rebalancing, cut (within the caps; a rise waits a day, and lowering the cut calls off a rise still waiting), stop losses, split; on a Smart basket, set its mandate and tighter limits (each waits a day) and pause it; set how wallets show its shares (name, ticker, picture); set an immutable basket's stop losses before its first deposit | Touch the vault's tokens; once the basket is immutable, anything but how wallets show its shares |
 | **The lister** (the app's listing key) | List a token a creator picked, inside the creator's own transaction, once it passed the app's checks | Anything else: delist, change a setting, move a token; or list a token whose new accounts start frozen, that can't move, or that's paused |
 | **The strategist** (the app's Smart-basket key) | Set a Smart basket's targets, add and remove its assets and put its mandate's stops on them, within that basket's limits | Move a token, change a fee or a limit, touch any basket that isn't Smart |
-| **The protocol authority** (the team) | List and delist assets, name the lister, the strategist and the guardian, set fees, the Smart fee, the creation burn and the Smart burn within the ceilings, name the one burn-exempt team wallet, move the staking threshold (a raise waits 7 days), open or close community mode, tune the values and use the kill switches in section 8.2 within their bounds (user-facing changes wait 7 days), withdraw the treasury's shares (never what's owed to creators or stakers), match assets to Pyth feeds, name the keepers, set how wallets show any basket's shares, and upgrade the program | Through any of its settings: move a vault's tokens, block a redemption, exceed the fee or creation-burn ceilings or any bound in section 8.2, send less than half of the protocol fee to the burn (outside an invited wallet's half fee) |
+| **The protocol authority** (the team) | List and delist assets, name the lister, the strategist and the guardian (a key named acts after 24 hours), set fees, the Smart fee, the creation burn and the Smart burn within the ceilings (a raise waits 7 days), name the one burn-exempt team wallet, move the staking threshold (a raise waits 7 days), open or close community mode, tune the values and use the kill switches in section 8.2 within their bounds (user-facing changes wait 7 days), withdraw the treasury's shares (never what's owed to creators or stakers), match assets to Pyth feeds, name the keepers, set how wallets show any basket's shares, and upgrade the program | Through any of its settings: move a vault's tokens, block a redemption, exceed the fee or creation-burn ceilings or any bound in section 8.2, send less than half of the protocol fee to the burn (outside an invited wallet's half fee) |
 | **The price service** (its own key) | Post the prices rebalances, buybacks and stop losses are checked against, within the bounds above, read from Jupiter by itself | Anything else: trade, move a token, change a setting |
 | **The guardian** (none named today) | Delist an asset; pause a Smart basket's reviews | List anything, or anything else |
 | **The guard** (a separate server key) | Co-sign, with the app's key, a recurring plan's due fill or a hit stop's sale from that plan's or stop's own wallet (section 2.4) | Sign alone; touch a holder's main wallet; send funds anywhere but back to the owner |
@@ -474,6 +476,16 @@ value is set it is the number this paper states.
 A change never moves a window already open: a proposal's vote, wait, window and passing rules,
 a stake's warm-up, an unstaking, a cut rise and a mandate keep the times and rules they started
 with.
+
+**Fees, burns and keys.** The fees and burns keep their ceilings in the code (section 5), and
+changing them follows the same rule as the values above. A raise of the protocol fee, the Smart
+fee, the burn's share of the fee, the creation burn or the Smart burn waits 7 days, then applies
+by itself; lowering one is at once, and calls off a raise still waiting. So does a raise of the
+staking threshold. A key the authority names for a role (a new authority, the guardian, the
+lister, the strategist, the price service's key, the keeper's key, the burn-exempt wallet) acts
+only 24 hours later, the key it replaces acting until then, so a key swapped in is public before
+it can do anything. Removing a role is at once: it only stops that key, and is how a lost key is
+cut off.
 
 **Kill switches.** The authority can stop, at once, a family of instructions: new money in, new
 baskets, rebalancing, the buyback, stop losses, Smart baskets' strategist, new stakes, community

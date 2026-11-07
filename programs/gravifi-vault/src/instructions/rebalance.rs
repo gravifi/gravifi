@@ -359,7 +359,7 @@ fn assert_finish_follows(ixs: &AccountInfo, basket: &Pubkey) -> Result<()> {
 pub struct RebalanceStart<'info> {
     #[account(mut)]
     pub rebalancer: Signer<'info>,
-    #[account(seeds = [KEEPERS_SEED], bump = keepers.bump, constraint = keepers.rebalancer == rebalancer.key() @ VaultError::NotRebalancer)]
+    #[account(seeds = [KEEPERS_SEED], bump = keepers.bump, constraint = rebalancer_of(&keepers.to_account_info()) == rebalancer.key() @ VaultError::NotRebalancer)]
     pub keepers: Account<'info, Keepers>,
     #[account(mut, has_one = share_mint)]
     pub basket: Account<'info, Basket>,
@@ -391,7 +391,7 @@ pub struct RebalanceStart<'info> {
 #[derive(Accounts)]
 pub struct RebalanceFinish<'info> {
     pub rebalancer: Signer<'info>,
-    #[account(seeds = [KEEPERS_SEED], bump = keepers.bump, constraint = keepers.rebalancer == rebalancer.key() @ VaultError::NotRebalancer)]
+    #[account(seeds = [KEEPERS_SEED], bump = keepers.bump, constraint = rebalancer_of(&keepers.to_account_info()) == rebalancer.key() @ VaultError::NotRebalancer)]
     pub keepers: Account<'info, Keepers>,
     #[account(mut, has_one = share_mint)]
     pub basket: Account<'info, Basket>,
@@ -407,7 +407,7 @@ pub struct RebalanceFinish<'info> {
 pub struct SweepStart<'info> {
     #[account(mut)]
     pub rebalancer: Signer<'info>,
-    #[account(seeds = [KEEPERS_SEED], bump = keepers.bump, constraint = keepers.rebalancer == rebalancer.key() @ VaultError::NotRebalancer)]
+    #[account(seeds = [KEEPERS_SEED], bump = keepers.bump, constraint = rebalancer_of(&keepers.to_account_info()) == rebalancer.key() @ VaultError::NotRebalancer)]
     pub keepers: Account<'info, Keepers>,
     #[account(mut, has_one = share_mint)]
     pub basket: Account<'info, Basket>,

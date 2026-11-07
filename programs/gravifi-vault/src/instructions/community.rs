@@ -158,7 +158,7 @@ pub fn community_propose<'info>(ctx: Context<'_, '_, 'info, 'info, CommunityProp
 
     let protocol = a.protocol.to_account_info();
     let burn = match action {
-        ProposalAction::AddAsset { .. } => a.creation_burn.per_asset,
+        ProposalAction::AddAsset { .. } => creation_burn_per_asset(&protocol, &a.creation_burn),
         ProposalAction::GoSmart { .. } => smart_burn(&protocol),
         _ => 0,
     };
@@ -306,6 +306,8 @@ pub fn community_execute<'info>(ctx: Context<'_, '_, 'info, 'info, CommunityExec
             let b = &mut a.basket;
             require!(*bps < b.cut_bps(), VaultError::BadProposal);
             b.creator_cut_bps = *bps;
+            // A rise the creator asked for before can never land on top of it.
+            b.set_cut_rise_void(true);
         }
         ProposalAction::Leave => {
             require!(a.basket.control == ControlMode::Community, VaultError::NotExecutable);

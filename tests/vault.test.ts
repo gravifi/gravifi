@@ -24,7 +24,7 @@ import {
   supply,
   warp,
 } from "./helpers.ts";
-import { NO_GRAVI, SEED_SHARES, UNITS_A, UNITS_B, createFeeAccounts, feeShares, fundHolder, initProtocol, listAsset, mintIx, quads, redeemIx, world, type World, protocolFeesIx, setRoleIx, ROLE } from "./fixtures.ts";
+import { NO_GRAVI, SEED_SHARES, UNITS_A, UNITS_B, createFeeAccounts, feeShares, fundHolder, initProtocol, listAsset, mintIx, quads, redeemIx, world, type World, protocolFeesIx, setRoleIx, ROLE, skipNotices } from "./fixtures.ts";
 
 const ceilDiv = (a: bigint, b: bigint) => (a + b - 1n) / b;
 
@@ -130,7 +130,7 @@ describe("asset registry", () => {
   test("the guardian can delist but never list", async () => {
     const w = await world();
     const guardian = fund(w.ctx);
-    await rpc(w.ctx, setRoleIx(w.ctx, ROLE.guardian, guardian.publicKey, w.ctx.payer.publicKey));
+    await rpc(w.ctx, setRoleIx(w.ctx, ROLE.guardian, guardian.publicKey, w.ctx.payer.publicKey)); skipNotices(w.ctx);
 
     const statusIx = (status: object) =>
       w.ctx.vault.methods.setAssetStatus(status).accountsPartial({

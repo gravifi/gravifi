@@ -768,6 +768,26 @@ describe("community: the creator's cut", () => {
     assert.equal(await cutOf(w), 10);
   });
 
+  it("a vote that lowers it calls off a rise asked for before, even after the basket leaves (bug bounty, 7 Nov)", async () => {
+    const w = await communityWorld();
+    await openDoor(w);
+    const applyRise = () => rpc(w.ctx, w.ctx.vault.methods.applyCutRise().accountsPartial({ basket: w.basket, notice: pda.cutNotice(w.basket), creator: w.creator.publicKey }));
+    await rpc(w.ctx, w.ctx.vault.methods.proposeCutRise(30).accountsPartial({ authority: w.creator.publicKey, basket: w.basket, notice: pda.cutNotice(w.basket) }), [w.creator]);
+    warp(w.ctx, 2 * DAY);
+    await applyRise();
+    await rpc(w.ctx, w.ctx.vault.methods.proposeCutRise(60).accountsPartial({ authority: w.creator.publicKey, basket: w.basket, notice: pda.cutNotice(w.basket) }), [w.creator]);
+    await enter(w);
+    await bobReady(w);
+    const lower = await passed(w, { creatorCut: { bps: 10 } });
+    await execute(w, lower);
+    assert.equal(await cutOf(w), 10);
+    await close(w, lower, w.bob.publicKey);
+    await execute(w, await passed(w, { leave: {} }));
+    assert.ok((await basketOf(w)).control.creator);
+    await expectError(applyRise(), "CutRiseVoid");
+    assert.equal(await cutOf(w), 10);
+  });
+
   it("a rise asked for before handing it over doesn't apply once holders run it", async () => {
     const w = await communityWorld();
     await openDoor(w);
