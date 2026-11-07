@@ -248,4 +248,18 @@ pub enum VaultError {
     ProposerHasOpenProposal,
     #[msg("Accrue the creator's fee in the same transaction first")]
     FeeNotAccrued,
+    #[msg("The protocol has paused this for now")]
+    FeatureOff,
+    #[msg("Wrong params account")]
+    BadParams,
+    #[msg("No such setting")]
+    UnknownParam,
+    #[msg("That setting is outside the bounds written in the program")]
+    ParamOutOfBounds,
+    #[msg("No such role, or a wrong account for it")]
+    BadRole,
+    #[msg("Wrong basket extension account")]
+    BadExt,
+    #[msg("The basket's extension account is full")]
+    ExtFull,
 }

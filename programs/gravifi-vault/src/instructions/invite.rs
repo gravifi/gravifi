@@ -6,6 +6,7 @@
 use anchor_lang::prelude::*;
 
 use crate::errors::VaultError;
+use crate::params::{self, Params, PARAMS_ID};
 use crate::state::*;
 
 /// Writes the signing wallet's invite, good until `until`, the wallet paying its rent. The
@@ -13,8 +14,10 @@ use crate::state::*;
 /// while it exists, at most `MAX_INVITE_SECS` ahead: a leaked keeper key can lower fees for a
 /// month at a time, never for good, and can't move anyone's funds.
 pub fn set_invite(ctx: Context<SetInvite>, until: i64) -> Result<()> {
-    let now = Clock::get()?.unix_timestamp;
-    require!(until > now && until <= now + MAX_INVITE_SECS, VaultError::BadInvite);
+    let prm = Params::load(&ctx.accounts.params)?;
+    prm.require_on(params::FAMILY_INVITES)?;
+    let now = prm.now;
+    require!(until > now && until <= now + prm.secs(params::INVITE_MAX_SECS), VaultError::BadInvite);
     let invite = &mut ctx.accounts.invite;
     invite.bump = ctx.bumps.invite;
     invite.wallet = ctx.accounts.wallet.key();
@@ -63,6 +66,9 @@ pub struct SetInvite<'info> {
     #[account(init, payer = wallet, space = 8 + Invite::INIT_SPACE, seeds = [INVITE_SEED, wallet.key().as_ref()], bump)]
     pub invite: Account<'info, Invite>,
     pub system_program: Program<'info, System>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]

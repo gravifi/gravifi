@@ -13,10 +13,10 @@ import {
   getMintLen,
 } from "@solana/spl-token";
 import { createMint, expectError, fund, pda, rpc, send, setup, type Ctx } from "./helpers.ts";
-import { initProtocol, listAsset } from "./fixtures.ts";
+import { initProtocol, listAsset, setRoleIx, ROLE, setParam, PARAM, FAMILY } from "./fixtures.ts";
 
 async function setLister(ctx: Ctx, lister: PublicKey, authority = ctx.payer) {
-  await rpc(ctx, ctx.vault.methods.setLister(lister).accountsPartial({ authority: authority.publicKey, protocol: pda.protocol(), lister: pda.lister() }), [authority]);
+  await rpc(ctx, setRoleIx(ctx, ROLE.lister, lister, authority.publicKey), [authority]);
 }
 
 /** A listing as the app makes it: the creator pays, the lister signs as authority. */
@@ -54,6 +54,15 @@ describe("the lister", () => {
     assert.equal(await listedCount(ctx), before.count + 1);
     assert.equal(ctx.svm.getBalance(lister.publicKey), before.lister, "the lister pays nothing");
     assert.ok(ctx.svm.getBalance(creator.publicKey)! < before.creator, "the creator paid the rent");
+  });
+
+  it("the listing switch stops the lister at once; the protocol authority still lists", async () => {
+    const { ctx, lister, creator } = await world();
+    await setParam(ctx, PARAM.KILL, BigInt(FAMILY.listing));
+    await expectError(listByLister(ctx, await createMint(ctx, 6), lister, creator), "FeatureOff");
+    await listAsset(ctx, await createMint(ctx, 6));
+    await setParam(ctx, PARAM.KILL, 0n);
+    await listByLister(ctx, await createMint(ctx, 6), lister, creator);
   });
 
   it("can't list without its account, and nobody else can with it", async () => {

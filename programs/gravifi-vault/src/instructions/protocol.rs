@@ -6,6 +6,7 @@ use anchor_spl::token_interface::{self, Mint as MintI, TokenAccount as TokenAcco
 
 use crate::errors::VaultError;
 use crate::extensions;
+use crate::params::{self, Params, PARAMS_ID};
 use crate::pyth;
 use crate::state::*;
 use crate::token_util::*;
@@ -37,66 +38,197 @@ pub fn init_protocol(
     Ok(())
 }
 
-/// Hands the protocol to a new authority, e.g. from the deployer to the team multisig.
-pub fn set_protocol_authority(ctx: Context<ProtocolAdmin>, new_authority: Pubkey) -> Result<()> {
-    ctx.accounts.protocol.authority = new_authority;
+// --------------------------------------------------------------------------- set_role
+
+pub const ROLE_AUTHORITY: u8 = 0;
+pub const ROLE_GUARDIAN: u8 = 1;
+/// Once: the token launches after the program, so `init_protocol` may leave it unset.
+pub const ROLE_GRAVI_MINT: u8 = 2;
+pub const ROLE_BURN_EXEMPT: u8 = 3;
+pub const ROLE_LISTER: u8 = 4;
+pub const ROLE_STRATEGIST: u8 = 5;
+pub const ROLE_PRICE_AUTHORITY: u8 = 6;
+pub const ROLE_REBALANCER: u8 = 7;
+
+/// Names the key for a role; `Pubkey::default()` removes it (not the authority, nor the GRAVI
+/// mint, which is set once). Protocol authority only.
+///
+/// - authority: hands the protocol on, e.g. to the team's multisig.
+/// - guardian: may delist and pause smart baskets, never list.
+/// - GRAVI mint: set once, never changed.
+/// - burn-exempt: the one wallet whose baskets burn no GRAVI (the team's); it sits after the
+///   protocol's fields, which the account grows to hold the first time.
+/// - lister, strategist: their accounts (`[LISTER_SEED]`, `[STRATEGIST_SEED]`) are the one remaining
+///   account, created the first time.
+/// - price authority, rebalancer: the keepers' account (`[KEEPERS_SEED]`) is the one remaining
+///   account, created the first time with the other key unset.
+pub fn set_role<'info>(ctx: Context<'_, '_, 'info, 'info, ProtocolConfig<'info>>, role: u8, key: Pubkey) -> Result<()> {
+    let a = &mut *ctx.accounts;
+    let (payer, system) = (a.authority.to_account_info(), a.system_program.to_account_info());
+    match role {
+        ROLE_AUTHORITY => {
+            require!(key != Pubkey::default(), VaultError::BadParameter);
+            a.protocol.authority = key;
+        }
+        ROLE_GUARDIAN => a.protocol.guardian = key,
+        ROLE_GRAVI_MINT => {
+            require!(a.protocol.gravi_mint == Pubkey::default(), VaultError::GraviMintAlreadySet);
+            require!(key != Pubkey::default(), VaultError::BadParameter);
+            a.protocol.gravi_mint = key;
+        }
+        ROLE_BURN_EXEMPT => {
+            let ai = a.protocol.to_account_info();
+            grow(&ai, &payer, &system, BURN_EXEMPT_OFFSET + 32)?;
+            ai.try_borrow_mut_data()?[BURN_EXEMPT_OFFSET..BURN_EXEMPT_OFFSET + 32].copy_from_slice(key.as_ref());
+        }
+        ROLE_LISTER | ROLE_STRATEGIST => {
+            let seed = if role == ROLE_LISTER { LISTER_SEED } else { STRATEGIST_SEED };
+            let (ai, bump) = role_account(ctx.remaining_accounts, seed, 8 + Lister::INIT_SPACE, &payer, &system)?;
+            // Lister and Strategist are the same shape: [discriminator][bump][key].
+            let disc: &[u8] = if role == ROLE_LISTER { Lister::DISCRIMINATOR } else { Strategist::DISCRIMINATOR };
+            let mut d = ai.try_borrow_mut_data()?;
+            d[..8].copy_from_slice(disc);
+            d[8] = bump;
+            d[9..41].copy_from_slice(key.as_ref());
+        }
+        ROLE_PRICE_AUTHORITY | ROLE_REBALANCER => {
+            let (ai, bump) = role_account(ctx.remaining_accounts, KEEPERS_SEED, 8 + Keepers::INIT_SPACE, &payer, &system)?;
+            let mut d = ai.try_borrow_mut_data()?;
+            d[..8].copy_from_slice(Keepers::DISCRIMINATOR);
+            d[8] = bump;
+            let at = if role == ROLE_PRICE_AUTHORITY { 9 } else { 41 };
+            d[at..at + 32].copy_from_slice(key.as_ref());
+        }
+        _ => return err!(VaultError::BadRole),
+    }
     Ok(())
 }
 
-/// Sets the GRAVI mint, once. The token launches after the program, so `init_protocol`
-/// may leave it unset; after this it can never change.
-pub fn set_gravi_mint(ctx: Context<ProtocolAdmin>, gravi_mint: Pubkey) -> Result<()> {
-    let p = &mut ctx.accounts.protocol;
-    require!(p.gravi_mint == Pubkey::default(), VaultError::GraviMintAlreadySet);
-    require!(gravi_mint != Pubkey::default(), VaultError::BadParameter);
-    p.gravi_mint = gravi_mint;
+/// The role's account `[seed]` and its bump: the one remaining account, created (`space` bytes) the
+/// first time.
+fn role_account<'a, 'info>(remaining: &'a [AccountInfo<'info>], seed: &[u8], space: usize, payer: &AccountInfo<'info>, system: &AccountInfo<'info>) -> Result<(&'a AccountInfo<'info>, u8)> {
+    let ai = remaining.first().ok_or(VaultError::BadRole)?;
+    let (expected, bump) = Pubkey::find_program_address(&[seed], &crate::ID);
+    require_keys_eq!(*ai.key, expected, VaultError::BadRole);
+    if ai.owner != &crate::ID {
+        create_pda(payer, ai, system, &[seed, &[bump]], space)?;
+    }
+    Ok((ai, bump))
+}
+
+// -------------------------------------------------------------------------- set_param
+
+/// The protocol fee and the burn's share of it: `fee_bps | burn_share_bps << 16`. At once, within
+/// `MAX_PROTOCOL_FEE_BPS` and from `MIN_BURN_SHARE_BPS`, both code.
+pub const CONFIG_PROTOCOL_FEES: u16 = 1_000;
+/// The GRAVI a creator burns per asset, in base units, up to `MAX_BURN_PER_ASSET_TOKENS` whole
+/// GRAVI; 0 turns it off. Remaining accounts: the creation burn's account (`[CREATION_BURN_SEED]`,
+/// created the first time) and the GRAVI mint.
+pub const CONFIG_CREATION_BURN: u16 = 1_001;
+/// The protocol fee on smart baskets, up to `MAX_SMART_FEE_BPS`.
+pub const CONFIG_SMART_FEE: u16 = 1_002;
+/// The GRAVI burned once on making a basket smart, up to `MAX_SMART_BURN_TOKENS` whole GRAVI.
+/// Remaining accounts: the GRAVI mint.
+pub const CONFIG_SMART_BURN: u16 = 1_003;
+/// The staking threshold, in GRAVI base units, up to `MAX_STAKE_THRESHOLD_TOKENS`: lower at once,
+/// higher after `STAKE_THRESHOLD_NOTICE_SECS`. Remaining accounts: the stake pool.
+pub const CONFIG_STAKE_THRESHOLD: u16 = 1_004;
+/// 1 opens the door to Community mode, 0 closes it (baskets already in carry on).
+pub const CONFIG_COMMUNITY_OPEN: u16 = 1_005;
+
+/// Sets one of the protocol's tunables (`params.rs`: ids below 1,000, each within the bounds and
+/// under the notice written there; 0 returns it to its default), or one of its settings kept
+/// elsewhere (`CONFIG_*`, at once as before). The params account is created the first time, the
+/// authority paying its rent. Protocol authority only.
+pub fn set_param<'info>(ctx: Context<'_, '_, 'info, 'info, ProtocolConfig<'info>>, id: u16, value: u64) -> Result<()> {
+    let a = &mut *ctx.accounts;
+    let (payer, system) = (a.authority.to_account_info(), a.system_program.to_account_info());
+    if id < 1_000 {
+        let ai = a.params.to_account_info();
+        params::ensure(&ai, &payer, &system)?;
+        let now = Clock::get()?.unix_timestamp;
+        return params::write(&mut ai.try_borrow_mut_data()?, id, value, now);
+    }
+    let protocol = a.protocol.to_account_info();
+    match id {
+        CONFIG_PROTOCOL_FEES => {
+            let (fee, burn_share) = ((value & 0xffff) as u16, ((value >> 16) & 0xffff) as u16);
+            require!(value >> 32 == 0 && fee <= MAX_PROTOCOL_FEE_BPS, VaultError::FeeTooHigh);
+            check_burn_share(burn_share)?;
+            a.protocol.protocol_fee_bps = fee;
+            a.protocol.burn_share_bps = burn_share;
+        }
+        CONFIG_CREATION_BURN => {
+            let [cb, mint] = ctx.remaining_accounts else { return err!(VaultError::BadRemainingAccounts) };
+            require!(value <= whole_gravi(&a.protocol, mint, MAX_BURN_PER_ASSET_TOKENS)?, VaultError::CreationBurnTooHigh);
+            let (expected, bump) = Pubkey::find_program_address(&[CREATION_BURN_SEED], &crate::ID);
+            require_keys_eq!(*cb.key, expected, VaultError::BadParameter);
+            let mut c = if cb.owner == &crate::ID {
+                CreationBurn::try_deserialize(&mut &cb.try_borrow_data()?[..])?
+            } else {
+                create_pda(&payer, cb, &system, &[CREATION_BURN_SEED, &[bump]], 8 + CreationBurn::INIT_SPACE)?;
+                CreationBurn { bump, per_asset: 0, total_burned: 0, baskets: 0 }
+            };
+            c.per_asset = value;
+            c.try_serialize(&mut &mut cb.try_borrow_mut_data()?[..])?;
+        }
+        CONFIG_SMART_FEE => {
+            require!(value <= MAX_SMART_FEE_BPS as u64, VaultError::FeeTooHigh);
+            grow(&protocol, &payer, &system, SMART_FEE_OFFSET + SMART_FEE_LEN)?;
+            let [lo, hi] = (value as u16).to_le_bytes();
+            protocol.try_borrow_mut_data()?[SMART_FEE_OFFSET..SMART_FEE_OFFSET + SMART_FEE_LEN].copy_from_slice(&[lo, hi, 1]);
+        }
+        CONFIG_SMART_BURN => {
+            let [mint] = ctx.remaining_accounts else { return err!(VaultError::BadRemainingAccounts) };
+            require!(value <= whole_gravi(&a.protocol, mint, MAX_SMART_BURN_TOKENS)?, VaultError::CreationBurnTooHigh);
+            grow(&protocol, &payer, &system, SMART_BURN_OFFSET + SMART_BURN_LEN)?;
+            protocol.try_borrow_mut_data()?[SMART_BURN_OFFSET..SMART_BURN_OFFSET + SMART_BURN_LEN].copy_from_slice(&value.to_le_bytes());
+        }
+        CONFIG_STAKE_THRESHOLD => {
+            let [pool_ai] = ctx.remaining_accounts else { return err!(VaultError::BadRemainingAccounts) };
+            require_keys_eq!(*pool_ai.owner, crate::ID, VaultError::BadStake);
+            let mut p = StakePool::try_deserialize(&mut &pool_ai.try_borrow_data()?[..])?;
+            let expected = Pubkey::create_program_address(&[STAKE_POOL_SEED, &[p.bump]], &crate::ID).map_err(|_| VaultError::BadStake)?;
+            require_keys_eq!(*pool_ai.key, expected, VaultError::BadStake);
+            let now = Clock::get()?.unix_timestamp;
+            let ceiling = MAX_STAKE_THRESHOLD_TOKENS.checked_mul(p.one_gravi).ok_or(VaultError::MathOverflow)?;
+            require!(value > 0 && value <= ceiling, VaultError::BadStakeThreshold);
+            p.threshold = p.threshold_at(now);
+            p.next_threshold_at = 0;
+            if value <= p.threshold {
+                p.threshold = value;
+            } else {
+                p.next_threshold = value;
+                p.next_threshold_at = now + STAKE_THRESHOLD_NOTICE_SECS;
+            }
+            p.try_serialize(&mut &mut pool_ai.try_borrow_mut_data()?[..])?;
+        }
+        CONFIG_COMMUNITY_OPEN => {
+            require!(value <= 1, VaultError::BadParameter);
+            set_protocol_flag(&protocol, &payer, &system, FLAG_COMMUNITY, value == 1)?;
+        }
+        _ => return err!(VaultError::UnknownParam),
+    }
     Ok(())
 }
 
-/// `Pubkey::default()` removes the guardian.
-pub fn set_guardian(ctx: Context<ProtocolAdmin>, guardian: Pubkey) -> Result<()> {
-    ctx.accounts.protocol.guardian = guardian;
-    Ok(())
+/// `tokens` whole GRAVI in base units, read off the GRAVI mint (which must be the protocol's).
+fn whole_gravi(protocol: &Protocol, mint: &AccountInfo, tokens: u64) -> Result<u64> {
+    require!(protocol.gravi_mint != Pubkey::default(), VaultError::GraviMintNotSet);
+    require_keys_eq!(*mint.key, protocol.gravi_mint, VaultError::GraviMintNotSet);
+    10u64.checked_pow(mint_decimals(mint)? as u32).and_then(|one| one.checked_mul(tokens)).ok_or(VaultError::MathOverflow.into())
 }
 
-/// Names the lister, the one other key that may list assets; `Pubkey::default()` removes it.
-/// The first call creates its account.
-pub fn set_lister(ctx: Context<SetLister>, lister: Pubkey) -> Result<()> {
-    let l = &mut ctx.accounts.lister;
-    l.bump = ctx.bumps.lister;
-    l.lister = lister;
-    Ok(())
-}
-
-pub fn set_protocol_fees(
-    ctx: Context<ProtocolAdmin>,
-    protocol_fee_bps: u16,
-    burn_share_bps: u16,
-) -> Result<()> {
-    require!(protocol_fee_bps <= MAX_PROTOCOL_FEE_BPS, VaultError::FeeTooHigh);
-    check_burn_share(burn_share_bps)?;
-    let p = &mut ctx.accounts.protocol;
-    p.protocol_fee_bps = protocol_fee_bps;
-    p.burn_share_bps = burn_share_bps;
-    Ok(())
-}
-
-/// Sets the GRAVI, in base units, a creator burns per asset in a basket: 0 turns it off, and it
-/// can't go over `MAX_BURN_PER_ASSET_TOKENS` whole GRAVI. The first call creates the account.
-pub fn set_creation_burn(ctx: Context<SetCreationBurn>, per_asset: u64) -> Result<()> {
-    let ceiling = 10u64
-        .checked_pow(ctx.accounts.gravi_mint.decimals as u32)
-        .and_then(|one| one.checked_mul(MAX_BURN_PER_ASSET_TOKENS))
-        .ok_or(VaultError::MathOverflow)?;
-    require!(per_asset <= ceiling, VaultError::CreationBurnTooHigh);
-    let c = &mut ctx.accounts.creation_burn;
-    c.bump = ctx.bumps.creation_burn;
-    c.per_asset = per_asset;
+/// Sets a protocol flag, growing the protocol account's tail to hold it the first time.
+pub(crate) fn set_protocol_flag<'info>(protocol: &AccountInfo<'info>, payer: &AccountInfo<'info>, system_program: &AccountInfo<'info>, flag: u8, on: bool) -> Result<()> {
+    grow(protocol, payer, system_program, PROTOCOL_FLAGS_OFFSET + 1)?;
+    let mut data = protocol.try_borrow_mut_data()?;
+    data[PROTOCOL_FLAGS_OFFSET] = if on { data[PROTOCOL_FLAGS_OFFSET] | flag } else { data[PROTOCOL_FLAGS_OFFSET] & !flag };
     Ok(())
 }
 
 /// Adds a mint to the set of assets baskets may be built from. Signed by the protocol authority,
-/// or by the lister (`set_lister`), whose account is then the one remaining account. (A remaining
+/// or by the lister (`set_role` ROLE_LISTER), whose account is then the one remaining account. (A remaining
 /// account rather than a named one, so every client listing as the authority is unchanged.)
 pub fn register_asset<'info>(ctx: Context<'_, '_, 'info, 'info, RegisterAsset<'info>>) -> Result<()> {
     let signer = ctx.accounts.authority.key();
@@ -111,13 +243,18 @@ pub fn register_asset<'info>(ctx: Context<'_, '_, 'info, 'info, RegisterAsset<'i
         _ => false,
     };
     require!(is_authority || by_lister, VaultError::NotProtocolAuthority);
+    let prm = Params::load(&ctx.accounts.params)?;
+    // The kill switch stops the lister; the authority, who sets it, may still list.
+    if !is_authority {
+        prm.require_on(params::FAMILY_LISTING)?;
+    }
     assert_no_active_transfer_hook(&ctx.accounts.mint.to_account_info())?;
     // The lister lists only what a vault can hold as it comes. The authority may still list a
     // token whose new accounts start frozen, for an issuer that approves the vaults it holds.
     if !is_authority {
         assert_holdable(&ctx.accounts.mint.to_account_info())?;
     }
-    TransferFee::of(&ctx.accounts.mint.to_account_info())?.assert_within_cap()?;
+    TransferFee::of(&ctx.accounts.mint.to_account_info())?.assert_within_cap(prm.bps(params::TRANSFER_FEE_CAP_BPS))?;
 
     let e = &mut ctx.accounts.asset_entry;
     e.bump = ctx.bumps.asset_entry;
@@ -218,22 +355,6 @@ pub fn treasury_withdraw(ctx: Context<TreasuryWithdraw>, amount: u64) -> Result<
     )
 }
 
-/// Names who may post prices and who may run rebalances. Protocol authority only.
-pub fn init_keepers(ctx: Context<InitKeepers>, price_authority: Pubkey, rebalancer: Pubkey) -> Result<()> {
-    let k = &mut ctx.accounts.keepers;
-    k.bump = ctx.bumps.keepers;
-    k.price_authority = price_authority;
-    k.rebalancer = rebalancer;
-    Ok(())
-}
-
-pub fn set_keepers(ctx: Context<SetKeepers>, price_authority: Pubkey, rebalancer: Pubkey) -> Result<()> {
-    let k = &mut ctx.accounts.keepers;
-    k.price_authority = price_authority;
-    k.rebalancer = rebalancer;
-    Ok(())
-}
-
 /// Posts an asset's USD price (per whole token, x1e12), which rebalance and buyback floors are
 /// checked against. Bounded by the asset's guard: for an asset with a Pyth feed, within Pyth's
 /// confidence (3-5%) of a fresh Pyth price; for any other, within 20% of a reference that rolls
@@ -242,7 +363,8 @@ pub fn set_keepers(ctx: Context<SetKeepers>, price_authority: Pubkey, rebalancer
 /// for days) can be posted at once instead of never fitting both.
 pub fn set_price(ctx: Context<SetPrice>, price_e12: u64) -> Result<()> {
     require!(price_e12 > 0, VaultError::BadPrice);
-    let now = Clock::get()?.unix_timestamp;
+    let prm = Params::load(&ctx.accounts.params)?;
+    let now = prm.now;
     let mint_ai = ctx.accounts.mint.to_account_info();
     let decimals = mint_decimals(&mint_ai)?;
     let p = &mut ctx.accounts.asset_price;
@@ -256,18 +378,19 @@ pub fn set_price(ctx: Context<SetPrice>, price_e12: u64) -> Result<()> {
     }
     if g.pyth_feed == [0u8; 32] {
         if g.reference_e12 > 0 {
-            require!(within(price_e12 as u128, g.reference_e12 as u128, MAX_PRICE_MOVE_BPS), VaultError::PriceMoveTooLarge);
+            require!(within(price_e12 as u128, g.reference_e12 as u128, prm.wide(params::PRICE_MOVE_BPS)), VaultError::PriceMoveTooLarge);
         }
     } else {
         let ai = ctx.accounts.pyth_price.as_ref().ok_or(VaultError::PythPriceMissing)?;
-        let pp = pyth::read(ai, &g.pyth_feed, now, MAX_PYTH_AGE_SECS)?;
+        let pp = pyth::read(ai, &g.pyth_feed, now, prm.secs(params::PYTH_AGE_SECS))?;
         let multiplier = extensions::current_multiplier(&mint_ai.try_borrow_data()?, now).unwrap_or(1.0);
         let pyth_e12 = pp.e12(pp.price as u64, multiplier).ok_or(VaultError::PythPriceInvalid)?;
         let conf_bps = (pp.conf as u128 * BPS_DENOM) / pp.price as u128;
-        let tolerance = (conf_bps * PYTH_CONF_MULTIPLE).clamp(PYTH_TOLERANCE_MIN_BPS, PYTH_TOLERANCE_MAX_BPS);
+        let hi = prm.wide(params::PYTH_TOLERANCE_MAX_BPS);
+        let tolerance = (conf_bps * prm.wide(params::PYTH_CONF_MULTIPLE)).clamp(prm.wide(params::PYTH_TOLERANCE_MIN_BPS).min(hi), hi);
         require!(pyth_e12 > 0 && within(price_e12 as u128, pyth_e12, tolerance), VaultError::PriceOffPyth);
     }
-    if g.reference_e12 == 0 || now - g.reference_at >= PRICE_REFERENCE_SECS {
+    if g.reference_e12 == 0 || now - g.reference_at >= prm.secs(params::PRICE_REFERENCE_SECS) {
         g.reference_e12 = price_e12;
         g.reference_at = now;
     }
@@ -291,29 +414,6 @@ pub fn set_price_feed(ctx: Context<SetPriceFeed>, feed_id: [u8; 32]) -> Result<(
     g.bump = ctx.bumps.price_guard;
     g.mint = ctx.accounts.mint.key();
     g.pyth_feed = feed_id;
-    Ok(())
-}
-
-/// Names the one wallet whose baskets burn no GRAVI as they're created or gain assets (the
-/// team's, for its own baskets); `Pubkey::default()` removes it. Protocol authority. The wallet
-/// sits after the protocol's fields, which the account grows to hold the first time.
-pub fn set_burn_exempt(ctx: Context<SetBurnExempt>, wallet: Pubkey) -> Result<()> {
-    let ai = ctx.accounts.protocol.to_account_info();
-    let need = BURN_EXEMPT_OFFSET + 32;
-    if ai.data_len() < need {
-        let short = Rent::get()?.minimum_balance(need).saturating_sub(ai.lamports());
-        if short > 0 {
-            anchor_lang::system_program::transfer(
-                CpiContext::new(
-                    ctx.accounts.system_program.to_account_info(),
-                    anchor_lang::system_program::Transfer { from: ctx.accounts.authority.to_account_info(), to: ai.clone() },
-                ),
-                short,
-            )?;
-        }
-        ai.resize(need)?;
-    }
-    ai.try_borrow_mut_data()?[BURN_EXEMPT_OFFSET..need].copy_from_slice(wallet.as_ref());
     Ok(())
 }
 
@@ -376,54 +476,17 @@ pub struct InitProtocol<'info> {
     pub system_program: Program<'info, System>,
 }
 
+/// The protocol authority's settings (`set_role`, `set_param`).
 #[derive(Accounts)]
-pub struct ProtocolAdmin<'info> {
-    pub authority: Signer<'info>,
-    #[account(
-        mut,
-        seeds = [PROTOCOL_SEED],
-        bump = protocol.bump,
-        has_one = authority @ VaultError::NotProtocolAuthority
-    )]
-    pub protocol: Account<'info, Protocol>,
-}
-
-#[derive(Accounts)]
-pub struct SetCreationBurn<'info> {
+pub struct ProtocolConfig<'info> {
     #[account(mut)]
     pub authority: Signer<'info>,
-    #[account(
-        seeds = [PROTOCOL_SEED],
-        bump = protocol.bump,
-        has_one = authority @ VaultError::NotProtocolAuthority
-    )]
+    /// Grown by hand for the settings kept after its fields (burn-exempt, smart fee and burn, flags).
+    #[account(mut, seeds = [PROTOCOL_SEED], bump = protocol.bump, has_one = authority @ VaultError::NotProtocolAuthority)]
     pub protocol: Account<'info, Protocol>,
-    #[account(
-        init_if_needed,
-        payer = authority,
-        space = 8 + CreationBurn::INIT_SPACE,
-        seeds = [CREATION_BURN_SEED],
-        bump
-    )]
-    pub creation_burn: Account<'info, CreationBurn>,
-    /// Read for its decimals, to set the ceiling in whole GRAVI. Fails until the mint is set.
-    #[account(address = protocol.gravi_mint @ VaultError::GraviMintNotSet)]
-    pub gravi_mint: InterfaceAccount<'info, MintI>,
-    pub system_program: Program<'info, System>,
-}
-
-#[derive(Accounts)]
-pub struct SetLister<'info> {
-    #[account(mut)]
-    pub authority: Signer<'info>,
-    #[account(
-        seeds = [PROTOCOL_SEED],
-        bump = protocol.bump,
-        has_one = authority @ VaultError::NotProtocolAuthority
-    )]
-    pub protocol: Account<'info, Protocol>,
-    #[account(init_if_needed, payer = authority, space = 8 + Lister::INIT_SPACE, seeds = [LISTER_SEED], bump)]
-    pub lister: Account<'info, Lister>,
+    /// CHECK: the params account (`params.rs`), created by hand the first time a value is set.
+    #[account(mut, address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
 }
 
@@ -452,6 +515,9 @@ pub struct RegisterAsset<'info> {
     pub asset_entry: Account<'info, AssetEntry>,
 
     pub system_program: Program<'info, System>,
+    /// CHECK: the params account (`params.rs`), read for the listing switch and the fee cap.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -499,26 +565,6 @@ pub struct TreasuryWithdraw<'info> {
 }
 
 #[derive(Accounts)]
-pub struct InitKeepers<'info> {
-    #[account(mut)]
-    pub authority: Signer<'info>,
-    #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump, has_one = authority @ VaultError::NotProtocolAuthority)]
-    pub protocol: Account<'info, Protocol>,
-    #[account(init, payer = authority, space = 8 + Keepers::INIT_SPACE, seeds = [KEEPERS_SEED], bump)]
-    pub keepers: Account<'info, Keepers>,
-    pub system_program: Program<'info, System>,
-}
-
-#[derive(Accounts)]
-pub struct SetKeepers<'info> {
-    pub authority: Signer<'info>,
-    #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump, has_one = authority @ VaultError::NotProtocolAuthority)]
-    pub protocol: Account<'info, Protocol>,
-    #[account(mut, seeds = [KEEPERS_SEED], bump = keepers.bump)]
-    pub keepers: Account<'info, Keepers>,
-}
-
-#[derive(Accounts)]
 pub struct SetPrice<'info> {
     #[account(mut)]
     pub price_authority: Signer<'info>,
@@ -533,6 +579,9 @@ pub struct SetPrice<'info> {
     /// age). Needed only when its guard names a feed.
     pub pyth_price: Option<UncheckedAccount<'info>>,
     pub system_program: Program<'info, System>,
+    /// CHECK: the params account (`params.rs`), read for the price bounds.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -544,15 +593,5 @@ pub struct SetPriceFeed<'info> {
     pub mint: InterfaceAccount<'info, MintI>,
     #[account(init_if_needed, payer = authority, space = 8 + PriceGuard::INIT_SPACE, seeds = [GUARD_SEED, mint.key().as_ref()], bump)]
     pub price_guard: Account<'info, PriceGuard>,
-    pub system_program: Program<'info, System>,
-}
-
-#[derive(Accounts)]
-pub struct SetBurnExempt<'info> {
-    #[account(mut)]
-    pub authority: Signer<'info>,
-    /// Grown by hand to hold the wallet after its fields (see BURN_EXEMPT_OFFSET).
-    #[account(mut, seeds = [PROTOCOL_SEED], bump = protocol.bump, has_one = authority @ VaultError::NotProtocolAuthority)]
-    pub protocol: Account<'info, Protocol>,
     pub system_program: Program<'info, System>,
 }

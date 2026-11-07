@@ -4,7 +4,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { BN, ONE_SHARE, balance, expectError, fund, now, pda, rpc, warp, type Ctx } from "./helpers.ts";
-import { feeShares, fundHolder, mintIx, redeemIx, world, type World } from "./fixtures.ts";
+import { feeShares, fundHolder, mintIx, redeemIx, world, type World, initKeepers, setParam, PARAM, FAMILY } from "./fixtures.ts";
 import type { Keypair, PublicKey } from "@solana/web3.js";
 
 const FEE_BPS = 40;
@@ -14,7 +14,7 @@ const DAY = 86_400;
 async function setupInvites() {
   const w = await world({ protocolFeeBps: FEE_BPS });
   const keeper = fund(w.ctx);
-  await rpc(w.ctx, w.ctx.vault.methods.initKeepers(keeper.publicKey, keeper.publicKey).accountsPartial({ authority: w.ctx.payer.publicKey, keepers: pda.keepers() }));
+  await initKeepers(w.ctx, keeper.publicKey, keeper.publicKey);
   const alice = fund(w.ctx);
   await fundHolder(w, alice);
   return { ...w, keeper, alice };
@@ -116,5 +116,16 @@ describe("invites: a referred wallet's first month at half the protocol fee", ()
     await expectError(setInvite(w.ctx, w.keeper, w.alice, now(w.ctx) - 1), "BadInvite");
     await setInvite(w.ctx, w.keeper, w.alice, now(w.ctx) + 31 * DAY);
     await expectError(setInvite(w.ctx, w.keeper, w.alice, now(w.ctx) + DAY), "already in use");
+  });
+
+  it("the longest invite is a param, at once; the invites switch stops new ones, never a live one's discount", async () => {
+    const w = await setupInvites();
+    await setParam(w.ctx, PARAM.INVITE_MAX_SECS, BigInt(7 * DAY));
+    await expectError(setInvite(w.ctx, w.keeper, w.alice, now(w.ctx) + 8 * DAY), "BadInvite");
+    await setInvite(w.ctx, w.keeper, w.alice, now(w.ctx) + 7 * DAY);
+    await setParam(w.ctx, PARAM.KILL, BigInt(FAMILY.invites));
+    const bob = fund(w.ctx);
+    await expectError(setInvite(w.ctx, w.keeper, bob, now(w.ctx) + DAY), "FeatureOff");
+    assert.deepEqual(await mint(w, w.alice, true), { burn: 0n, treasury: 20_000_000n });
   });
 });

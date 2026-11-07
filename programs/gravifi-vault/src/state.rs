@@ -66,9 +66,8 @@ pub enum AccessMode {
 pub enum ControlMode {
     /// The creator changes the mandate directly.
     Creator,
-    /// Legacy: holder governance, since removed. Kept so baskets created with it still
-    /// deserialise; no basket can be created this way any more, and the protocol authority
-    /// can return an existing one to its creator (`restore_creator_control`).
+    /// Legacy: holder governance, since removed. Kept so the variants after it keep their
+    /// numbers; no basket can be created this way, and none exists on mainnet.
     Dao,
     /// Nothing may change the mandate. Enforced here, not merely in the UI.
     Immutable,
@@ -116,8 +115,7 @@ pub struct Basket {
     /// unchanged. (These 32 bytes held the governor's address before holder governance was
     /// removed, so the account layout is unchanged.)
     pub rebalance_supply: u64,
-    /// Treasury shares owed to GRAVI stakers (`stake_sweep` moves them). 0 on a legacy Dao
-    /// basket, which counts none: its spare bytes may still hold its old governor's.
+    /// Treasury shares owed to GRAVI stakers (`stake_sweep` moves them).
     pub stake_owed: u64,
     /// 1 once holders run it by vote (`enter_community`). It stays 1 while a vote has handed it
     /// to the strategist, when `control` reads Smart. Read through `by_vote`.
@@ -126,8 +124,8 @@ pub struct Basket {
     /// u32, read through `vote_added_at`; 0 for never. The fifth byte is spare.
     pub reserved: [u8; 5],
     /// The creator's cut of every mint by someone else, in bps of the shares (`creator_cut.rs`).
-    /// These two read as 0 on a legacy Dao basket, whose spare bytes may still hold its old
-    /// governor's: read them through `cut_bps` and `owed_to_creator`.
+    /// (No basket handed to holder governance (`ControlMode::Dao`) exists on mainnet, whose spare
+    /// bytes would hold its governor's address here; none can be created.)
     pub creator_cut_bps: u16,
     /// Treasury shares owed to the creator (`claim_creator_cut` moves them).
     pub creator_unclaimed: u64,
@@ -159,17 +157,17 @@ pub struct Basket {
 impl Basket {
     /// The creator's cut of a mint.
     pub fn cut_bps(&self) -> u16 {
-        if self.control == ControlMode::Dao { 0 } else { self.creator_cut_bps }
+        self.creator_cut_bps
     }
 
     /// Treasury shares owed to the creator.
     pub fn owed_to_creator(&self) -> u64 {
-        if self.control == ControlMode::Dao { 0 } else { self.creator_unclaimed }
+        self.creator_unclaimed
     }
 
     /// Treasury shares owed to GRAVI stakers.
     pub fn owed_to_stakers(&self) -> u64 {
-        if self.control == ControlMode::Dao { 0 } else { self.stake_owed }
+        self.stake_owed
     }
 
     /// Holders run this basket by vote: `Community`, or `Smart` after a vote handed it over.
@@ -177,8 +175,7 @@ impl Basket {
         self.community == 1 && matches!(self.control, ControlMode::Community | ControlMode::Smart)
     }
 
-    /// When a vote last added an asset to this basket (0: never). Only a Community basket writes
-    /// it; on a legacy Dao basket these bytes may hold its old governor's, and nothing reads them.
+    /// When a vote last added an asset to this basket (0: never). Only a Community basket writes it.
     pub fn vote_added_at(&self) -> i64 {
         u32::from_le_bytes([self.reserved[0], self.reserved[1], self.reserved[2], self.reserved[3]]) as i64
     }
@@ -285,7 +282,7 @@ pub enum AssetStatus {
 
 /// GRAVI burned for each asset a basket holds, at `[CREATION_BURN_SEED]`: `initialize_basket`
 /// burns it for every asset the basket starts with, `add_constituent` for each one added later.
-/// The protocol authority sets it (`set_creation_burn`), up to `MAX_BURN_PER_ASSET_TOKENS`; 0
+/// The protocol authority sets it (`set_param` CONFIG_CREATION_BURN), up to `MAX_BURN_PER_ASSET_TOKENS`; 0
 /// turns it off. Paid on creating, so a basket that's never seeded has still paid it. Both
 /// instructions name it, so a cluster needs it set once before baskets can be created.
 #[account]
@@ -301,7 +298,7 @@ pub struct CreationBurn {
 }
 
 /// The protocol account may carry, after its fields, one wallet whose baskets burn no GRAVI (the
-/// team's, for its own baskets: `set_burn_exempt`). Kept outside the struct so the account, and
+/// team's, for its own baskets: `set_role` ROLE_BURN_EXEMPT). Kept outside the struct so the account, and
 /// every instruction naming it, reads as before: Anchor writes back only the struct's bytes, and
 /// the account is only ever created once (`init_protocol`), so nothing checks its size.
 pub const BURN_EXEMPT_OFFSET: usize = 8 + Protocol::INIT_SPACE;
@@ -316,7 +313,7 @@ pub fn burn_exempt(protocol: &AccountInfo) -> Option<Pubkey> {
 /// The one key, besides the protocol authority, that may list assets (`register_asset`), at
 /// `[LISTER_SEED]`: the app's listing key, which co-signs a listing inside the creator's own
 /// transaction once the token passed the app's checks (open listing). It can do nothing else: not
-/// delist, not change a setting, not move a token. `set_lister` names it (`Pubkey::default()`
+/// delist, not change a setting, not move a token. `set_role` (ROLE_LISTER) names it (`Pubkey::default()`
 /// removes it), protocol authority only.
 pub const LISTER_SEED: &[u8] = b"lister";
 
@@ -358,7 +355,7 @@ pub fn load_asset_entry(ai: &AccountInfo) -> Result<AssetEntry> {
 
 /// The protocol fee on a smart basket's mints and redeems, in bps of the shares: double the
 /// normal one, for the daily reviews. It sits after the burn-exempt wallet, in the protocol
-/// account's tail, written by `set_smart_fee`; until then it's `SMART_FEE_DEFAULT_BPS`.
+/// account's tail, written by `set_param` (CONFIG_SMART_FEE); until then it's `SMART_FEE_DEFAULT_BPS`.
 pub const SMART_FEE_OFFSET: usize = BURN_EXEMPT_OFFSET + 32;
 /// [fee u16 little-endian][1 once set].
 pub const SMART_FEE_LEN: usize = 3;
@@ -368,7 +365,7 @@ pub const MAX_SMART_FEE_BPS: u16 = 100;
 
 /// The GRAVI, in base units, a creator burns once when a basket is made smart (`enable_smart`), on
 /// top of the per-asset creation burn. It sits after the Smart-mode fee in the protocol account's
-/// tail, written by `set_smart_burn`; 0, or no tail yet, means none.
+/// tail, written by `set_param` (CONFIG_SMART_BURN); 0, or no tail yet, means none.
 pub const SMART_BURN_OFFSET: usize = SMART_FEE_OFFSET + SMART_FEE_LEN;
 pub const SMART_BURN_LEN: usize = 8;
 /// Its ceiling, in whole GRAVI.
@@ -393,7 +390,7 @@ pub fn smart_fee_bps(protocol: &AccountInfo) -> u16 {
 /// The strategist, at `[STRATEGIST_SEED]`: the app's key that runs smart baskets. It may set a
 /// smart basket's targets, add and remove its assets and put the mandate's stop on them, only
 /// within the basket's guardrails. It can't move a token, change a fee or a guardrail, or touch
-/// any other basket. `set_strategist` names it (`Pubkey::default()` removes it), protocol
+/// any other basket. `set_role` (ROLE_STRATEGIST) names it (`Pubkey::default()` removes it), protocol
 /// authority only.
 pub const STRATEGIST_SEED: &[u8] = b"strategist";
 
@@ -417,14 +414,15 @@ pub struct VerifiedAsset {
 }
 
 pub const SMART_SEED: &[u8] = b"smart";
-/// Ceilings on a smart basket's guardrails, in code: a creator may set tighter ones, never
-/// looser. Target changes (the sum of the increases) per rolling 24 hours and 7 days, and the
+/// Ceilings on a smart basket's guardrails: a creator may set tighter ones, never looser. Target changes (the sum of the increases) per rolling 24 hours and 7 days, and the
 /// weight of one asset, Verified and not.
+/// (The default of the `SMART_MAX_*` params: `params.rs`.)
 pub const SMART_MAX_DAY_BPS: u16 = 4_000;
 pub const SMART_MAX_WEEK_BPS: u16 = 10_000;
 pub const SMART_MAX_WEIGHT_BPS: u16 = 3_500;
 pub const SMART_MAX_UNVERIFIED_BPS: u16 = 3_000;
 /// How long a new mandate waits before it applies, so holders who disagree can redeem first.
+/// (The default of the `MANDATE_NOTICE_SECS` param: `params.rs`.)
 pub const MANDATE_NOTICE_SECS: i64 = 86_400;
 /// The turnover window: one bucket per hour, 7 days.
 pub const TURNOVER_HOURS: usize = 168;
@@ -523,41 +521,50 @@ pub const NATIVE_MINT: Pubkey = pubkey!("So1111111111111111111111111111111111111
 /// Prices are USD per whole token, scaled by 1e12 (so $0.000001 keeps six digits).
 pub const PRICE_SCALE: u128 = 1_000_000_000_000;
 /// A rebalance may only use prices this fresh.
+/// (The default of the `PRICE_AGE_SECS` param: `params.rs`.)
 pub const MAX_PRICE_AGE_SECS: i64 = 120;
 /// Ceiling on the tolerance a rebalance slice may accept against the oracle price. The
 /// vault can never be filled worse than this, however the swap is routed or attacked. 3%: a
 /// memecoin trading only in a Pump.fun pool costs more than 1.5% in pool fees alone (NTRNDM
 /// 1.62% from SOL), so at 1.5% the keeper could never buy one into a basket. The keeper asks
 /// for 1% on slices of stocks and crypto, and up to this only on slices touching a memecoin.
+/// (The default of the `REBALANCE_SLIPPAGE_BPS` param: `params.rs`.)
 pub const MAX_REBALANCE_SLIPPAGE_BPS: u16 = 300;
 /// Ceiling on a buyback slice's tolerance, both its sales to SOL and its GRAVI buy. Far wider
 /// than a rebalance's: a buyback spends protocol fees, never a holder's deposit, and its fee
 /// tokens are memecoins a few pools from SOL whose fees alone pass 3% (31 Oct, the pump "LTC":
 /// 3.7% to GRAVI through three pools): sell it all, slippage aside, and burn.
+/// (The default of the `BUYBACK_SLIPPAGE_BPS` param: `params.rs`.)
 pub const MAX_BUYBACK_SLIPPAGE_BPS: u16 = 1_000;
 /// One slice may move at most this share of the basket's value, so each trade stays small
 /// against pool depth and a sandwich costs more than it earns.
+/// (The default of the `SLICE_BPS` param: `params.rs`.)
 pub const MAX_SLICE_BPS: u128 = 500;
 /// A sleeve set to 0% (stopped out, or taken out by its creator) may sell up to this much of the
 /// basket in one slice ("clip"), so it leaves in minutes rather than hours. Each clip is still
 /// held to the oracle floor and stops at the bought sleeve's target.
+/// (The default of the `LEAVING_SLICE_BPS` param: `params.rs`.)
 pub const MAX_LEAVING_SLICE_BPS: u128 = 5_000;
 /// The most one rebalance, sweep or buyback slice pays the rebalancer back for what running
 /// it cost (network fees, and the accounts it opened for the basket), in USD x1e12: $0.05. A
 /// slice costs it about 0.00005 SOL; the rest of the room repays an opened account over a few
 /// slices. Paid in the sold token on top of the slice, so the basket (or the burn's budget)
 /// bears it; a leaked keeper key can take at most this per slice.
+/// (The default of the `KEEPER_REFUND_E12` param: `params.rs`.)
 pub const MAX_KEEPER_REFUND_E12: u128 = 50_000_000_000;
 /// The most one buyback slice pays the rebalancer back, in USD x1e12: $0.50. A buyback run
 /// sells every token the burn PDA holds for SOL, and the rebalancer is paid back for all of it
 /// at once, in SOL, out of the one GRAVI buy that follows (some 25 transactions of fees). Only
 /// ever from the burn's budget.
+/// (The default of the `BUYBACK_REFUND_E12` param: `params.rs`.)
 pub const MAX_BUYBACK_REFUND_E12: u128 = 500_000_000_000;
 /// Sleeves closer than this to target aren't worth trading.
 pub const MIN_TRADE_DRIFT_BPS: i64 = 10;
 /// The least a basket's policy may ask for: a drift tolerance under 0.5%, or a schedule more
 /// often than daily, would have the keeper trade it (and its holders pay slippage) for noise.
+/// (The default of the `POLICY_MIN_DRIFT_BPS` param: `params.rs`.)
 pub const MIN_POLICY_DRIFT_BPS: u16 = 50;
+/// (The default of the `POLICY_MIN_INTERVAL_SECS` param: `params.rs`.)
 pub const MIN_POLICY_INTERVAL_SECS: i64 = 86_400;
 /// A sleeve set to 0% sells its last this-many bps of the basket in one slice, into any
 /// sleeve under target, so it empties completely and can be removed.
@@ -566,6 +573,7 @@ pub const EMPTYING_BPS: i64 = 50;
 /// bought into one (stonkfun tokens charge 1-3%, PreStocks 1%; 4% leaves room for tokens taking
 /// 3% on trades). A fee raised above it after listing pauses new money into that asset;
 /// redemptions and selling it out still work.
+/// (The default of the `TRANSFER_FEE_CAP_BPS` param: `params.rs`.)
 pub const MAX_TRANSFER_FEE_BPS: u16 = 400;
 /// A rebalance session ends once every sleeve is this close to target.
 pub const SESSION_END_DRIFT_BPS: i64 = 25;
@@ -573,6 +581,7 @@ pub const SESSION_END_DRIFT_BPS: i64 = 25;
 /// back to trading only when its policy says it's due.
 pub const SESSION_IDLE_SLOTS: u64 = 216_000;
 /// At most one split (direct or reverse) per basket in any 30 days.
+/// (The default of the `SPLIT_COOLDOWN_SECS` param: `params.rs`.)
 pub const SPLIT_COOLDOWN_SECS: i64 = 30 * 86_400;
 
 /// Who may post prices and run rebalances: the app's keeper today, on every cluster. What a
@@ -591,6 +600,7 @@ pub const INVITE_SEED: &[u8] = b"invite";
 /// A pending rise of a basket's creator cut, at `[CUT_NOTICE_SEED, basket]`.
 pub const CUT_NOTICE_SEED: &[u8] = b"cut_notice";
 /// How long a rise waits once a basket has shares, so no buyer pays more than they were quoted.
+/// (The default of the `CUT_NOTICE_SECS` param: `params.rs`.)
 pub const CUT_NOTICE_SECS: i64 = 86_400;
 
 #[account]
@@ -604,6 +614,7 @@ pub struct CutNotice {
 }
 
 /// The longest an invite can run from when it's written: a month, and a day of room.
+/// (The default of the `INVITE_MAX_SECS` param: `params.rs`.)
 pub const MAX_INVITE_SECS: i64 = 31 * 86_400;
 
 /// Until `until`, `wallet` pays half the protocol fee on its mints and redeems (rounded up), all
@@ -621,14 +632,18 @@ pub const GUARD_SEED: &[u8] = b"guard";
 /// this. With the reference rolling forward once an hour, a price can move about this much an
 /// hour and no faster, so a leaked price key can't jump a price at once: it takes hours, time to
 /// replace the key.
+/// (The default of the `PRICE_MOVE_BPS` param: `params.rs`.)
 pub const MAX_PRICE_MOVE_BPS: u128 = 2_000;
 /// How often the reference rolls forward to the newest accepted price.
+/// (The default of the `PRICE_REFERENCE_SECS` param: `params.rs`.)
 pub const PRICE_REFERENCE_SECS: i64 = 3_600;
 /// An asset with a Pyth feed: its price may be at most this many seconds old when a price is
 /// posted against it (the sponsored feeds update at least every few minutes).
+/// (The default of the `PYTH_AGE_SECS` param: `params.rs`.)
 pub const MAX_PYTH_AGE_SECS: i64 = 300;
 /// ...and the posted price must be within three times Pyth's confidence of it, but at least
 /// 3% and at most 5%: room for the difference between Pyth and the pools the keeper trades.
+/// (The default of the `PYTH_TOLERANCE_MIN_BPS` param: `params.rs`.)
 pub const PYTH_TOLERANCE_MIN_BPS: u128 = 300;
 pub const PYTH_TOLERANCE_MAX_BPS: u128 = 500;
 pub const PYTH_CONF_MULTIPLE: u128 = 3;
@@ -681,18 +696,22 @@ pub struct RebalanceState {
 /// A sleeve set to 0% whose price hasn't been posted for this long counts as worth nothing in the
 /// books (`value_book`): a token the market stopped pricing would otherwise block every rebalance
 /// of the basket. At $0 it can't be sold (its floor is zero), only held and redeemed in kind.
+/// (The default of the `DEAD_PRICE_SECS` param: `params.rs`.)
 pub const DEAD_PRICE_SECS: i64 = 86_400;
 
 // ---------------------------------------------------------------------------- stop losses
 
 pub const STOP_SEED: &[u8] = b"stop";
 /// A stop fires only if the price is still below it this long after it was first seen below.
+/// (The default of the `STOP_CONFIRM_SECS` param: `params.rs`.)
 pub const STOP_CONFIRM_SECS: i64 = 300;
 /// ...and no longer than this after: an arming nobody confirmed in time starts over from the next
 /// check below the stop, so "below for five minutes" is two checks five to fifteen minutes apart,
 /// not two dips hours apart with nobody looking in between.
+/// (The default of the `STOP_WINDOW_SECS` param: `params.rs`.)
 pub const STOP_ARM_WINDOW_SECS: i64 = 3 * STOP_CONFIRM_SECS;
 /// How far below its reference a stop may sit: 5% to 90%.
+/// (The default of the `STOP_MIN_BPS` param: `params.rs`.)
 pub const MIN_STOP_BPS: u16 = 500;
 pub const MAX_STOP_BPS: u16 = 9_000;
 
@@ -801,11 +820,14 @@ pub const MAX_STAKE_THRESHOLD_TOKENS: u64 = 10_000_000;
 /// A raised threshold applies after this notice, so stakers can top up first.
 pub const STAKE_THRESHOLD_NOTICE_SECS: i64 = 7 * 86_400;
 /// How long staked GRAVI waits before it counts, for the pot and for free baskets.
+/// (The default of the `STAKE_WARMUP_SECS` param: `params.rs`.)
 pub const STAKE_WARMUP_SECS: i64 = 2 * 86_400;
 pub const DAY_SECS: i64 = 86_400;
 /// How long unstaked GRAVI waits before it can be withdrawn, earning nothing.
+/// (The default of the `STAKE_UNSTAKE_SECS` param: `params.rs`.)
 pub const STAKE_UNSTAKE_SECS: i64 = 7 * 86_400;
 /// How long one month's pot takes to pay out.
+/// (The default of the `STAKE_PERIOD_SECS` param: `params.rs`.)
 pub const STAKE_PERIOD_SECS: i64 = 30 * 86_400;
 /// The reward index is lamports per GRAVI base unit x1e18; the rate lamports per second x1e9.
 pub const STAKE_INDEX_SCALE: u128 = 1_000_000_000_000_000_000;
@@ -876,8 +898,10 @@ pub struct Stake {
     pub wallet: Pubkey,
     /// All of it that's staked, warmed up or not.
     pub amount: u64,
-    /// What was staked in the last STAKE_WARMUP_SECS and doesn't count yet, and when the newest of
-    /// it came in: a top-up restarts the wait for what's still warming, never for what counts.
+    /// What was staked in the last warm-up and doesn't count yet, and when the newest of it came in,
+    /// written so that `pending_at + STAKE_WARMUP_SECS` is when it counts (with the warm-up param
+    /// changed, it's shifted by the difference): a top-up restarts the wait for what's still
+    /// warming, never for what counts.
     pub pending: u64,
     pub pending_at: i64,
     /// How much counts toward the pot, as of the last `sync`: `amount` less what's warming.
@@ -960,11 +984,15 @@ pub const PROPOSAL_SEED: &[u8] = b"proposal";
 pub const VOTE_SEED: &[u8] = b"vote";
 /// How long staked shares take to reach full voting weight.
 pub const VOTE_RAMP_SECS: i64 = 3 * 86_400;
+/// (The default of the `VOTE_PERIOD_SECS` param: `params.rs`.)
 pub const VOTE_PERIOD_SECS: i64 = 3 * 86_400;
 /// The wait between a vote passing and its change, so holders who disagree can redeem first.
+/// (The default of the `VOTE_TIMELOCK_SECS` param: `params.rs`.)
 pub const VOTE_TIMELOCK_SECS: i64 = 86_400;
 /// How long a passed proposal stays executable before it lapses.
+/// (The default of the `VOTE_GRACE_SECS` param: `params.rs`.)
 pub const VOTE_GRACE_SECS: i64 = 7 * 86_400;
+/// (These four: the defaults of the params of the same names, `params.rs`.)
 pub const PROPOSE_MIN_BPS: u128 = 100;
 pub const QUORUM_BPS: u128 = 1_000;
 /// Fee, Go Smart and leaving need this much of For + Against; the rest need over half.
@@ -1077,31 +1105,73 @@ impl Proposal {
     /// Everything before `action`, discriminator included.
     pub const BASE_SPACE: usize = 8 + 1 + 32 + 4 + 4 + 32 + 8 + 8 + 8 + 8 + 1;
 
-    pub fn vote_end(&self) -> i64 {
-        self.created_at + VOTE_PERIOD_SECS
+    /// Where its terms sit: right after its action.
+    fn terms_at(&self) -> Result<usize> {
+        Ok(Self::BASE_SPACE + self.action.try_to_vec()?.len())
     }
 
-    pub fn exec_after(&self) -> i64 {
-        self.vote_end() + VOTE_TIMELOCK_SECS
+    /// Its windows and vote rules: those written on it when it opened (`write_terms`), or, for a
+    /// proposal opened before they were written, the constants then. A later change to the params
+    /// never moves a vote already open.
+    pub fn terms(&self, ai: &AccountInfo) -> Result<Terms> {
+        let at = self.terms_at()?;
+        let d = ai.try_borrow_data()?;
+        if let Some(t) = d.get(at..at + TERMS_LEN).filter(|t| t[0] == TERMS_VERSION) {
+            let word = |k: usize| i64::from_le_bytes(t[k..k + 8].try_into().unwrap());
+            let half = |k: usize| u16::from_le_bytes([t[k], t[k + 1]]) as u128;
+            return Ok(Terms { vote_end: word(1), exec_after: word(9), exec_until: word(17), quorum_bps: half(25), super_bps: half(27) });
+        }
+        let vote_end = self.created_at + VOTE_PERIOD_SECS;
+        Ok(Terms {
+            vote_end,
+            exec_after: vote_end + VOTE_TIMELOCK_SECS,
+            exec_until: vote_end + VOTE_TIMELOCK_SECS + VOTE_GRACE_SECS,
+            quorum_bps: QUORUM_BPS,
+            super_bps: SUPERMAJORITY_BPS,
+        })
     }
 
-    pub fn exec_until(&self) -> i64 {
-        self.exec_after() + VOTE_GRACE_SECS
+    /// Writes its terms after its action; the account was sized with `TERMS_LEN` for them.
+    pub fn write_terms(&self, ai: &AccountInfo, t: &Terms) -> Result<()> {
+        let at = self.terms_at()?;
+        let mut d = ai.try_borrow_mut_data()?;
+        let out = d.get_mut(at..at + TERMS_LEN).ok_or(VaultError::BadProposal)?;
+        out[0] = TERMS_VERSION;
+        out[1..9].copy_from_slice(&t.vote_end.to_le_bytes());
+        out[9..17].copy_from_slice(&t.exec_after.to_le_bytes());
+        out[17..25].copy_from_slice(&t.exec_until.to_le_bytes());
+        out[25..27].copy_from_slice(&(t.quorum_bps as u16).to_le_bytes());
+        out[27..29].copy_from_slice(&(t.super_bps as u16).to_le_bytes());
+        Ok(())
     }
 
     /// Enough of the supply voted, and enough of them for it. Final once voting has ended.
-    pub fn passed(&self) -> bool {
+    pub fn passed(&self, t: &Terms) -> bool {
         let (yes, no) = (self.votes_for as u128, self.votes_against as u128);
         let total = yes + no;
-        if total * BPS_DENOM < self.supply as u128 * QUORUM_BPS {
+        if total * BPS_DENOM < self.supply as u128 * t.quorum_bps {
             return false;
         }
         if self.action.needs_supermajority() {
-            yes * BPS_DENOM >= total * SUPERMAJORITY_BPS
+            yes * BPS_DENOM >= total * t.super_bps
         } else {
             yes > no
         }
     }
+}
+
+/// A proposal's windows and vote rules, fixed when it opens: `[version 1][vote_end i64][exec_after
+/// i64][exec_until i64][quorum_bps u16][supermajority_bps u16]`, after its action.
+pub const TERMS_VERSION: u8 = 1;
+pub const TERMS_LEN: usize = 29;
+
+#[derive(Clone, Copy)]
+pub struct Terms {
+    pub vote_end: i64,
+    pub exec_after: i64,
+    pub exec_until: i64,
+    pub quorum_bps: u128,
+    pub super_bps: u128,
 }
 
 /// That proposal `id` is its proposer's one open proposal on `basket`, at `[OPEN_SEED, basket,

@@ -12,6 +12,7 @@ use anchor_spl::token_interface::{self, Mint as MintI, TokenAccount as TokenAcco
 
 use crate::errors::VaultError;
 use crate::instructions::basket::authorise_mandate;
+use crate::params::{self, Params, PARAMS_ID};
 use crate::state::*;
 use crate::token_util::is_ata;
 
@@ -44,7 +45,8 @@ pub fn set_creator_cut(ctx: Context<SetCreatorCut>, bps: u16) -> Result<()> {
     Ok(())
 }
 
-/// Asks for a higher cut on a basket with shares out, from `CUT_NOTICE_SECS` from now. One at a
+/// Asks for a higher cut on a basket with shares out, from the `CUT_NOTICE_SECS` param (a day)
+/// from now, the time written on the notice. One at a
 /// time: `set_creator_cut` with the notice cancels it first. The yearly fee stops now. Creator
 /// only, who pays the notice's rent and gets it back when it's applied or cancelled.
 pub fn propose_cut_rise(ctx: Context<ProposeCutRise>, bps: u16) -> Result<()> {
@@ -59,7 +61,7 @@ pub fn propose_cut_rise(ctx: Context<ProposeCutRise>, bps: u16) -> Result<()> {
     notice.bump = ctx.bumps.notice;
     notice.basket = basket.key();
     notice.bps = bps;
-    notice.at = now + CUT_NOTICE_SECS;
+    notice.at = now + Params::load(&ctx.accounts.params)?.secs(params::CUT_NOTICE_SECS);
     Ok(())
 }
 
@@ -128,6 +130,9 @@ pub struct ProposeCutRise<'info> {
     #[account(init, payer = authority, space = 8 + CutNotice::INIT_SPACE, seeds = [CUT_NOTICE_SEED, basket.key().as_ref()], bump)]
     pub notice: Account<'info, CutNotice>,
     pub system_program: Program<'info, System>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]

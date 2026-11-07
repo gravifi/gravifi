@@ -6,6 +6,7 @@ use anchor_lang::prelude::*;
 use anchor_spl::token_interface::{self, Mint as MintI, TokenAccount as TokenAccountI, TokenInterface};
 
 use crate::errors::VaultError;
+use crate::params::{self, Params, PARAMS_ID};
 use crate::state::*;
 use crate::token_util::*;
 use anchor_lang::solana_program::sysvar::instructions::{load_current_index_checked, load_instruction_at_checked};
@@ -24,6 +25,7 @@ pub fn buyback_redeem<'info>(
 ) -> Result<()> {
     require!(ctx.accounts.basket.seeded, VaultError::NotSeeded);
     require!(shares > 0, VaultError::ZeroShares);
+    Params::load(&ctx.accounts.params)?.require_on(params::FAMILY_BUYBACK)?;
     // Never from inside another program: a sale's finish would count what this delivers as
     // what the sale brought back (`finish_follows` sees only a transaction's own instructions).
     require!(
@@ -102,15 +104,17 @@ pub(crate) fn redeem_into<'info>(
 /// `max_slippage_bps`, came back as GRAVI. `refund` more of the sold token goes to the
 /// rebalancer for the buyback's network costs, as in a rebalance slice.
 pub fn buyback_start(ctx: Context<BuybackStart>, sell_amount: u64, max_slippage_bps: u16, refund: u64) -> Result<()> {
+    let prm = Params::load(&ctx.accounts.params)?;
+    prm.require_on(params::FAMILY_BUYBACK)?;
     require!(sell_amount > 0, VaultError::BadParameter);
-    require!(max_slippage_bps <= MAX_BUYBACK_SLIPPAGE_BPS, VaultError::BadParameter);
+    require!(max_slippage_bps <= prm.bps(params::BUYBACK_SLIPPAGE_BPS), VaultError::BadParameter);
     require!(!ctx.accounts.buyback.pending, VaultError::BuybackPending);
     let gravi_mint = ctx.accounts.protocol.gravi_mint;
     require!(gravi_mint != Pubkey::default(), VaultError::GraviMintNotSet);
     require_keys_neq!(ctx.accounts.sell_mint.key(), gravi_mint, VaultError::BadParameter);
 
     let sell_mint = ctx.accounts.sell_mint.to_account_info();
-    let min_gravi = oracle_floor(sell_amount, &ctx.accounts.sell_price, &ctx.accounts.gravi_price, max_slippage_bps, refund, &sell_mint)?;
+    let min_gravi = oracle_floor(&prm, sell_amount, &ctx.accounts.sell_price, &ctx.accounts.gravi_price, max_slippage_bps, refund, &sell_mint)?;
     finish_follows(&ctx.accounts.instructions, <crate::instruction::BuybackFinish as anchor_lang::Discriminator>::DISCRIMINATOR)?;
     lend(
         &ctx.accounts.sell_token_program,
@@ -141,12 +145,14 @@ pub fn buyback_start(ctx: Context<BuybackStart>, sell_amount: u64, max_slippage_
 /// value, less `max_slippage_bps`, came back. The SOL waits there until it all buys GRAVI in one
 /// go (`buyback_start` selling SOL). `refund`: as in `buyback_start`.
 pub fn buyback_sol_start(ctx: Context<BuybackSolStart>, sell_amount: u64, max_slippage_bps: u16, refund: u64) -> Result<()> {
+    let prm = Params::load(&ctx.accounts.params)?;
+    prm.require_on(params::FAMILY_BUYBACK)?;
     require!(sell_amount > 0, VaultError::BadParameter);
-    require!(max_slippage_bps <= MAX_BUYBACK_SLIPPAGE_BPS, VaultError::BadParameter);
+    require!(max_slippage_bps <= prm.bps(params::BUYBACK_SLIPPAGE_BPS), VaultError::BadParameter);
     require!(!ctx.accounts.buyback_sol.pending, VaultError::BuybackPending);
 
     let sell_mint = ctx.accounts.sell_mint.to_account_info();
-    let min_sol = oracle_floor(sell_amount, &ctx.accounts.sell_price, &ctx.accounts.sol_price, max_slippage_bps, refund, &sell_mint)?;
+    let min_sol = oracle_floor(&prm, sell_amount, &ctx.accounts.sell_price, &ctx.accounts.sol_price, max_slippage_bps, refund, &sell_mint)?;
     finish_follows(&ctx.accounts.instructions, <crate::instruction::BuybackSolFinish as anchor_lang::Discriminator>::DISCRIMINATOR)?;
     lend(
         &ctx.accounts.sell_token_program,
@@ -187,13 +193,12 @@ pub fn buyback_sol_finish(ctx: Context<BuybackSolFinish>) -> Result<()> {
 /// The least a sale of `sell_amount` may bring back, in base units of the token bought: its
 /// oracle value less `max_slippage_bps`, and less the sold token's transfer fee, which isn't
 /// slippage. Never zero, which would accept nothing back. Both prices must be fresh, and the
-/// keeper's `refund` within MAX_BUYBACK_REFUND_E12.
-pub(crate) fn oracle_floor(sell_amount: u64, sell_price: &AssetPrice, out_price: &AssetPrice, max_slippage_bps: u16, refund: u64, sell_mint: &AccountInfo) -> Result<u64> {
-    let now = Clock::get()?.unix_timestamp;
+/// keeper's `refund` within `BUYBACK_REFUND_E12` ($0.50).
+pub(crate) fn oracle_floor(prm: &Params, sell_amount: u64, sell_price: &AssetPrice, out_price: &AssetPrice, max_slippage_bps: u16, refund: u64, sell_mint: &AccountInfo) -> Result<u64> {
     for p in [sell_price, out_price] {
-        require!(p.price_e12 > 0 && now - p.updated_at <= MAX_PRICE_AGE_SECS, VaultError::BadPrice);
+        require!(p.price_e12 > 0 && prm.now - p.updated_at <= prm.secs(params::PRICE_AGE_SECS), VaultError::BadPrice);
     }
-    require!(token_value(refund, sell_price.price_e12, sell_price.decimals)? <= MAX_BUYBACK_REFUND_E12, VaultError::RefundTooLarge);
+    require!(token_value(refund, sell_price.price_e12, sell_price.decimals)? <= prm.wide(params::BUYBACK_REFUND_E12), VaultError::RefundTooLarge);
     let sell_fee = TransferFee::of(sell_mint)?;
     let floor_value = token_value(sell_amount, sell_price.price_e12, sell_price.decimals)?
         * (BPS_DENOM - max_slippage_bps as u128)
@@ -323,6 +328,9 @@ pub struct BuybackRedeem<'info> {
     #[account(mut, token::mint = share_mint, token::authority = burn_authority)]
     pub burn_shares: InterfaceAccount<'info, TokenAccountI>,
     pub share_token_program: Interface<'info, TokenInterface>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -356,6 +364,9 @@ pub struct BuybackStart<'info> {
     #[account(address = anchor_lang::solana_program::sysvar::instructions::ID)]
     pub instructions: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -390,6 +401,9 @@ pub struct BuybackSolStart<'info> {
     #[account(address = anchor_lang::solana_program::sysvar::instructions::ID)]
     pub instructions: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]

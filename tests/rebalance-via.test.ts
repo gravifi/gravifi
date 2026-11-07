@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { SYSVAR_INSTRUCTIONS_PUBKEY, SystemProgram, PublicKey } from "@solana/web3.js";
 import { MINT_SIZE, MintLayout, NATIVE_MINT, createSyncNativeInstruction, createTransferCheckedInstruction } from "@solana/spl-token";
 import { BN, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, balance, createAta, createMint, expectError, fund, mintTo, pda, rpc, send, postPrices } from "./helpers.ts";
-import { NO_GRAVI, listAsset, world } from "./fixtures.ts";
+import { NO_GRAVI, listAsset, world, initKeepers } from "./fixtures.ts";
 
 // World: 10 shares backed by 20 A ($1) and 5 B ($6): $20 / $30 against targets of 60 / 40, and a
 // SOL sleeve ($100) at 0%, empty. B must be sold for A.
@@ -24,7 +24,7 @@ const FAIR_A = 2_500_000n;
 async function hubWorld(targets = [6_000, 4_000, 0]) {
   const w = await world();
   const keeper = fund(w.ctx);
-  await rpc(w.ctx, w.ctx.vault.methods.initKeepers(keeper.publicKey, keeper.publicKey).accountsPartial({ authority: w.ctx.payer.publicKey, keepers: pda.keepers() }));
+  await initKeepers(w.ctx, keeper.publicKey, keeper.publicKey);
   // LiteSVM has no native mint account: SOL's, as on chain (9 decimals, no authority).
   const data = Buffer.alloc(MINT_SIZE);
   MintLayout.encode({ mintAuthorityOption: 0, mintAuthority: PublicKey.default, supply: 0n, decimals: 9, isInitialized: true, freezeAuthorityOption: 0, freezeAuthority: PublicKey.default }, data);

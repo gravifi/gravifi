@@ -17,6 +17,7 @@ use anchor_lang::prelude::*;
 
 use crate::errors::VaultError;
 use crate::instructions::basket::authorise_mandate;
+use crate::params::{self, Params, PARAMS_ID};
 use crate::state::*;
 
 /// A stop as the creator writes it: how far below which reference, and whether the reference
@@ -68,23 +69,27 @@ pub fn set_stops<'info>(ctx: Context<'_, '_, 'info, 'info, SetStops<'info>>, mut
     } else {
         authorise_mandate(basket, &ctx.accounts.creator)?;
     }
-    check_stops(basket, &stops)?;
+    let prm = Params::load(&ctx.accounts.params)?;
+    prm.require_on(params::FAMILY_STOPS)?;
+    check_stops(&prm, basket, &stops)?;
     if basket.seeded {
-        hold_to_price(&mut stops, ctx.remaining_accounts, false)?;
+        hold_to_price(&prm, &mut stops, ctx.remaining_accounts, false)?;
     }
     let basket_key = basket.key();
     write_stops(&mut ctx.accounts.stop_loss, basket_key, ctx.bumps.stop_loss, &stops);
     Ok(())
 }
 
-/// One stop per asset at most, on assets the basket holds, in range.
-pub(crate) fn check_stops(basket: &Basket, stops: &[StopArgs]) -> Result<()> {
+/// One stop per asset at most, on assets the basket holds, in range (`STOP_MIN_BPS` to
+/// `STOP_MAX_BPS`).
+pub(crate) fn check_stops(prm: &Params, basket: &Basket, stops: &[StopArgs]) -> Result<()> {
     let active = basket.active();
+    let (lo, hi) = prm.stop_range();
     require!(stops.len() <= active.len(), VaultError::BadStop);
     for (i, s) in stops.iter().enumerate() {
         require!(active.iter().any(|c| c.mint == s.mint), VaultError::BadStop);
         require!(stops[..i].iter().all(|o| o.mint != s.mint), VaultError::BadStop);
-        require!((MIN_STOP_BPS..=MAX_STOP_BPS).contains(&s.pct_bps) && s.reference_e12 > 0, VaultError::BadStop);
+        require!((lo..=hi).contains(&s.pct_bps) && s.reference_e12 > 0, VaultError::BadStop);
     }
     Ok(())
 }
@@ -92,11 +97,10 @@ pub(crate) fn check_stops(basket: &Basket, stops: &[StopArgs]) -> Result<()> {
 /// Holds each stop's reference to its asset's fresh posted price (`prices`: each stop's
 /// `AssetPrice`, in order): one above it is refused, or with `lower`, lowered to it (a vote's
 /// stops, written days after they were proposed, can't be proposed again).
-pub(crate) fn hold_to_price(stops: &mut [StopArgs], prices: &[AccountInfo], lower: bool) -> Result<()> {
+pub(crate) fn hold_to_price(prm: &Params, stops: &mut [StopArgs], prices: &[AccountInfo], lower: bool) -> Result<()> {
     require!(prices.len() == stops.len(), VaultError::BadRemainingAccounts);
-    let now = Clock::get()?.unix_timestamp;
     for (s, ai) in stops.iter_mut().zip(prices) {
-        let price = fresh_price(ai, &s.mint, now)?;
+        let price = fresh_price(ai, &s.mint, prm)?;
         if s.reference_e12 > price {
             require!(lower, VaultError::StopAbovePrice);
             s.reference_e12 = price;
@@ -106,13 +110,13 @@ pub(crate) fn hold_to_price(stops: &mut [StopArgs], prices: &[AccountInfo], lowe
 }
 
 /// `mint`'s posted price, read from its `AssetPrice` at `ai`, if fresh.
-fn fresh_price(ai: &AccountInfo, mint: &Pubkey, now: i64) -> Result<u64> {
+fn fresh_price(ai: &AccountInfo, mint: &Pubkey, prm: &Params) -> Result<u64> {
     require_keys_eq!(*ai.owner, crate::ID, VaultError::BadPrice);
     let p = AssetPrice::try_deserialize(&mut &ai.try_borrow_data()?[..])?;
     require_keys_eq!(p.mint, *mint, VaultError::BadPrice);
     let expected = Pubkey::create_program_address(&[PRICE_SEED, mint.as_ref(), &[p.bump]], &crate::ID).map_err(|_| VaultError::BadPrice)?;
     require_keys_eq!(*ai.key, expected, VaultError::BadPrice);
-    require!(p.price_e12 > 0 && now - p.updated_at <= MAX_PRICE_AGE_SECS, VaultError::BadPrice);
+    require!(p.price_e12 > 0 && prm.now - p.updated_at <= prm.secs(params::PRICE_AGE_SECS), VaultError::BadPrice);
     Ok(p.price_e12)
 }
 
@@ -147,10 +151,13 @@ pub fn close_stops(ctx: Context<CloseStops>) -> Result<()> {
 /// remaining accounts, the basket's `Smart` account (a smart basket) and every asset's Verified
 /// record address. Remaining accounts are found by address, in any order.
 pub fn check_stop<'info>(ctx: Context<'_, '_, 'info, 'info, CheckStop<'info>>) -> Result<()> {
-    let now = Clock::get()?.unix_timestamp;
+    let prm = Params::load(&ctx.accounts.params)?;
+    prm.require_on(params::FAMILY_STOPS)?;
+    let now = prm.now;
+    let (confirm, window) = (prm.secs(params::STOP_CONFIRM_SECS), prm.stop_window());
     let mint = ctx.accounts.asset_price.mint;
     let price = ctx.accounts.asset_price.price_e12;
-    require!(price > 0 && now - ctx.accounts.asset_price.updated_at <= MAX_PRICE_AGE_SECS, VaultError::BadPrice);
+    require!(price > 0 && now - ctx.accounts.asset_price.updated_at <= prm.secs(params::PRICE_AGE_SECS), VaultError::BadPrice);
 
     let basket_key = ctx.accounts.basket.key();
     let extra = ctx.remaining_accounts;
@@ -160,7 +167,7 @@ pub fn check_stop<'info>(ctx: Context<'_, '_, 'info, 'info, CheckStop<'info>>) -
     let i = basket.active().iter().position(|c| c.mint == mint).ok_or(VaultError::StopInactive)?;
     require!(basket.constituents[i].target_bps > 0, VaultError::StopInactive);
 
-    let held = if st.stops[k].trailing { held_reference(extra, &mint, now)? } else { None };
+    let held = if st.stops[k].trailing { held_reference(extra, &mint, now, confirm)? } else { None };
     let s = &mut st.stops[k];
     if let Some(held) = held {
         let up = price.min(held);
@@ -177,18 +184,18 @@ pub fn check_stop<'info>(ctx: Context<'_, '_, 'info, 'info, CheckStop<'info>>) -
         }
         return Ok(());
     }
-    if s.armed_at == 0 || now - s.armed_at > STOP_ARM_WINDOW_SECS {
+    if s.armed_at == 0 || now - s.armed_at > window {
         s.armed_at = now;
         emit!(StopArmed { basket: basket_key, mint, price_e12: price, level_e12 });
         return Ok(());
     }
-    if now - s.armed_at < STOP_CONFIRM_SECS {
+    if now - s.armed_at < confirm {
         return Ok(());
     }
 
     // Fire: the asset to 0%, the rest scaled up to fill the basket, within the caps if any.
     let before: Vec<u16> = basket.active().iter().map(|c| c.target_bps).collect();
-    let caps = weight_caps(basket, &basket_key, extra)?;
+    let caps = weight_caps(&prm, basket, &basket_key, extra)?;
     let after = rescale(&before, i, caps.as_deref())?;
     for (j, t) in after.iter().enumerate() {
         basket.constituents[j].target_bps = *t;
@@ -201,19 +208,19 @@ pub fn check_stop<'info>(ctx: Context<'_, '_, 'info, 'info, CheckStop<'info>>) -
 
 /// The asset's `PriceGuard` reference, if its guard is among `extra` and the reference is at least
 /// STOP_CONFIRM_SECS old: a price posted then that every price since has been held to.
-fn held_reference(extra: &[AccountInfo], mint: &Pubkey, now: i64) -> Result<Option<u64>> {
+fn held_reference(extra: &[AccountInfo], mint: &Pubkey, now: i64, confirm: i64) -> Result<Option<u64>> {
     let (expected, _) = Pubkey::find_program_address(&[GUARD_SEED, mint.as_ref()], &crate::ID);
     let Some(ai) = extra.iter().find(|a| *a.key == expected) else { return Ok(None) };
     require_keys_eq!(*ai.owner, crate::ID, VaultError::BadPrice);
     let g = PriceGuard::try_deserialize(&mut &ai.try_borrow_data()?[..])?;
-    Ok((g.reference_e12 > 0 && now - g.reference_at >= STOP_CONFIRM_SECS).then_some(g.reference_e12))
+    Ok((g.reference_e12 > 0 && now - g.reference_at >= confirm).then_some(g.reference_e12))
 }
 
 /// The most each asset may weigh once a stop fires: a smart basket's guardrail caps, a vote-run
 /// one's the same code ceilings a Reweight is held to, and none (None) on any other basket. The
 /// Verified records and the `Smart` account are found by address among `extra`; a missing one is
 /// refused rather than guessed, so a firing can't be made to move less than its rule says.
-fn weight_caps(basket: &Basket, basket_key: &Pubkey, extra: &[AccountInfo]) -> Result<Option<Vec<u16>>> {
+fn weight_caps(prm: &Params, basket: &Basket, basket_key: &Pubkey, extra: &[AccountInfo]) -> Result<Option<Vec<u16>>> {
     let (weight, unverified) = match basket.control {
         ControlMode::Smart => {
             let (expected, _) = Pubkey::find_program_address(&[SMART_SEED, basket_key.as_ref()], &crate::ID);
@@ -222,7 +229,10 @@ fn weight_caps(basket: &Basket, basket_key: &Pubkey, extra: &[AccountInfo]) -> R
             let smart = Smart::try_deserialize(&mut &ai.try_borrow_data()?[..])?;
             (smart.guard.max_weight_bps, smart.guard.max_unverified_bps)
         }
-        ControlMode::Community if basket.by_vote() => (SMART_MAX_WEIGHT_BPS, SMART_MAX_UNVERIFIED_BPS),
+        ControlMode::Community if basket.by_vote() => {
+            let (_, _, weight, unverified) = prm.smart_caps();
+            (weight, unverified)
+        }
         _ => return Ok(None),
     };
     let mut caps = Vec::with_capacity(basket.constituent_count as usize);
@@ -272,6 +282,9 @@ pub struct SetStops<'info> {
     #[account(init_if_needed, payer = creator, space = 8 + StopLoss::INIT_SPACE, seeds = [STOP_SEED, basket.key().as_ref()], bump)]
     pub stop_loss: Account<'info, StopLoss>,
     pub system_program: Program<'info, System>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -291,4 +304,7 @@ pub struct CheckStop<'info> {
     pub stop_loss: Account<'info, StopLoss>,
     #[account(seeds = [PRICE_SEED, asset_price.mint.as_ref()], bump = asset_price.bump)]
     pub asset_price: Account<'info, AssetPrice>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }

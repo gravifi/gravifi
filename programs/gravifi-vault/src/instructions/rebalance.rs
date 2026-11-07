@@ -7,6 +7,7 @@ use anchor_lang::solana_program::sysvar::instructions::{load_current_index_check
 use anchor_spl::token_interface::{Mint as MintI, TokenInterface};
 
 use crate::errors::VaultError;
+use crate::params::{self, Params, PARAMS_ID};
 use crate::state::*;
 use crate::token_util::*;
 use crate::valuation::*;
@@ -59,16 +60,18 @@ fn start_slice<'info>(
     refund: u64,
     via: bool,
 ) -> Result<()> {
-    let now = Clock::get()?.unix_timestamp;
+    let prm = Params::load(&ctx.accounts.params)?;
+    prm.require_on(params::FAMILY_REBALANCE)?;
+    let now = prm.now;
     let basket = &ctx.accounts.basket;
     require!(basket.seeded, VaultError::NotSeeded);
     let n = basket.constituent_count as usize;
     let (s, b) = (sell_index as usize, buy_index as usize);
     require!(s < n && b < n && s != b && sell_amount > 0, VaultError::BadParameter);
-    require!(max_slippage_bps <= MAX_REBALANCE_SLIPPAGE_BPS, VaultError::BadParameter);
+    require!(max_slippage_bps <= prm.bps(params::REBALANCE_SLIPPAGE_BPS), VaultError::BadParameter);
     require!(!ctx.accounts.rebalance_state.pending, VaultError::RebalancePending);
 
-    let book = value_book(basket, ctx.remaining_accounts, now)?;
+    let book = value_book(basket, ctx.remaining_accounts, &prm)?;
     let drift = drift_bps(basket, &book)?;
     let max_drift = drift.iter().map(|d| d.abs()).max().unwrap_or(0);
     let time_due = basket.interval_secs > 0 && now >= basket.last_rebalance.saturating_add(basket.interval_secs);
@@ -122,9 +125,9 @@ fn start_slice<'info>(
         .ok_or(VaultError::MathOverflow)?
         / BPS_DENOM
         + total / BPS_DENOM;
-    let cap = room.min(total * if leaving { MAX_LEAVING_SLICE_BPS } else { MAX_SLICE_BPS } / BPS_DENOM);
+    let cap = room.min(total * prm.wide(if leaving { params::LEAVING_SLICE_BPS } else { params::SLICE_BPS }) / BPS_DENOM);
     require!(sell_value <= cap, VaultError::SliceTooLarge);
-    keeper_refund(refund, book.rows[s].price_e12, book.rows[s].decimals)?;
+    keeper_refund(&prm, refund, book.rows[s].price_e12, book.rows[s].decimals)?;
     require!(sell_amount.checked_add(refund).ok_or(VaultError::MathOverflow)? <= book.rows[s].balance, VaultError::SliceTooLarge);
 
     // The oracle floor: the least the vault accepts back, in the bought token's units.
@@ -134,7 +137,7 @@ fn start_slice<'info>(
     // out is always allowed.
     require_keys_eq!(ctx.accounts.buy_mint.key(), basket.constituents[b].mint, VaultError::ConstituentMismatch);
     let sell_fee = TransferFee::of(&ctx.accounts.sell_mint.to_account_info())?;
-    let min_buy = oracle_floor(sell_value, max_slippage_bps, sell_fee.bps, &ctx.accounts.buy_mint.to_account_info(), &book.rows[b])?;
+    let min_buy = oracle_floor(&prm, sell_value, max_slippage_bps, sell_fee.bps, &ctx.accounts.buy_mint.to_account_info(), &book.rows[b])?;
 
     let basket_key = basket.key();
     assert_finish_follows(&ctx.accounts.instructions.to_account_info(), &basket_key)?;
@@ -185,12 +188,13 @@ fn start_slice<'info>(
 ///
 /// Remaining accounts: [vault_ata, asset_price] per constituent, as in the start.
 pub fn rebalance_finish<'info>(ctx: Context<'_, '_, 'info, 'info, RebalanceFinish<'info>>) -> Result<()> {
-    let now = Clock::get()?.unix_timestamp;
+    let prm = Params::load(&ctx.accounts.params)?;
+    let now = prm.now;
     let st = &ctx.accounts.rebalance_state;
     require!(st.pending && st.pending_slot == Clock::get()?.slot, VaultError::NoRebalancePending);
     let (s, b) = (st.sell_index as usize, st.buy_index as usize);
 
-    let book = value_book(&ctx.accounts.basket, ctx.remaining_accounts, now)?;
+    let book = value_book(&ctx.accounts.basket, ctx.remaining_accounts, &prm)?;
     let received = book.rows[b].balance.saturating_sub(st.buy_balance_before);
     require!(received >= st.min_buy, VaultError::BelowOracleFloor);
     let drift = drift_bps(&ctx.accounts.basket, &book)?;
@@ -238,12 +242,14 @@ pub fn sweep_start<'info>(
     max_slippage_bps: u16,
     refund: u64,
 ) -> Result<()> {
-    let now = Clock::get()?.unix_timestamp;
+    let prm = Params::load(&ctx.accounts.params)?;
+    prm.require_on(params::FAMILY_REBALANCE)?;
+    let now = prm.now;
     let basket = &ctx.accounts.basket;
     require!(basket.seeded, VaultError::NotSeeded);
     let b = buy_index as usize;
     require!(b < basket.constituent_count as usize && sell_amount > 0, VaultError::BadParameter);
-    require!(max_slippage_bps <= MAX_REBALANCE_SLIPPAGE_BPS, VaultError::BadParameter);
+    require!(max_slippage_bps <= prm.bps(params::REBALANCE_SLIPPAGE_BPS), VaultError::BadParameter);
     require!(!ctx.accounts.rebalance_state.pending, VaultError::RebalancePending);
 
     // Only a token outside the books: the basket's own are rebalanced, and its shares aren't
@@ -255,13 +261,13 @@ pub fn sweep_start<'info>(
     require!(sell_amount.checked_add(refund).ok_or(VaultError::MathOverflow)? <= held, VaultError::SliceTooLarge);
 
     let price = &ctx.accounts.stray_price;
-    require!(price.price_e12 > 0 && now - price.updated_at <= MAX_PRICE_AGE_SECS, VaultError::BadPrice);
-    keeper_refund(refund, price.price_e12, ctx.accounts.stray_mint.decimals)?;
-    let book = value_book(basket, ctx.remaining_accounts, now)?;
+    require!(price.price_e12 > 0 && now - price.updated_at <= prm.secs(params::PRICE_AGE_SECS), VaultError::BadPrice);
+    keeper_refund(&prm, refund, price.price_e12, ctx.accounts.stray_mint.decimals)?;
+    let book = value_book(basket, ctx.remaining_accounts, &prm)?;
     require_keys_eq!(ctx.accounts.buy_mint.key(), basket.constituents[b].mint, VaultError::ConstituentMismatch);
     let sell_value = token_value(sell_amount, price.price_e12, ctx.accounts.stray_mint.decimals)?;
     let sell_fee = TransferFee::of(&ctx.accounts.stray_mint.to_account_info())?;
-    let min_buy = oracle_floor(sell_value, max_slippage_bps, sell_fee.bps, &ctx.accounts.buy_mint.to_account_info(), &book.rows[b])?;
+    let min_buy = oracle_floor(&prm, sell_value, max_slippage_bps, sell_fee.bps, &ctx.accounts.buy_mint.to_account_info(), &book.rows[b])?;
 
     assert_finish_follows(&ctx.accounts.instructions.to_account_info(), &basket_key)?;
 
@@ -300,11 +306,11 @@ pub fn sweep_start<'info>(
 /// allows for both. No new money goes into a sleeve whose fee is over the cap; selling one out
 /// is always allowed. A floor of zero would accept nothing back, so a slice that small is
 /// refused.
-fn oracle_floor(sell_value: u128, max_slippage_bps: u16, sell_fee_bps: u16, buy_mint: &AccountInfo, buy: &Row) -> Result<u64> {
+fn oracle_floor(prm: &Params, sell_value: u128, max_slippage_bps: u16, sell_fee_bps: u16, buy_mint: &AccountInfo, buy: &Row) -> Result<u64> {
     // A sleeve the books count as worth nothing (`DEAD_PRICE_SECS`) has no price to buy at.
     require!(buy.price_e12 > 0, VaultError::BadPrice);
     let buy_fee = TransferFee::of(buy_mint)?;
-    buy_fee.assert_within_cap()?;
+    buy_fee.assert_within_cap(prm.bps(params::TRANSFER_FEE_CAP_BPS))?;
     let floor_value = sell_value * (BPS_DENOM - max_slippage_bps as u128) / BPS_DENOM * (BPS_DENOM - sell_fee_bps as u128) / BPS_DENOM
         * (BPS_DENOM - buy_fee.bps as u128)
         / BPS_DENOM;
@@ -320,10 +326,10 @@ fn oracle_floor(sell_value: u128, max_slippage_bps: u16, sell_fee_bps: u16, buy_
 }
 
 /// What a slice pays the rebalancer back for running it: `refund` of the sold token, at its
-/// oracle price, worth at most `MAX_KEEPER_REFUND_E12`. The keeper asks only for what it spent;
-/// the cap is what holds if its key leaks.
-pub(crate) fn keeper_refund(refund: u64, price_e12: u64, decimals: u8) -> Result<()> {
-    require!(token_value(refund, price_e12, decimals)? <= MAX_KEEPER_REFUND_E12, VaultError::RefundTooLarge);
+/// oracle price, worth at most `KEEPER_REFUND_E12` ($0.05). The keeper asks only for what it
+/// spent; the cap is what holds if its key leaks.
+pub(crate) fn keeper_refund(prm: &Params, refund: u64, price_e12: u64, decimals: u8) -> Result<()> {
+    require!(token_value(refund, price_e12, decimals)? <= prm.wide(params::KEEPER_REFUND_E12), VaultError::RefundTooLarge);
     Ok(())
 }
 
@@ -377,6 +383,9 @@ pub struct RebalanceStart<'info> {
     #[account(address = anchor_lang::solana_program::sysvar::instructions::ID)]
     pub instructions: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -389,6 +398,9 @@ pub struct RebalanceFinish<'info> {
     pub share_mint: InterfaceAccount<'info, MintI>,
     #[account(mut, seeds = [REBALANCE_SEED, basket.key().as_ref()], bump = rebalance_state.bump, has_one = basket)]
     pub rebalance_state: Account<'info, RebalanceState>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -420,4 +432,7 @@ pub struct SweepStart<'info> {
     #[account(address = anchor_lang::solana_program::sysvar::instructions::ID)]
     pub instructions: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }

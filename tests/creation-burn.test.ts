@@ -19,7 +19,7 @@ import {
   supply,
   type Ctx,
 } from "./helpers.ts";
-import { listAsset, setCreationBurn, world, type World } from "./fixtures.ts";
+import { listAsset, setCreationBurn, world, type World, protocolFeesIx, setRoleIx, ROLE } from "./fixtures.ts";
 import { Keypair, PublicKey } from "@solana/web3.js";
 
 // The test GRAVI mint has 9 decimals.
@@ -181,7 +181,7 @@ describe("creation burn", () => {
 
 describe("burn-exempt wallet", () => {
   const exemptIx = (w: World, wallet: PublicKey, authority = w.ctx.payer) =>
-    w.ctx.vault.methods.setBurnExempt(wallet).accountsPartial({ authority: authority.publicKey, protocol: pda.protocol() });
+    setRoleIx(w.ctx, ROLE.burnExempt, wallet, authority.publicKey);
 
   it("only the protocol authority names it", async () => {
     const w = await world();
@@ -214,7 +214,7 @@ describe("burn-exempt wallet", () => {
     await rpc(w.ctx, exemptIx(w, team.publicKey));
     await setCreationBurn(w.ctx, w.graviMint, GRAVI);
     // A protocol setting written after it leaves the wallet in place.
-    await rpc(w.ctx, w.ctx.vault.methods.setProtocolFees(10, 5_000).accountsPartial({ authority: w.ctx.payer.publicKey, protocol: pda.protocol() }));
+    await rpc(w.ctx, protocolFeesIx(w.ctx, 10, 5_000));
     await rpc(w.ctx, createIx(w, team, null), [team]);
 
     const next = fund(w.ctx);
@@ -271,7 +271,7 @@ describe("adding an asset", () => {
     await setCreationBurn(w.ctx, w.graviMint, GRAVI);
     await rpc(
       w.ctx,
-      w.ctx.vault.methods.setBurnExempt(w.creator.publicKey).accountsPartial({ authority: w.ctx.payer.publicKey, protocol: pda.protocol() }),
+      setRoleIx(w.ctx, ROLE.burnExempt, w.creator.publicKey, w.ctx.payer.publicKey),
     );
     await rpc(w.ctx, addIx(w, await assetC(w), null), [w.creator]);
     assert.equal((await creationBurn(w.ctx)).totalBurned, 0n);

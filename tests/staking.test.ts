@@ -24,7 +24,7 @@ import {
   warp,
   type Ctx,
 } from "./helpers.ts";
-import { NO_GRAVI, feeShares, fundHolder, listAsset, mintIx, setCreationBurn, world } from "./fixtures.ts";
+import { NO_GRAVI, feeShares, fundHolder, listAsset, mintIx, setCreationBurn, world, initKeepers, protocolFeesIx, setParamIx, CONFIG, setParam, PARAM, PARAM_NOTICE, FAMILY } from "./fixtures.ts";
 
 const GRAVI_PROGRAM = TOKEN_2022_PROGRAM_ID;
 const ONE_GRAVI = 1_000_000n; // mainnet's: Token-2022, 6 decimals
@@ -44,10 +44,10 @@ async function stakeWorld(opts: { on?: boolean } = {}) {
   const w = await world({ gravi: { program: GRAVI_PROGRAM, decimals: 6 } });
   const { ctx } = w;
   warp(ctx, 1_000_000); // LiteSVM's clock starts at 0, which a real one never reads
-  await rpc(ctx, ctx.vault.methods.setProtocolFees(40, 5_000).accountsPartial({ authority: ctx.payer.publicKey, protocol: pda.protocol() }));
+  await rpc(ctx, protocolFeesIx(ctx, 40, 5_000));
   nativeMint(ctx);
   const keeper = fund(ctx);
-  await rpc(ctx, ctx.vault.methods.initKeepers(keeper.publicKey, keeper.publicKey).accountsPartial({ authority: ctx.payer.publicKey, keepers: pda.keepers() }));
+  await initKeepers(ctx, keeper.publicKey, keeper.publicKey);
   const poolGravi = await createAta(ctx, w.graviMint, pda.stakePool(), GRAVI_PROGRAM);
   const pot = await createAta(ctx, NATIVE_MINT, pda.stakeRewards(), TOKEN_PROGRAM_ID);
   const keeperSol = await createAta(ctx, NATIVE_MINT, keeper.publicKey, TOKEN_PROGRAM_ID);
@@ -286,10 +286,60 @@ describe("staking: locks", () => {
     );
   });
 
+  it("the warm-up and the unstaking wait are params, fixed on the stake when each starts", async () => {
+    const w = await stakeWorld();
+    const early = await staker(w);
+    await stake(w, early, 1n);
+    // A day's warm-up and three days out, after their week of notice.
+    await setParam(w.ctx, PARAM.STAKE_WARMUP_SECS, BigInt(DAY));
+    await setParam(w.ctx, PARAM.STAKE_UNSTAKE_SECS, BigInt(3 * DAY));
+    warp(w.ctx, PARAM_NOTICE);
+    const late = await staker(w);
+    await stake(w, late, 1n);
+    warp(w.ctx, DAY - 1);
+    await refresh(w, late);
+    assert.equal(n((await stakeOf(w, late)).counted), 0n);
+    warp(w.ctx, 1);
+    await refresh(w, late);
+    assert.equal(n((await stakeOf(w, late)).counted), 1n, "a day, the warm-up in force when it was staked");
+    // Unstaking now waits three days.
+    await unstake(w, late, 1n);
+    warp(w.ctx, 3 * DAY - 1);
+    await expectError(withdraw(w, late), "UnstakeWaiting");
+    warp(w.ctx, 1);
+    await withdraw(w, late);
+    // Back to two days' warm-up: a stake warming under one day keeps its day.
+    const third = await staker(w);
+    await stake(w, third, 1n);
+    await setParam(w.ctx, PARAM.STAKE_WARMUP_SECS, 0n);
+    warp(w.ctx, PARAM_NOTICE);
+    await refresh(w, third);
+    assert.equal(n((await stakeOf(w, third)).counted), 1n);
+    const fourth = await staker(w);
+    await stake(w, fourth, 1n);
+    warp(w.ctx, DAY);
+    await refresh(w, fourth);
+    assert.equal(n((await stakeOf(w, fourth)).counted), 0n, "two days again for a new stake");
+    // The stake that started first, under the constant, counted after two days long ago.
+    assert.equal(n((await stakeOf(w, early)).amount), 1n);
+  });
+
+  it("the staking switch stops new stakes, never a way out", async () => {
+    const w = await stakeWorld();
+    const who = await warmed(w);
+    await setParam(w.ctx, PARAM.KILL, BigInt(FAMILY.staking));
+    await expectError(stake(w, who, 1n), "FeatureOff");
+    await unstake(w, who, MILLION);
+    warp(w.ctx, 7 * DAY);
+    await withdraw(w, who);
+    await setParam(w.ctx, PARAM.KILL, 0n);
+    await stake(w, who, 1n);
+  });
+
   it("the threshold: lower applies now, higher after a week, under a 10M ceiling, authority only", async () => {
     const w = await stakeWorld();
     const set = (amount: bigint, authority = w.ctx.payer) =>
-      rpc(w.ctx, w.ctx.vault.methods.setStakeThreshold(new BN(amount.toString())).accountsPartial({ authority: authority.publicKey, protocol: pda.protocol(), pool: pda.stakePool() }), [authority]);
+      rpc(w.ctx, setParamIx(w.ctx, CONFIG.stakeThreshold, amount, [pda.stakePool()], authority.publicKey), [authority]);
     await expectError(set(5n * MILLION, fund(w.ctx)), "NotProtocolAuthority");
     await expectError(set(10n * MILLION + 1n), "BadStakeThreshold");
     await expectError(set(0n), "BadStakeThreshold");
@@ -637,7 +687,7 @@ describe("staking: free baskets", () => {
   it("making a basket smart while creating it is free with a free basket a day, without using one", async () => {
     const w = await stakeWorld();
     await setCreationBurn(w.ctx, w.graviMint, BURN);
-    await rpc(w.ctx, w.ctx.vault.methods.setSmartBurn(new BN((50_000n * ONE_GRAVI).toString())).accountsPartial({ authority: w.ctx.payer.publicKey, protocol: pda.protocol(), graviMint: w.graviMint }));
+    await rpc(w.ctx, setParamIx(w.ctx, CONFIG.smartBurn, 50_000n * ONE_GRAVI, [w.graviMint]));
     const who = await warmed(w);
     // Four assets at 25%, within the guardrails (two can't be: 35% each is 70%).
     const more: PublicKey[] = [];

@@ -11,16 +11,11 @@ use anchor_spl::token_interface::{self, Mint as MintI, TokenInterface};
 use crate::errors::VaultError;
 use crate::instructions::basket::{apply_split, burn_gravi, check_addable, check_policy, drop_emptied, GraviAccounts};
 use crate::instructions::smart::{check_guardrails, is_verified};
-use crate::instructions::staking::{burn_skip, set_protocol_flag, FreeUse};
+use crate::instructions::staking::{burn_skip, FreeUse};
 use crate::instructions::stops::{check_stops, hold_to_price, write_stops};
+use crate::params::{self, Params, PARAMS_ID};
 use crate::state::*;
 use crate::token_util::*;
-
-/// Opens or closes the door to Community mode. Baskets already in carry on. Protocol authority.
-pub fn set_community_open(ctx: Context<SetCommunityOpen>, open: bool) -> Result<()> {
-    let a = &ctx.accounts;
-    set_protocol_flag(&a.protocol.to_account_info(), &a.authority.to_account_info(), &a.system_program.to_account_info(), FLAG_COMMUNITY, open)
-}
 
 /// Stakes `amount` of a basket's shares in its escrow. Weight builds over VOTE_RAMP_SECS.
 pub fn share_stake(ctx: Context<ShareStakeIn>, amount: u64) -> Result<()> {
@@ -81,6 +76,7 @@ pub fn share_unstake(ctx: Context<ShareStakeOut>, amount: u64) -> Result<()> {
 /// Hands a seeded, public, creator-managed basket to its holders. One way: going back takes a
 /// vote. The creator pays the voting state's rent.
 pub fn enter_community(ctx: Context<EnterCommunity>) -> Result<()> {
+    Params::load(&ctx.accounts.params)?.require_on(params::FAMILY_COMMUNITY)?;
     let a = &mut *ctx.accounts;
     require!(protocol_flags(&a.protocol.to_account_info()) & FLAG_COMMUNITY != 0, VaultError::CommunityClosed);
     let b = &mut a.basket;
@@ -104,7 +100,7 @@ fn mints_hash(basket: &Basket) -> [u8; 32] {
 
 /// Whether this basket, as it stands, can take this change. Run on proposing, so nobody votes on
 /// one that can't happen; the execute checks what may have changed since.
-fn check_action(basket: &Basket, action: &ProposalAction) -> Result<()> {
+fn check_action(prm: &Params, basket: &Basket, action: &ProposalAction) -> Result<()> {
     let voting = basket.control == ControlMode::Community;
     match action {
         ProposalAction::Reweight { target_bps, mints_hash: pinned } => {
@@ -114,14 +110,14 @@ fn check_action(basket: &Basket, action: &ProposalAction) -> Result<()> {
             require!(sum == BPS_DENOM as u32, VaultError::WeightsNotNormalised);
             require!(target_bps.iter().filter(|t| **t > 0).count() >= 2, VaultError::AssetCountOutOfRange);
             let change: u32 = target_bps.iter().zip(basket.active()).map(|(new, c)| new.saturating_sub(c.target_bps) as u32).sum();
-            require!(change <= SMART_MAX_DAY_BPS as u32, VaultError::TurnoverDayCap);
+            require!(change <= prm.smart_caps().0 as u32, VaultError::TurnoverDayCap);
         }
         ProposalAction::AddAsset { mint } => {
             require!(voting && (basket.constituent_count as usize) < MAX_LAUNCH_CONSTITUENTS, VaultError::BadProposal);
             require!(basket.active().iter().all(|c| c.mint != *mint), VaultError::DuplicateConstituent);
         }
-        ProposalAction::Policy { rebalance_mode, interval_secs, drift_bps } => check_policy(*rebalance_mode, *interval_secs, *drift_bps)?,
-        ProposalAction::Stops { stops } => check_stops(basket, stops)?,
+        ProposalAction::Policy { rebalance_mode, interval_secs, drift_bps } => check_policy(prm, *rebalance_mode, *interval_secs, *drift_bps)?,
+        ProposalAction::Stops { stops } => check_stops(prm, basket, stops)?,
         ProposalAction::CreatorFee { mgmt_fee_bps } => require!(*mgmt_fee_bps < basket.mgmt_fee_bps, VaultError::BadProposal),
         ProposalAction::CreatorCut { bps } => require!(*bps < basket.cut_bps(), VaultError::BadProposal),
         ProposalAction::Split { numerator, denominator } => {
@@ -129,11 +125,11 @@ fn check_action(basket: &Basket, action: &ProposalAction) -> Result<()> {
         }
         ProposalAction::GoSmart { mandate_hash, guard } => {
             require!(voting, VaultError::BadProposal);
-            check_guardrails(guard, mandate_hash)?;
+            check_guardrails(prm, guard, mandate_hash)?;
         }
         ProposalAction::Mandate { mandate_hash, guard } => {
             require!(!voting, VaultError::BadProposal);
-            check_guardrails(guard, mandate_hash)?;
+            check_guardrails(prm, guard, mandate_hash)?;
         }
         ProposalAction::Leave => {}
     }
@@ -147,13 +143,15 @@ fn check_action(basket: &Basket, action: &ProposalAction) -> Result<()> {
 /// proposer, unless their GRAVI stake has a free basket left today, which this uses (its accounts
 /// follow in the remaining accounts); it's burned win or lose.
 pub fn community_propose<'info>(ctx: Context<'_, '_, 'info, 'info, CommunityPropose<'info>>, action: ProposalAction) -> Result<()> {
-    let now = Clock::get()?.unix_timestamp;
+    let prm = Params::load(&ctx.accounts.params)?;
+    prm.require_on(params::FAMILY_COMMUNITY)?;
+    let now = prm.now;
     let a = &mut *ctx.accounts;
     require!(a.basket.by_vote(), VaultError::NotCommunity);
-    require!(a.community.open < MAX_OPEN_PROPOSALS, VaultError::TooManyProposals);
-    check_action(&a.basket, &action)?;
+    require!((a.community.open as u64) < prm.get(params::MAX_OPEN_PROPOSALS), VaultError::TooManyProposals);
+    check_action(&prm, &a.basket, &action)?;
     let supply = a.share_mint.supply;
-    let need = (supply as u128 * PROPOSE_MIN_BPS).div_ceil(BPS_DENOM);
+    let need = (supply as u128 * prm.wide(params::PROPOSE_MIN_BPS)).div_ceil(BPS_DENOM);
     require!(a.share_stake.power_at(now)? as u128 >= need, VaultError::BelowProposalWeight);
     // Created here, or still open from an earlier proposal of theirs.
     require!(a.open_proposal.basket == Pubkey::default(), VaultError::ProposerHasOpenProposal);
@@ -186,6 +184,17 @@ pub fn community_propose<'info>(ctx: Context<'_, '_, 'info, 'info, CommunityProp
     p.votes_against = 0;
     p.executed = false;
     p.action = action;
+    // Its windows and vote rules, as the params stand now, written on it for good.
+    let vote_end = now + prm.secs(params::VOTE_PERIOD_SECS);
+    let exec_after = vote_end + prm.secs(params::VOTE_TIMELOCK_SECS);
+    let terms = Terms {
+        vote_end,
+        exec_after,
+        exec_until: exec_after + prm.secs(params::VOTE_GRACE_SECS),
+        quorum_bps: prm.wide(params::QUORUM_BPS),
+        super_bps: prm.wide(params::SUPERMAJORITY_BPS),
+    };
+    p.write_terms(&p.to_account_info(), &terms)?;
     let o = &mut a.open_proposal;
     o.bump = ctx.bumps.open_proposal;
     o.basket = a.basket.key();
@@ -201,7 +210,7 @@ pub fn community_propose<'info>(ctx: Context<'_, '_, 'info, 'info, CommunityProp
 pub fn community_vote(ctx: Context<CommunityVote>, support: bool) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     let a = &mut *ctx.accounts;
-    let end = a.proposal.vote_end();
+    let end = a.proposal.terms(&a.proposal.to_account_info())?.vote_end;
     require!(now < end, VaultError::VotingOver);
     let power = a.share_stake.power_at(a.proposal.created_at)?;
     require!(power > 0, VaultError::NoVotingWeight);
@@ -217,12 +226,17 @@ pub fn community_vote(ctx: Context<CommunityVote>, support: bool) -> Result<()> 
     Ok(())
 }
 
-/// Checks a proposal may run now and marks it run.
-fn take_ready(basket: &Basket, community: &Community, proposal: &mut Proposal) -> Result<()> {
-    let now = Clock::get()?.unix_timestamp;
+/// Checks a proposal may run now, and the community kill switch (unless it hands the basket back),
+/// and marks it run.
+fn take_ready(basket: &Basket, community: &Community, proposal: &mut Account<Proposal>, prm: &Params) -> Result<()> {
+    let now = prm.now;
     require!(basket.by_vote(), VaultError::NotCommunity);
+    if !matches!(proposal.action, ProposalAction::Leave) {
+        prm.require_on(params::FAMILY_COMMUNITY)?;
+    }
+    let t = proposal.terms(&proposal.to_account_info())?;
     require!(
-        proposal.epoch == community.epoch && !proposal.executed && now >= proposal.exec_after() && now <= proposal.exec_until() && proposal.passed(),
+        proposal.epoch == community.epoch && !proposal.executed && now >= t.exec_after && now <= t.exec_until && proposal.passed(&t),
         VaultError::NotExecutable
     );
     proposal.executed = true;
@@ -243,8 +257,10 @@ fn leave(basket: &mut Basket, community: &mut Community) -> Result<()> {
 /// accrued this second), as the creator's app runs it before `set_policy`: what the old fee
 /// streamed would otherwise be forfeit, and anyone can execute.
 pub fn community_execute<'info>(ctx: Context<'_, '_, 'info, 'info, CommunityExecute<'info>>) -> Result<()> {
+    let prm = Params::load(&ctx.accounts.params)?;
+    let (day_cap, week_cap, weight_cap, unverified_cap) = prm.smart_caps();
     let a = &mut *ctx.accounts;
-    take_ready(&a.basket, &a.community, &mut a.proposal)?;
+    take_ready(&a.basket, &a.community, &mut a.proposal, &prm)?;
     match &a.proposal.action {
         ProposalAction::Reweight { target_bps, mints_hash: pinned } => {
             let b = &mut a.basket;
@@ -255,15 +271,15 @@ pub fn community_execute<'info>(ctx: Context<'_, '_, 'info, 'info, CommunityExec
             let mut change: u32 = 0;
             for i in 0..n {
                 let (old, new) = (b.constituents[i].target_bps, target_bps[i]);
-                let cap = if is_verified(&ctx.remaining_accounts[i], &b.constituents[i].mint)? { SMART_MAX_WEIGHT_BPS } else { SMART_MAX_UNVERIFIED_BPS };
+                let cap = if is_verified(&ctx.remaining_accounts[i], &b.constituents[i].mint)? { weight_cap } else { unverified_cap };
                 require!(new <= cap || new <= old, VaultError::WeightAboveCap);
                 change += new.saturating_sub(old) as u32;
             }
             let c: &mut Community = &mut a.community;
-            advance_window(&mut c.hour, &mut c.turnover, Clock::get()?.unix_timestamp / 3_600);
+            advance_window(&mut c.hour, &mut c.turnover, prm.now / 3_600);
             let (day, week) = window_used(c.hour, &c.turnover);
-            require!(day + change <= SMART_MAX_DAY_BPS as u32, VaultError::TurnoverDayCap);
-            require!(week + change <= SMART_MAX_WEEK_BPS as u32, VaultError::TurnoverWeekCap);
+            require!(day + change <= day_cap as u32, VaultError::TurnoverDayCap);
+            require!(week + change <= week_cap as u32, VaultError::TurnoverWeekCap);
             let k = c.hour.rem_euclid(TURNOVER_HOURS as i64) as usize;
             c.turnover[k] += change as u16;
             c.changes = c.changes.saturating_add(1);
@@ -272,7 +288,7 @@ pub fn community_execute<'info>(ctx: Context<'_, '_, 'info, 'info, CommunityExec
             }
         }
         ProposalAction::Policy { rebalance_mode, interval_secs, drift_bps } => {
-            check_policy(*rebalance_mode, *interval_secs, *drift_bps)?;
+            check_policy(&prm, *rebalance_mode, *interval_secs, *drift_bps)?;
             let b = &mut a.basket;
             b.rebalance_mode = *rebalance_mode;
             b.interval_secs = *interval_secs;
@@ -304,12 +320,13 @@ pub fn community_execute<'info>(ctx: Context<'_, '_, 'info, 'info, CommunityExec
 /// basket's vault for it must exist. Permissionless. Nothing can be removed from the basket for
 /// REMOVE_GRACE_SECS after (`community_remove`), so the Reweight has time to run.
 pub fn community_execute_add(ctx: Context<CommunityExecuteAdd>) -> Result<()> {
+    let prm = Params::load(&ctx.accounts.params)?;
     let a = &mut *ctx.accounts;
-    take_ready(&a.basket, &a.community, &mut a.proposal)?;
+    take_ready(&a.basket, &a.community, &mut a.proposal, &prm)?;
     let ProposalAction::AddAsset { mint } = a.proposal.action else { return err!(VaultError::BadProposal) };
     require!(a.basket.control == ControlMode::Community, VaultError::NotExecutable);
     require_keys_eq!(a.mint.key(), mint, VaultError::ConstituentMismatch);
-    check_addable(&a.basket, &a.mint.to_account_info(), &a.asset_entry.to_account_info(), &a.vault.to_account_info())?;
+    check_addable(&a.basket, &a.mint.to_account_info(), &a.asset_entry.to_account_info(), &a.vault.to_account_info(), &prm)?;
     a.basket.constituents.push(Constituent { mint, target_bps: 0, units_per_share: 0 });
     a.basket.constituent_count += 1;
     a.basket.set_vote_added_at(Clock::get()?.unix_timestamp);
@@ -318,22 +335,25 @@ pub fn community_execute_add(ctx: Context<CommunityExecuteAdd>) -> Result<()> {
 
 /// Runs a passed Split. Permissionless.
 pub fn community_execute_split(ctx: Context<CommunityExecuteSplit>) -> Result<()> {
+    let prm = Params::load(&ctx.accounts.params)?;
     let a = &mut *ctx.accounts;
-    take_ready(&a.basket, &a.community, &mut a.proposal)?;
+    take_ready(&a.basket, &a.community, &mut a.proposal, &prm)?;
     let ProposalAction::Split { numerator, denominator } = a.proposal.action else { return err!(VaultError::BadProposal) };
-    apply_split(&a.basket, a.share_mint.as_ref(), a.token_program.as_ref(), numerator, denominator)
+    apply_split(&a.basket, a.share_mint.as_ref(), a.token_program.as_ref(), numerator, denominator, prm.secs(params::SPLIT_COOLDOWN_SECS))
 }
 
 /// Runs a passed Stops. The payer covers the stop account's rent the first time. Permissionless.
 /// Remaining accounts: each stop's `AssetPrice`, in order, fresh; a reference above its price is
 /// lowered to it, so no stop starts out armed.
 pub fn community_execute_stops<'info>(ctx: Context<'_, '_, 'info, 'info, CommunityExecuteStops<'info>>) -> Result<()> {
+    let prm = Params::load(&ctx.accounts.params)?;
+    prm.require_on(params::FAMILY_STOPS)?;
     let a = &mut *ctx.accounts;
-    take_ready(&a.basket, &a.community, &mut a.proposal)?;
+    take_ready(&a.basket, &a.community, &mut a.proposal, &prm)?;
     let ProposalAction::Stops { stops } = &a.proposal.action else { return err!(VaultError::BadProposal) };
     let mut stops = stops.clone();
-    check_stops(&a.basket, &stops)?;
-    hold_to_price(&mut stops, ctx.remaining_accounts, true)?;
+    check_stops(&prm, &a.basket, &stops)?;
+    hold_to_price(&prm, &mut stops, ctx.remaining_accounts, true)?;
     write_stops(&mut a.stop_loss, a.basket.key(), ctx.bumps.stop_loss, &stops);
     Ok(())
 }
@@ -342,8 +362,12 @@ pub fn community_execute_stops<'info>(ctx: Context<'_, '_, 'info, 'info, Communi
 /// served the notice a creator's mandate waits out, so each applies at once. The payer covers the
 /// rules account's rent on GoSmart; leaving returns it to the creator. Permissionless.
 pub fn community_execute_smart(ctx: Context<CommunityExecuteSmart>) -> Result<()> {
+    let prm = Params::load(&ctx.accounts.params)?;
+    if !matches!(ctx.accounts.proposal.action, ProposalAction::Leave) {
+        prm.require_on(params::FAMILY_SMART)?;
+    }
     let a = &mut *ctx.accounts;
-    take_ready(&a.basket, &a.community, &mut a.proposal)?;
+    take_ready(&a.basket, &a.community, &mut a.proposal, &prm)?;
     let s = &mut a.smart;
     match a.proposal.action {
         ProposalAction::GoSmart { mandate_hash, guard } => {
@@ -378,8 +402,8 @@ pub fn community_execute_smart(ctx: Context<CommunityExecuteSmart>) -> Result<()
 pub fn community_remove(ctx: Context<CommunityRemove>, index: u8) -> Result<()> {
     require!(ctx.accounts.basket.control == ControlMode::Community, VaultError::NotCommunity);
     require!(ctx.accounts.community.open == 0, VaultError::RemovalWaitsForVotes);
-    let now = Clock::get()?.unix_timestamp;
-    require!(now >= ctx.accounts.basket.vote_added_at() + REMOVE_GRACE_SECS, VaultError::AssetJustAdded);
+    let prm = Params::load(&ctx.accounts.params)?;
+    require!(prm.now >= ctx.accounts.basket.vote_added_at() + prm.remove_grace(), VaultError::AssetJustAdded);
     drop_emptied(&mut ctx.accounts.basket, index)
 }
 
@@ -389,7 +413,8 @@ pub fn community_remove(ctx: Context<CommunityRemove>, index: u8) -> Result<()> 
 pub fn community_close(ctx: Context<CommunityClose>) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     let p = &ctx.accounts.proposal;
-    let done = p.executed || p.epoch != ctx.accounts.community.epoch || now > p.exec_until() || (now >= p.vote_end() && !p.passed());
+    let t = p.terms(&p.to_account_info())?;
+    let done = p.executed || p.epoch != ctx.accounts.community.epoch || now > t.exec_until || (now >= t.vote_end && !p.passed(&t));
     require!(done, VaultError::ProposalStillOpen);
     let (id, basket) = (p.id, p.basket);
     let c = &mut ctx.accounts.community;
@@ -417,16 +442,6 @@ pub fn community_close_vote(ctx: Context<CommunityCloseVote>) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------- accounts
-
-#[derive(Accounts)]
-pub struct SetCommunityOpen<'info> {
-    #[account(mut)]
-    pub authority: Signer<'info>,
-    /// Grown by hand to hold the flags after its fields (see PROTOCOL_FLAGS_OFFSET).
-    #[account(mut, seeds = [PROTOCOL_SEED], bump = protocol.bump, has_one = authority @ VaultError::NotProtocolAuthority)]
-    pub protocol: Box<Account<'info, Protocol>>,
-    pub system_program: Program<'info, System>,
-}
 
 #[derive(Accounts)]
 pub struct ShareStakeIn<'info> {
@@ -483,6 +498,9 @@ pub struct EnterCommunity<'info> {
     #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump)]
     pub protocol: Box<Account<'info, Protocol>>,
     pub system_program: Program<'info, System>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -503,7 +521,7 @@ pub struct CommunityPropose<'info> {
     #[account(
         init,
         payer = proposer,
-        space = Proposal::BASE_SPACE + action.try_to_vec()?.len(),
+        space = Proposal::BASE_SPACE + action.try_to_vec()?.len() + TERMS_LEN,
         seeds = [PROPOSAL_SEED, basket.key().as_ref(), &community.next_id.to_le_bytes()],
         bump
     )]
@@ -521,6 +539,9 @@ pub struct CommunityPropose<'info> {
     pub proposer_gravi: Option<UncheckedAccount<'info>>,
     pub gravi_token_program: Option<Interface<'info, TokenInterface>>,
     pub system_program: Program<'info, System>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -544,6 +565,9 @@ pub struct CommunityExecute<'info> {
     pub community: Box<Account<'info, Community>>,
     #[account(mut, has_one = basket)]
     pub proposal: Box<Account<'info, Proposal>>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -560,6 +584,9 @@ pub struct CommunityExecuteAdd<'info> {
     pub asset_entry: UncheckedAccount<'info>,
     /// CHECK: the basket's vault for the asset, checked by `read_vault` (canonical ATA).
     pub vault: UncheckedAccount<'info>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -576,6 +603,9 @@ pub struct CommunityExecuteSplit<'info> {
     /// CHECK: the Token-2022 program.
     #[account(address = anchor_spl::token_2022::ID)]
     pub token_program: UncheckedAccount<'info>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -590,6 +620,9 @@ pub struct CommunityExecuteStops<'info> {
     #[account(init_if_needed, payer = payer, space = 8 + StopLoss::INIT_SPACE, seeds = [STOP_SEED, basket.key().as_ref()], bump)]
     pub stop_loss: Box<Account<'info, StopLoss>>,
     pub system_program: Program<'info, System>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -608,6 +641,9 @@ pub struct CommunityExecuteSmart<'info> {
     #[account(mut, address = basket.creator @ VaultError::NotMandateAuthority)]
     pub creator: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -616,6 +652,9 @@ pub struct CommunityRemove<'info> {
     pub basket: Box<Account<'info, Basket>>,
     #[account(seeds = [COMMUNITY_SEED, basket.key().as_ref()], bump = community.bump)]
     pub community: Box<Account<'info, Community>>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]

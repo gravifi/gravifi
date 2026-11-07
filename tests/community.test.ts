@@ -25,7 +25,7 @@ import {
   warp,
   type Ctx,
 } from "./helpers.ts";
-import { NO_GRAVI, feeShares, fundHolder, listAsset, mintIx, setCreationBurn, world, type WorldOpts } from "./fixtures.ts";
+import { NO_GRAVI, feeShares, fundHolder, listAsset, mintIx, setCreationBurn, world, type WorldOpts, initKeepers, setParamIx, CONFIG, setParam, PARAM, PARAM_NOTICE, FAMILY } from "./fixtures.ts";
 
 const DAY = 86_400;
 const SHARES = 1_000_000_000n;
@@ -54,7 +54,7 @@ async function communityWorld(opts: WorldOpts = {}) {
 type W = Awaited<ReturnType<typeof communityWorld>>;
 
 const openDoor = (w: Pick<W, "ctx">, open = true, authority = w.ctx.payer) =>
-  rpc(w.ctx, w.ctx.vault.methods.setCommunityOpen(open).accountsPartial({ authority: authority.publicKey, protocol: pda.protocol() }), [authority]);
+  rpc(w.ctx, setParamIx(w.ctx, CONFIG.communityOpen, open ? 1 : 0, [], authority.publicKey), [authority]);
 
 const enter = (w: W, who = w.creator) =>
   rpc(w.ctx, w.ctx.vault.methods.enterCommunity().accountsPartial({ creator: who.publicKey, basket: w.basket, community: pda.community(w.basket), protocol: pda.protocol() }), [who]);
@@ -376,6 +376,56 @@ describe("community: passing", () => {
     await expectError(execute(w, id), "NotExecutable");
   });
 
+  it("a proposal's windows are fixed when it opens: a later change to the vote's length moves none already open", async () => {
+    const w = await goCommunity();
+    const carol = await crewReady(w);
+    await setParam(w.ctx, PARAM.VOTE_PERIOD_SECS, BigInt(DAY));
+    warp(w.ctx, PARAM_NOTICE - 3_600);
+    const before = await propose(w, w.bob, { policy: { rebalanceMode: { periodic: {} }, intervalSecs: new BN(2 * DAY), driftBps: 600 } });
+    warp(w.ctx, 7_200);
+    const after = await propose(w, w.alice, { policy: { rebalanceMode: { periodic: {} }, intervalSecs: new BN(3 * DAY), driftBps: 700 } });
+    // Each carries its terms after its action.
+    const len = (id: number) => w.ctx.svm.getAccount(pda.proposal(w.basket, id))!.data.length;
+    assert.equal(len(before), len(after));
+    warp(w.ctx, DAY + 1);
+    await expectError(vote(w, carol, after), "VotingOver");
+    await vote(w, carol, before);
+    // A proposal opened before the terms were written (sized for its action alone) reads the
+    // constants: still three days, whatever the param says.
+    const acct = w.ctx.svm.getAccount(pda.proposal(w.basket, before))!;
+    w.ctx.svm.setAccount(pda.proposal(w.basket, before), { ...acct, data: acct.data.slice(0, acct.data.length - 29) });
+    warp(w.ctx, DAY);
+    await vote(w, w.bob, before);
+    warp(w.ctx, DAY);
+    await expectError(vote(w, w.alice, before), "VotingOver");
+  });
+
+  it("the community switch stops entering, proposing and running a vote, but never leaving", async () => {
+    const w = await goCommunity();
+    await bobReady(w);
+    const policy = await passed(w, { policy: { rebalanceMode: { periodic: {} }, intervalSecs: new BN(2 * DAY), driftBps: 600 } });
+    await close(w, policy, w.bob.publicKey).catch(() => {});
+    const carol = fund(w.ctx);
+    await fundHolder(w, carol);
+    await rpc(w.ctx, mintIx(w, carol, 20n * SHARES), [carol]);
+    await shareStake(w, carol, 20n * SHARES);
+    warp(w.ctx, VOTE);
+    const leave = await propose(w, carol, { leave: {} });
+    await vote(w, w.bob, leave);
+    warp(w.ctx, VOTE + WAIT);
+    await setParam(w.ctx, PARAM.KILL, BigInt(FAMILY.community));
+    await expectError(execute(w, policy), "FeatureOff");
+    await expectError(propose(w, w.bob, { leave: {} }), "FeatureOff");
+    await execute(w, leave);
+    assert.ok((await basketOf(w)).control.creator);
+    const other = await communityWorld();
+    await openDoor(other);
+    await setParam(other.ctx, PARAM.KILL, BigInt(FAMILY.community));
+    await expectError(enter(other), "FeatureOff");
+    await setParam(other.ctx, PARAM.KILL, 0n);
+    await enter(other);
+  });
+
   it("needs 10% of the supply to vote", async () => {
     const w = await goCommunity();
     await shareStake(w, w.alice, 90n * SHARES); // 9%
@@ -589,7 +639,7 @@ describe("community: what a vote does", () => {
     await enter(w);
     await bobReady(w);
     const keeper = fund(w.ctx);
-    await rpc(w.ctx, w.ctx.vault.methods.initKeepers(keeper.publicKey, keeper.publicKey).accountsPartial({ authority: w.ctx.payer.publicKey, keepers: pda.keepers() }));
+    await initKeepers(w.ctx, keeper.publicKey, keeper.publicKey);
     // Proposed at a reference of $1.20 (A's price when it opened, say); A is at $1 when it runs.
     const stops = [{ mint: w.mintA, pctBps: 1_000, trailing: false, referenceE12: new BN("1200000000000") }];
     const id = await passed(w, { stops: { stops } });
@@ -626,7 +676,7 @@ describe("community: what a vote does", () => {
     const w = await goCommunity();
     await bobReady(w);
     const keeper = fund(w.ctx);
-    await rpc(w.ctx, w.ctx.vault.methods.initKeepers(keeper.publicKey, keeper.publicKey).accountsPartial({ authority: w.ctx.payer.publicKey, keepers: pda.keepers() }));
+    await initKeepers(w.ctx, keeper.publicKey, keeper.publicKey);
     await postPrices(w.ctx, keeper, [[w.mintA, 1_000_000_000_000n]]);
     const id = await passed(w, { stops: { stops: [{ mint: w.mintA, pctBps: 1_000, trailing: false, referenceE12: new BN("1000000000000") }] } });
     await postPrices(w.ctx, keeper, [[w.mintA, 1_000_000_000_000n]]);

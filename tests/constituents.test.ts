@@ -20,7 +20,7 @@ import {
   rpc,
   send,
 } from "./helpers.ts";
-import { NO_GRAVI, feeShares, fundHolder, listAsset, mintIx, quads, redeemIx, world, type World } from "./fixtures.ts";
+import { NO_GRAVI, feeShares, fundHolder, listAsset, mintIx, quads, redeemIx, world, type World, initKeepers } from "./fixtures.ts";
 
 // World: 10 shares backed by 20 A ($1) and 5 B ($6): $20 + $30 = $50. C is a $1 token.
 const PRICE = { A: 1_000_000_000_000n, B: 6_000_000_000_000n, C: 1_000_000_000_000n };
@@ -33,10 +33,7 @@ async function cWorld(opts: Parameters<typeof world>[0] = {}) {
   await listAsset(w.ctx, mintC);
   const vaultC = await createAta(w.ctx, mintC, w.basket, TOKEN_PROGRAM_ID);
   const keeper = fund(w.ctx);
-  await rpc(
-    w.ctx,
-    w.ctx.vault.methods.initKeepers(keeper.publicKey, keeper.publicKey).accountsPartial({ authority: w.ctx.payer.publicKey, keepers: pda.keepers() }),
-  );
+  await initKeepers(w.ctx, keeper.publicKey, keeper.publicKey);
   // The keeper is the market: it holds A and C to deliver, and accounts to receive B and C.
   const keeperA = await createAta(w.ctx, w.mintA, keeper.publicKey, TOKEN_PROGRAM_ID);
   await mintTo(w.ctx, w.mintA, keeperA, 1_000n * ONE_A, TOKEN_PROGRAM_ID);

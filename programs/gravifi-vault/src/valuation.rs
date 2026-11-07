@@ -3,6 +3,7 @@
 use anchor_lang::prelude::*;
 
 use crate::errors::VaultError;
+use crate::params::{self, Params};
 use crate::state::*;
 use crate::token_util::read_vault;
 
@@ -27,9 +28,11 @@ pub(crate) fn token_value(amount: u64, price_e12: u64, decimals: u8) -> Result<u
         / 10u128.pow(decimals as u32))
 }
 
-/// Values every sleeve from its vault balance and a fresh oracle price.
+/// Values every sleeve from its vault balance and a fresh oracle price (`PRICE_AGE_SECS`).
 /// `accounts` holds [vault_ata, asset_price] per constituent, in basket order.
-pub(crate) fn value_book<'info>(basket: &Account<'info, Basket>, accounts: &'info [AccountInfo<'info>], now: i64) -> Result<Book> {
+pub(crate) fn value_book<'info>(basket: &Account<'info, Basket>, accounts: &'info [AccountInfo<'info>], prm: &Params) -> Result<Book> {
+    let now = prm.now;
+    let (dead, fresh) = (prm.secs(params::DEAD_PRICE_SECS), prm.secs(params::PRICE_AGE_SECS));
     let n = basket.constituent_count as usize;
     require!(accounts.len() == n * 2, VaultError::BadRemainingAccounts);
     let basket_key = basket.key();
@@ -43,11 +46,11 @@ pub(crate) fn value_book<'info>(basket: &Account<'info, Basket>, accounts: &'inf
         // A sleeve on its way out whose price stopped being posted a day ago counts as nothing,
         // so the rest of the basket can still rebalance. Its price reads as zero, which no slice
         // can sell or buy at.
-        if c.target_bps == 0 && now - price.updated_at > DEAD_PRICE_SECS {
+        if c.target_bps == 0 && now - price.updated_at > dead {
             rows.push(Row { balance: view.amount, price_e12: 0, decimals: price.decimals, value: 0 });
             continue;
         }
-        require!(price.price_e12 > 0 && now - price.updated_at <= MAX_PRICE_AGE_SECS, VaultError::BadPrice);
+        require!(price.price_e12 > 0 && now - price.updated_at <= fresh, VaultError::BadPrice);
         let value = token_value(view.amount, price.price_e12, price.decimals)?;
         total = total.checked_add(value).ok_or(VaultError::MathOverflow)?;
         rows.push(Row { balance: view.amount, price_e12: price.price_e12, decimals: price.decimals, value });

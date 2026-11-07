@@ -82,16 +82,82 @@ export async function initProtocol(ctx: Ctx, protocolFeeBps = 10, burnShareBps =
 
 /** Sets the GRAVI burned to create a basket, as the protocol authority (the payer). */
 export async function setCreationBurn(ctx: Ctx, graviMint: PublicKey, amount: bigint, authority = ctx.payer) {
-  await rpc(
-    ctx,
-    ctx.vault.methods.setCreationBurn(new BN(amount.toString())).accountsPartial({
-      authority: authority.publicKey,
-      protocol: pda.protocol(),
-      creationBurn: pda.creationBurn(),
-      graviMint,
-    }),
-    [authority],
-  );
+  await rpc(ctx, setParamIx(ctx, CONFIG.creationBurn, amount, [pda.creationBurn(), graviMint], authority.publicKey), [authority]);
+}
+
+// ------------------------------------------------------------------- roles and params
+
+/** `set_role`'s roles (instructions/protocol.rs). */
+export const ROLE = { authority: 0, guardian: 1, graviMint: 2, burnExempt: 3, lister: 4, strategist: 5, priceAuthority: 6, rebalancer: 7 } as const;
+/** `set_param`'s settings kept outside the params account (instructions/protocol.rs). */
+export const CONFIG = { protocolFees: 1_000, creationBurn: 1_001, smartFee: 1_002, smartBurn: 1_003, stakeThreshold: 1_004, communityOpen: 1_005 } as const;
+/** `set_param`'s ids for the params account, as in params.rs. */
+export const PARAM = Object.fromEntries(
+  [
+    "KILL", "FEATURES", "REBALANCE_SLIPPAGE_BPS", "BUYBACK_SLIPPAGE_BPS", "SLICE_BPS", "LEAVING_SLICE_BPS", "KEEPER_REFUND_E12",
+    "BUYBACK_REFUND_E12", "PRICE_MOVE_BPS", "PRICE_REFERENCE_SECS", "PYTH_AGE_SECS", "PYTH_TOLERANCE_MIN_BPS", "PYTH_TOLERANCE_MAX_BPS",
+    "PYTH_CONF_MULTIPLE", "PRICE_AGE_SECS", "DEAD_PRICE_SECS", "STOP_CONFIRM_SECS", "STOP_WINDOW_SECS", "STOP_MIN_BPS", "STOP_MAX_BPS",
+    "POLICY_MIN_DRIFT_BPS", "POLICY_MIN_INTERVAL_SECS", "TRANSFER_FEE_CAP_BPS", "SPLIT_COOLDOWN_SECS", "CUT_NOTICE_SECS", "INVITE_MAX_SECS",
+    "SMART_MAX_DAY_BPS", "SMART_MAX_WEEK_BPS", "SMART_MAX_WEIGHT_BPS", "SMART_MAX_UNVERIFIED_BPS", "MANDATE_NOTICE_SECS", "STAKE_WARMUP_SECS",
+    "STAKE_UNSTAKE_SECS", "STAKE_PERIOD_SECS", "VOTE_PERIOD_SECS", "VOTE_TIMELOCK_SECS", "VOTE_GRACE_SECS", "PROPOSE_MIN_BPS", "QUORUM_BPS",
+    "SUPERMAJORITY_BPS", "MAX_OPEN_PROPOSALS",
+  ].map((name, id) => [name, id]),
+) as Record<string, number>;
+/** The kill switches' bits (`KILL`). */
+export const FAMILY = { mint: 1, rebalance: 2, buyback: 4, stops: 8, smart: 16, staking: 32, community: 64, invites: 128, listing: 256, create: 512 } as const;
+/** The week of notice on user-facing changes. */
+export const PARAM_NOTICE = 7 * 86_400;
+
+/** A param's slot in the params account: [value][pending][pending_at]; zeros before it exists. */
+export function paramSlot(ctx: Ctx, id: number) {
+  const acct = ctx.svm.getAccount(PARAMS);
+  if (!acct) return { value: 0n, pending: 0n, at: 0n };
+  const d = Buffer.from(acct.data);
+  const o = 16 + id * 24;
+  return { value: d.readBigUInt64LE(o), pending: d.readBigUInt64LE(o + 8), at: d.readBigInt64LE(o + 16) };
+}
+
+/** The params account's address, `[b"params"]`. */
+export const PARAMS = PublicKey.findProgramAddressSync([Buffer.from("params")], new PublicKey("HHmD4ZP5he9GrcmcNrpjahyK1dWh2MhMwmVpiPRJsw3G"))[0];
+
+const roleAccount = (role: number) => (role === ROLE.lister ? pda.lister() : role === ROLE.strategist ? pda.strategist() : role >= ROLE.priceAuthority ? pda.keepers() : null);
+
+/** `set_role`, as a builder for `rpc`/`expectError`. */
+export function setRoleIx(ctx: Ctx, role: number, key: PublicKey, authority = ctx.payer.publicKey) {
+  const acct = roleAccount(role);
+  return ctx.vault.methods
+    .setRole(role, key)
+    .accountsPartial({ authority, protocol: pda.protocol() })
+    .remainingAccounts(acct ? [{ pubkey: acct, isWritable: true, isSigner: false }] : []);
+}
+
+/** `set_param`, as a builder: `remaining` are writable where the setting writes them. */
+export function setParamIx(ctx: Ctx, id: number, value: bigint | number, remaining: PublicKey[] = [], authority = ctx.payer.publicKey) {
+  // The creation burn's account and the stake pool are written; the GRAVI mint is only read.
+  const writable = (i: number) => (id === CONFIG.creationBurn && i === 0) || id === CONFIG.stakeThreshold;
+  return ctx.vault.methods
+    .setParam(id, new BN(value.toString()))
+    .accountsPartial({ authority, protocol: pda.protocol() })
+    .remainingAccounts(remaining.map((pubkey, i) => ({ pubkey, isWritable: writable(i), isSigner: false })));
+}
+
+export async function setRole(ctx: Ctx, role: number, key: PublicKey, authority = ctx.payer) {
+  await rpc(ctx, setRoleIx(ctx, role, key, authority.publicKey), [authority]);
+}
+
+export async function setParam(ctx: Ctx, id: number, value: bigint | number, remaining: PublicKey[] = [], authority = ctx.payer) {
+  await rpc(ctx, setParamIx(ctx, id, value, remaining, authority.publicKey), [authority]);
+}
+
+/** Names the price authority and the rebalancer (`set_role` twice). */
+export async function initKeepers(ctx: Ctx, priceAuthority: PublicKey, rebalancer: PublicKey, authority = ctx.payer) {
+  await setRole(ctx, ROLE.priceAuthority, priceAuthority, authority);
+  await setRole(ctx, ROLE.rebalancer, rebalancer, authority);
+}
+
+/** The protocol fee and the burn's share of it, as one `set_param` value. */
+export function protocolFeesIx(ctx: Ctx, feeBps: number, burnShareBps: number, authority = ctx.payer.publicKey) {
+  return setParamIx(ctx, CONFIG.protocolFees, BigInt(feeBps) | (BigInt(burnShareBps) << 16n), [], authority);
 }
 
 export async function world(opts: WorldOpts = {}) {

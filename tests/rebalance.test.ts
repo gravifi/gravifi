@@ -26,7 +26,7 @@ import {
   warp,
   postPrices,
 } from "./helpers.ts";
-import { NO_GRAVI, createFeeAccounts, feeShares, initProtocol, listAsset, world, type World } from "./fixtures.ts";
+import { NO_GRAVI, createFeeAccounts, feeShares, initProtocol, listAsset, world, type World, initKeepers, setParam, PARAM, PARAM_NOTICE, FAMILY } from "./fixtures.ts";
 
 // World: 10 shares backed by 20 A ($1, 6 decimals) and 5 B ($6, 9 decimals): $20 / $30,
 // so 40% A / 60% B against targets of 60 / 40. B must be sold for A.
@@ -38,12 +38,7 @@ const ONE_B = 1_000_000_000n;
 async function keeperWorld() {
   const w = await world();
   const keeper = fund(w.ctx);
-  await rpc(
-    w.ctx,
-    w.ctx.vault.methods
-      .initKeepers(keeper.publicKey, keeper.publicKey)
-      .accountsPartial({ authority: w.ctx.payer.publicKey, keepers: pda.keepers() }),
-  );
+  await initKeepers(w.ctx, keeper.publicKey, keeper.publicKey);
   await setPrices(w, keeper, PRICE_A, PRICE_B);
   // The keeper holds A to deliver, and has a B account to receive the lent sleeve.
   const keeperA = await createAta(w.ctx, w.mintA, keeper.publicKey, TOKEN_PROGRAM_ID);
@@ -156,6 +151,29 @@ describe("rebalancing", () => {
 
     const w2 = await keeperWorld();
     await expectError(send(w2.ctx, [await startIx(w2, SLICE_B, { refund: refund + 1n }), deliverA(w2, FAIR_A), await finishIx(w2)], [w2.keeper]), "RefundTooLarge");
+  });
+
+  it("the slippage ceiling is a param: lowered at once, raised only after its week; the refund cap moves at once", async () => {
+    const w = await keeperWorld();
+    await setParam(w.ctx, PARAM.REBALANCE_SLIPPAGE_BPS, 200n);
+    await expectError(send(w.ctx, [await startIx(w, SLICE_B, { slippage: 300 }), deliverA(w, FAIR_A), await finishIx(w)], [w.keeper]), "BadParameter");
+    await setParam(w.ctx, PARAM.REBALANCE_SLIPPAGE_BPS, 400n);
+    await expectError(send(w.ctx, [await startIx(w, SLICE_B, { slippage: 201 }), deliverA(w, FAIR_A), await finishIx(w)], [w.keeper]), "BadParameter");
+    warp(w.ctx, PARAM_NOTICE);
+    await setPrices(w, w.keeper, PRICE_A, PRICE_B);
+    await setParam(w.ctx, PARAM.KEEPER_REFUND_E12, 1n);
+    await expectError(send(w.ctx, [await startIx(w, SLICE_B, { slippage: 400, refund: 1_000n }), deliverA(w, FAIR_A), await finishIx(w)], [w.keeper]), "RefundTooLarge");
+    const vA = balance(w.ctx, w.vaultA);
+    await send(w.ctx, [await startIx(w, SLICE_B, { slippage: 400 }), deliverA(w, 2_410_000n), await finishIx(w)], [w.keeper]);
+    assert.equal(balance(w.ctx, w.vaultA), vA + 2_410_000n, "3.6% short fills at the raised 4%");
+  });
+
+  it("the rebalance switch stops slices; mints and redeems go on", async () => {
+    const w = await keeperWorld();
+    await setParam(w.ctx, PARAM.KILL, BigInt(FAMILY.rebalance));
+    await expectError(send(w.ctx, [await startIx(w, SLICE_B), deliverA(w, FAIR_A), await finishIx(w)], [w.keeper]), "FeatureOff");
+    await setParam(w.ctx, PARAM.KILL, 0n);
+    await send(w.ctx, [await startIx(w, SLICE_B), deliverA(w, FAIR_A), await finishIx(w)], [w.keeper]);
   });
 
   it("a start without a finish in the same transaction is refused", async () => {
@@ -330,7 +348,7 @@ async function fourWorld() {
     [creator],
   );
   const keeper = fund(ctx);
-  await rpc(ctx, ctx.vault.methods.initKeepers(keeper.publicKey, keeper.publicKey).accountsPartial({ authority: ctx.payer.publicKey, keepers: pda.keepers() }));
+  await initKeepers(ctx, keeper.publicKey, keeper.publicKey);
   const keeperAtas: PublicKey[] = [];
   for (const m of mints) {
     await rpc(

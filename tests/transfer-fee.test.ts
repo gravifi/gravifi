@@ -8,7 +8,7 @@ import { SYSVAR_INSTRUCTIONS_PUBKEY, type Keypair, type PublicKey } from "@solan
 import { createSetTransferFeeInstruction, createTransferCheckedInstruction } from "@solana/spl-token";
 import { Clock } from "litesvm";
 import { BN, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, ata, balance, createAta, createMint, expectError, fund, mintTo, pda, postPrices, rpc, send } from "./helpers.ts";
-import { SEED_SHARES, UNITS_A, UNITS_B, fundHolder, listAsset, mintIx, redeemIx, world, type World } from "./fixtures.ts";
+import { SEED_SHARES, UNITS_A, UNITS_B, fundHolder, listAsset, mintIx, redeemIx, world, type World, initKeepers } from "./fixtures.ts";
 
 const FEE_BPS = 100; // 1%, as most stonkfun tokens and PreStocks
 const ONE_SHARE = 1_000_000_000n;
@@ -105,10 +105,7 @@ const FAIR_A = 2_500_000n; // its oracle value in A
 async function keeperWorld() {
   const w = await world({ feeBpsB: FEE_BPS });
   const keeper = fund(w.ctx);
-  await rpc(
-    w.ctx,
-    w.ctx.vault.methods.initKeepers(keeper.publicKey, keeper.publicKey).accountsPartial({ authority: w.ctx.payer.publicKey, keepers: pda.keepers() }),
-  );
+  await initKeepers(w.ctx, keeper.publicKey, keeper.publicKey);
   await setPrices(w, keeper, PRICE_A, PRICE_B);
   const keeperA = await createAta(w.ctx, w.mintA, keeper.publicKey, TOKEN_PROGRAM_ID);
   await mintTo(w.ctx, w.mintA, keeperA, 1_000_000_000n, TOKEN_PROGRAM_ID);

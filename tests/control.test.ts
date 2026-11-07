@@ -1,9 +1,8 @@
 // Who runs a basket now that holder governance is gone: its creator, or nobody (immutable).
-// No basket can be created as a DAO, and one that was handed to its holders before the
-// removal can be returned to its creator by the protocol authority, and only such a basket.
+// No basket can be created as a DAO, and one written as one (none exists on mainnet) is frozen:
+// nothing changes it.
 import { describe, it } from "node:test";
-import assert from "node:assert/strict";
-import { BN, expectError, fund, pda, rpc } from "./helpers.ts";
+import { BN, expectError, fund, rpc } from "./helpers.ts";
 import { world, type World } from "./fixtures.ts";
 
 /** Rewrites the basket account as if it had been handed to its holders before the removal. */
@@ -23,13 +22,6 @@ async function makeLegacyDao(w: World) {
   w.ctx.svm.setAccount(w.basket, { ...acct, data: full });
 }
 
-const restoreIx = (w: World, authority = w.ctx.payer) =>
-  w.ctx.vault.methods.restoreCreatorControl().accountsPartial({
-    authority: authority.publicKey,
-    protocol: pda.protocol(),
-    basket: w.basket,
-  });
-
 const setTargetsIx = (w: World) =>
   w.ctx.vault.methods.setTargets([5_000, 5_000]).accountsPartial({ authority: w.creator.publicKey, basket: w.basket });
 
@@ -42,30 +34,5 @@ describe("basket control without holder governance", () => {
     const w = await world();
     await makeLegacyDao(w);
     await expectError(rpc(w.ctx, setTargetsIx(w), [w.creator]), "GovernanceRemoved");
-  });
-
-  it("the protocol authority returns a legacy DAO basket to its creator", async () => {
-    const w = await world();
-    await makeLegacyDao(w);
-    await rpc(w.ctx, restoreIx(w));
-    const b = await w.ctx.vault.account.basket.fetch(w.basket);
-    assert.deepEqual(b.control, { creator: {} });
-    assert.equal(b.rebalanceSupply.toString(), "0");
-    assert.equal(b.stakeOwed.toString(), "0");
-    assert.equal(b.community, 0);
-    assert.deepEqual(b.reserved, new Array(5).fill(0));
-    assert.equal(b.creatorCutBps, 0);
-    assert.equal(b.creatorUnclaimed.toString(), "0");
-    await rpc(w.ctx, setTargetsIx(w), [w.creator]);
-    const after = await w.ctx.vault.account.basket.fetch(w.basket);
-    assert.deepEqual(after.constituents.map((c) => c.targetBps), [5_000, 5_000]);
-  });
-
-  it("only the protocol authority can restore, and only a DAO basket", async () => {
-    const w = await world();
-    await expectError(rpc(w.ctx, restoreIx(w)), "NotDaoBasket");
-    await makeLegacyDao(w);
-    const stranger = fund(w.ctx);
-    await expectError(rpc(w.ctx, restoreIx(w, stranger), [stranger]), "NotProtocolAuthority");
   });
 });

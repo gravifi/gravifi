@@ -10,7 +10,7 @@ crate-type = ["cdylib", "lib"]
 name = "gravifi_vault"
 
 [features]
-default = []
+default = ["no-idl", "no-log-ix-name"]
 cpi = ["no-entrypoint"]
 no-entrypoint = []
 no-idl = []

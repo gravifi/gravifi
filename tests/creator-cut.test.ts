@@ -4,7 +4,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { BN, ONE_SHARE, TOKEN_2022_PROGRAM_ID, ata, balance, createAta, expectError, fund, now, pda, rpc, supply, warp, type Ctx } from "./helpers.ts";
-import { feeShares, fundHolder, mintIx, redeemIx, world, type World, type WorldOpts } from "./fixtures.ts";
+import { feeShares, fundHolder, mintIx, redeemIx, world, type World, type WorldOpts, initKeepers, setParam, PARAM, PARAM_NOTICE } from "./fixtures.ts";
 import type { Keypair, PublicKey } from "@solana/web3.js";
 
 const SHARES = 10n * ONE_SHARE;
@@ -128,7 +128,7 @@ describe("creator cut: what a mint pays", () => {
     const w = await setupCut();
     await cutOn(w, 60);
     const keeper = fund(w.ctx);
-    await rpc(w.ctx, w.ctx.vault.methods.initKeepers(keeper.publicKey, keeper.publicKey).accountsPartial({ authority: w.ctx.payer.publicKey, keepers: pda.keepers() }));
+    await initKeepers(w.ctx, keeper.publicKey, keeper.publicKey);
     await rpc(
       w.ctx,
       w.ctx.vault.methods.setInvite(new BN(now(w.ctx) + DAY)).accountsPartial({ wallet: w.alice.publicKey, rebalancer: keeper.publicKey, keepers: pda.keepers(), invite: pda.invite(w.alice.publicKey) }),
@@ -320,25 +320,27 @@ describe("creator cut: the account itself", () => {
     await mint(w, w.alice);
     assert.equal(w.ctx.svm.getAccount(w.basket)!.data.length, size);
   });
+});
 
-  it("a legacy Dao basket's leftover bytes count as no cut and nothing owed", async () => {
+describe("creator cut: the notice as a param", () => {
+  it("a rise waits the CUT_NOTICE_SECS in force when it's asked for; a later change moves no notice already running", async () => {
     const w = await setupCut();
-    const acct = w.ctx.svm.getAccount(w.basket)!;
-    const decoded = w.ctx.vault.coder.accounts.decode("basket", Buffer.from(acct.data));
-    decoded.control = { dao: {} };
-    decoded.creatorCutBps = 54_321;
-    decoded.creatorUnclaimed = new BN("123456789012345");
-    const data = await w.ctx.vault.coder.accounts.encode("basket", decoded);
-    const full = Buffer.alloc(acct.data.length);
-    data.copy(full);
-    w.ctx.svm.setAccount(w.basket, { ...acct, data: full });
-
-    assert.deepEqual(await mint(w, w.alice), { got: 9_960_000_000n, burn: 20_000_000n, treasury: 20_000_000n });
-    const dest = await createAta(w.ctx, w.shareMint, w.ctx.payer.publicKey, w.shareProgram);
-    await withdraw(w, 1n, dest);
-    const treasury = fees(w).treasury;
-    await claim(w);
-    assert.equal(fees(w).treasury, treasury, "nothing to claim");
+    await mint(w, w.alice);
+    // Two days, after its own week of notice.
+    await setParam(w.ctx, PARAM.CUT_NOTICE_SECS, BigInt(2 * DAY));
+    await propose(w, 20);
+    const first = (await w.ctx.vault.account.cutNotice.fetch(pda.cutNotice(w.basket))).at.toNumber();
+    assert.equal(first, now(w.ctx) + DAY, "the day still applies during the param's notice");
+    warp(w.ctx, DAY + 1);
+    await apply(w);
+    warp(w.ctx, PARAM_NOTICE);
+    await propose(w, 40);
+    const at = (await w.ctx.vault.account.cutNotice.fetch(pda.cutNotice(w.basket))).at.toNumber();
+    assert.equal(at, now(w.ctx) + 2 * DAY);
+    // Back to a day: the rise already asked for still waits its two.
+    await setParam(w.ctx, PARAM.CUT_NOTICE_SECS, BigInt(DAY));
+    warp(w.ctx, PARAM_NOTICE);
+    assert.equal((await w.ctx.vault.account.cutNotice.fetch(pda.cutNotice(w.basket))).at.toNumber(), at);
   });
 });
 

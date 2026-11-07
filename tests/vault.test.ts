@@ -24,21 +24,7 @@ import {
   supply,
   warp,
 } from "./helpers.ts";
-import { NO_GRAVI,
-  SEED_SHARES,
-  UNITS_A,
-  UNITS_B,
-  createFeeAccounts,
-  feeShares,
-  fundHolder,
-  initProtocol,
-  listAsset,
-  mintIx,
-  quads,
-  redeemIx,
-  world,
-  type World,
-} from "./fixtures.ts";
+import { NO_GRAVI, SEED_SHARES, UNITS_A, UNITS_B, createFeeAccounts, feeShares, fundHolder, initProtocol, listAsset, mintIx, quads, redeemIx, world, type World, protocolFeesIx, setRoleIx, ROLE } from "./fixtures.ts";
 
 const ceilDiv = (a: bigint, b: bigint) => (a + b - 1n) / b;
 
@@ -144,7 +130,7 @@ describe("asset registry", () => {
   test("the guardian can delist but never list", async () => {
     const w = await world();
     const guardian = fund(w.ctx);
-    await rpc(w.ctx, w.ctx.vault.methods.setGuardian(guardian.publicKey).accountsPartial({ authority: w.ctx.payer.publicKey, protocol: pda.protocol() }));
+    await rpc(w.ctx, setRoleIx(w.ctx, ROLE.guardian, guardian.publicKey, w.ctx.payer.publicKey));
 
     const statusIx = (status: object) =>
       w.ctx.vault.methods.setAssetStatus(status).accountsPartial({
@@ -542,7 +528,7 @@ describe("fees", () => {
     await expectError(initProtocol(setup(), 40, 4_999), "BurnShareTooLow");
     const w = await world({ protocolFeeBps: 40 });
     const setFees = (burn: number) =>
-      w.ctx.vault.methods.setProtocolFees(40, burn).accountsPartial({ authority: w.ctx.payer.publicKey, protocol: pda.protocol() });
+      protocolFeesIx(w.ctx, 40, burn);
     await expectError(rpc(w.ctx, setFees(0)), "BurnShareTooLow");
     await expectError(rpc(w.ctx, setFees(4_999)), "BurnShareTooLow");
     await rpc(w.ctx, setFees(10_000));

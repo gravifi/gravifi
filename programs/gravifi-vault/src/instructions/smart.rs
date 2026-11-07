@@ -10,11 +10,12 @@
 //! between the burn and the treasury as the normal one is.
 
 use anchor_lang::prelude::*;
-use anchor_spl::token_interface::{Mint as MintI, TokenInterface};
+use anchor_spl::token_interface::TokenInterface;
 
 use crate::errors::VaultError;
 use crate::instructions::basket::{burn_gravi, check_addable, drop_emptied, GraviAccounts};
 use crate::instructions::staking::{burn_skip, FreeUse};
+use crate::params::{self, Params, PARAMS_ID};
 use crate::state::*;
 
 #[event]
@@ -60,64 +61,6 @@ pub struct SmartPauseSet {
 }
 
 // ------------------------------------------------------------------------------- protocol
-
-/// Names the strategist (`Pubkey::default()` removes it) and sets the Smart-mode protocol fee, at
-/// most `MAX_SMART_FEE_BPS`. The first call creates the strategist's account. The fee sits in the
-/// protocol account's tail (`SMART_FEE_OFFSET`), which grows to hold it the first time.
-pub fn set_smart_config(ctx: Context<SetSmartConfig>, strategist: Pubkey, fee_bps: u16) -> Result<()> {
-    require!(fee_bps <= MAX_SMART_FEE_BPS, VaultError::FeeTooHigh);
-    let s = &mut ctx.accounts.strategist;
-    s.bump = ctx.bumps.strategist;
-    s.strategist = strategist;
-
-    let ai = ctx.accounts.protocol.to_account_info();
-    let need = SMART_FEE_OFFSET + SMART_FEE_LEN;
-    if ai.data_len() < need {
-        let short = Rent::get()?.minimum_balance(need).saturating_sub(ai.lamports());
-        if short > 0 {
-            anchor_lang::system_program::transfer(
-                CpiContext::new(
-                    ctx.accounts.system_program.to_account_info(),
-                    anchor_lang::system_program::Transfer { from: ctx.accounts.authority.to_account_info(), to: ai.clone() },
-                ),
-                short,
-            )?;
-        }
-        ai.resize(need)?;
-    }
-    let [lo, hi] = fee_bps.to_le_bytes();
-    ai.try_borrow_mut_data()?[SMART_FEE_OFFSET..need].copy_from_slice(&[lo, hi, 1]);
-    Ok(())
-}
-
-/// Sets the GRAVI, in base units, a creator burns once on making a basket smart: 0 turns it off,
-/// and it can't go over `MAX_SMART_BURN_TOKENS` whole GRAVI. It sits in the protocol account's
-/// tail (`SMART_BURN_OFFSET`), which grows to hold it the first time. Protocol authority only.
-pub fn set_smart_burn(ctx: Context<SetSmartBurn>, amount: u64) -> Result<()> {
-    let ceiling = 10u64
-        .checked_pow(ctx.accounts.gravi_mint.decimals as u32)
-        .and_then(|one| one.checked_mul(MAX_SMART_BURN_TOKENS))
-        .ok_or(VaultError::MathOverflow)?;
-    require!(amount <= ceiling, VaultError::CreationBurnTooHigh);
-
-    let ai = ctx.accounts.protocol.to_account_info();
-    let need = SMART_BURN_OFFSET + SMART_BURN_LEN;
-    if ai.data_len() < need {
-        let short = Rent::get()?.minimum_balance(need).saturating_sub(ai.lamports());
-        if short > 0 {
-            anchor_lang::system_program::transfer(
-                CpiContext::new(
-                    ctx.accounts.system_program.to_account_info(),
-                    anchor_lang::system_program::Transfer { from: ctx.accounts.authority.to_account_info(), to: ai.clone() },
-                ),
-                short,
-            )?;
-        }
-        ai.resize(need)?;
-    }
-    ai.try_borrow_mut_data()?[SMART_BURN_OFFSET..need].copy_from_slice(&amount.to_le_bytes());
-    Ok(())
-}
 
 /// Marks an asset GraviFi Verified (creates its record) or takes the mark away (closes it, the
 /// rent back to the authority). Protocol authority only.
@@ -174,19 +117,21 @@ pub(crate) fn is_verified(ai: &AccountInfo, mint: &Pubkey) -> Result<bool> {
 
 // -------------------------------------------------------------------------------- creator
 
-/// Ranges a creator's guardrails must fall in: never looser than the code's ceilings, and
-/// satisfiable (enough assets at the weight cap to fill the basket).
-pub(crate) fn check_guardrails(g: &Guardrails, mandate_hash: &[u8; 32]) -> Result<()> {
+/// Ranges a creator's guardrails must fall in: never looser than the protocol's ceilings (the
+/// `SMART_MAX_*` params), and satisfiable (enough assets at the weight cap to fill the basket).
+pub(crate) fn check_guardrails(prm: &Params, g: &Guardrails, mandate_hash: &[u8; 32]) -> Result<()> {
+    let (day, week, weight, unverified) = prm.smart_caps();
+    let (stop_lo, stop_hi) = prm.stop_range();
     let ok = *mandate_hash != [0u8; 32]
-        && (1..=SMART_MAX_DAY_BPS).contains(&g.max_day_bps)
-        && (g.max_day_bps..=SMART_MAX_WEEK_BPS).contains(&g.max_week_bps)
-        && (1..=SMART_MAX_WEIGHT_BPS).contains(&g.max_weight_bps)
-        && g.max_unverified_bps <= SMART_MAX_UNVERIFIED_BPS.min(g.max_weight_bps)
+        && (1..=day).contains(&g.max_day_bps)
+        && (g.max_day_bps..=week).contains(&g.max_week_bps)
+        && (1..=weight).contains(&g.max_weight_bps)
+        && g.max_unverified_bps <= unverified.min(g.max_weight_bps)
         && g.min_assets >= 2
         && g.min_assets <= g.max_assets
         && g.max_assets as usize <= MAX_LAUNCH_CONSTITUENTS
         && g.max_weight_bps as u32 * g.max_assets as u32 >= BPS_DENOM as u32
-        && (g.stop_bps == 0 || (MIN_STOP_BPS..=MAX_STOP_BPS).contains(&g.stop_bps));
+        && (g.stop_bps == 0 || (stop_lo..=stop_hi).contains(&g.stop_bps));
     require!(ok, VaultError::BadGuardrails);
     Ok(())
 }
@@ -194,7 +139,7 @@ pub(crate) fn check_guardrails(g: &Guardrails, mandate_hash: &[u8; 32]) -> Resul
 /// Makes a creator-managed basket smart, before its first deposit: from then on only the
 /// strategist sets its targets and assets, within `guard`, and its mints and redeems pay the
 /// Smart-mode fee. The creator pays the rules account's rent and burns the smart burn
-/// (`set_smart_burn`) from their GRAVI, unless they're the burn-exempt wallet.
+/// (`set_param` CONFIG_SMART_BURN) from their GRAVI, unless they're the burn-exempt wallet.
 ///
 /// The basket must already be within `guard`: every target within its weight cap, and between
 /// `min_assets` and `max_assets` assets with a target, so the guardrails holders read describe the
@@ -203,7 +148,9 @@ pub(crate) fn check_guardrails(g: &Guardrails, mandate_hash: &[u8; 32]) -> Resul
 /// the creator's stake and the stake pool as before, to skip the burn.
 pub fn enable_smart<'info>(ctx: Context<'_, '_, 'info, 'info, EnableSmart<'info>>, mandate_hash: [u8; 32], guard: Guardrails) -> Result<()> {
     require!(ctx.accounts.basket.control == ControlMode::Creator && !ctx.accounts.basket.seeded, VaultError::SmartNotAllowed);
-    check_guardrails(&guard, &mandate_hash)?;
+    let prm = Params::load(&ctx.accounts.params)?;
+    prm.require_on(params::FAMILY_SMART)?;
+    check_guardrails(&prm, &guard, &mandate_hash)?;
 
     let mut records = Vec::new();
     let held = ctx.accounts.basket.active().iter().filter(|c| c.target_bps > 0).count();
@@ -264,10 +211,12 @@ pub fn propose_mandate(ctx: Context<CreatorSmart>, mandate_hash: [u8; 32], guard
         s.pending_leave = false;
         return Ok(());
     }
+    let prm = Params::load(&ctx.accounts.params)?;
     if !leave {
-        check_guardrails(&guard, &mandate_hash)?;
+        check_guardrails(&prm, &guard, &mandate_hash)?;
     }
-    let applies_at = Clock::get()?.unix_timestamp + MANDATE_NOTICE_SECS;
+    // The time it applies is written on the account, so a later change to the notice moves none.
+    let applies_at = prm.now + prm.secs(params::MANDATE_NOTICE_SECS);
     let s = &mut ctx.accounts.smart;
     s.pending_at = applies_at;
     s.pending_hash = if leave { [0; 32] } else { mandate_hash };
@@ -320,7 +269,8 @@ pub fn set_smart_pause(ctx: Context<SetSmartPause>, paused: bool) -> Result<()> 
 
 // ----------------------------------------------------------------------------- strategist
 
-fn check_running(basket: &Basket, smart: &Smart) -> Result<()> {
+fn check_running(basket: &Basket, smart: &Smart, params: &AccountInfo) -> Result<()> {
+    Params::load(params)?.require_on(params::FAMILY_SMART)?;
     require!(basket.control == ControlMode::Smart, VaultError::NotSmartBasket);
     require!(smart.paused_by == 0, VaultError::SmartPaused);
     Ok(())
@@ -334,7 +284,7 @@ fn check_running(basket: &Basket, smart: &Smart) -> Result<()> {
 ///   fewer than now (a stop may have left it short);
 /// - the change, the sum of the increases, within what's left of the 24-hour and 7-day caps.
 pub fn smart_set_targets<'info>(ctx: Context<'_, '_, 'info, 'info, StrategistBasket<'info>>, target_bps: Vec<u16>) -> Result<()> {
-    check_running(&ctx.accounts.basket, &ctx.accounts.smart)?;
+    check_running(&ctx.accounts.basket, &ctx.accounts.smart, &ctx.accounts.params)?;
     let basket = &mut ctx.accounts.basket;
     let s = &mut ctx.accounts.smart;
     let g = s.guard;
@@ -377,12 +327,13 @@ pub fn smart_set_targets<'info>(ctx: Context<'_, '_, 'info, 'info, StrategistBas
 /// assets the strategist finds are free to add. (Those the creator picks at creation still
 /// burn.) The basket's vault for it must exist.
 pub fn smart_add_constituent(ctx: Context<StrategistAdd>) -> Result<()> {
-    check_running(&ctx.accounts.basket, &ctx.accounts.smart)?;
+    check_running(&ctx.accounts.basket, &ctx.accounts.smart, &ctx.accounts.params)?;
     check_addable(
         &ctx.accounts.basket,
         &ctx.accounts.mint.to_account_info(),
         &ctx.accounts.asset_entry.to_account_info(),
         &ctx.accounts.vault.to_account_info(),
+        &Params::load(&ctx.accounts.params)?,
     )?;
     let mint = ctx.accounts.mint.key();
     let basket = &mut ctx.accounts.basket;
@@ -394,7 +345,7 @@ pub fn smart_add_constituent(ctx: Context<StrategistAdd>) -> Result<()> {
 
 /// Drops an asset the smart basket has sold out (0% target, no units), as `remove_constituent`.
 pub fn smart_remove_constituent(ctx: Context<StrategistBasket>, index: u8) -> Result<()> {
-    check_running(&ctx.accounts.basket, &ctx.accounts.smart)?;
+    check_running(&ctx.accounts.basket, &ctx.accounts.smart, &ctx.accounts.params)?;
     let basket = &mut ctx.accounts.basket;
     let mint = basket.constituents.get(index as usize).map(|c| c.mint).unwrap_or_default();
     drop_emptied(basket, index)?;
@@ -406,12 +357,13 @@ pub fn smart_remove_constituent(ctx: Context<StrategistBasket>, index: u8) -> Re
 /// has none, below its fresh posted price. Stops on assets no longer in the basket are dropped
 /// first. The strategist pays the stop account's rent the first time.
 pub fn smart_set_stop(ctx: Context<StrategistStop>) -> Result<()> {
-    check_running(&ctx.accounts.basket, &ctx.accounts.smart)?;
+    check_running(&ctx.accounts.basket, &ctx.accounts.smart, &ctx.accounts.params)?;
+    let prm = Params::load(&ctx.accounts.params)?;
+    prm.require_on(params::FAMILY_STOPS)?;
     let g = ctx.accounts.smart.guard;
     require!(g.stop_bps != 0, VaultError::SmartStopNotAllowed);
-    let now = Clock::get()?.unix_timestamp;
     let price = &ctx.accounts.asset_price;
-    require!(price.price_e12 > 0 && now - price.updated_at <= MAX_PRICE_AGE_SECS, VaultError::BadPrice);
+    require!(price.price_e12 > 0 && prm.now - price.updated_at <= prm.secs(params::PRICE_AGE_SECS), VaultError::BadPrice);
     let basket = &ctx.accounts.basket;
     require!(basket.active().iter().any(|c| c.mint == price.mint), VaultError::BadStop);
 
@@ -425,18 +377,6 @@ pub fn smart_set_stop(ctx: Context<StrategistStop>) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------- accounts
-
-#[derive(Accounts)]
-pub struct SetSmartConfig<'info> {
-    #[account(mut)]
-    pub authority: Signer<'info>,
-    /// Grown by hand to hold the fee after its fields (see SMART_FEE_OFFSET).
-    #[account(mut, seeds = [PROTOCOL_SEED], bump = protocol.bump, has_one = authority @ VaultError::NotProtocolAuthority)]
-    pub protocol: Account<'info, Protocol>,
-    #[account(init_if_needed, payer = authority, space = 8 + Strategist::INIT_SPACE, seeds = [STRATEGIST_SEED], bump)]
-    pub strategist: Account<'info, Strategist>,
-    pub system_program: Program<'info, System>,
-}
 
 #[derive(Accounts)]
 pub struct SetVerified<'info> {
@@ -475,19 +415,9 @@ pub struct EnableSmart<'info> {
     #[account(mut)]
     pub creator_gravi: Option<UncheckedAccount<'info>>,
     pub gravi_token_program: Option<Interface<'info, TokenInterface>>,
-}
-
-#[derive(Accounts)]
-pub struct SetSmartBurn<'info> {
-    #[account(mut)]
-    pub authority: Signer<'info>,
-    /// Grown by hand to hold the smart burn after its fields (see SMART_BURN_OFFSET).
-    #[account(mut, seeds = [PROTOCOL_SEED], bump = protocol.bump, has_one = authority @ VaultError::NotProtocolAuthority)]
-    pub protocol: Account<'info, Protocol>,
-    /// Read for its decimals, to set the ceiling in whole GRAVI. Fails until the mint is set.
-    #[account(address = protocol.gravi_mint @ VaultError::GraviMintNotSet)]
-    pub gravi_mint: InterfaceAccount<'info, MintI>,
-    pub system_program: Program<'info, System>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -497,6 +427,9 @@ pub struct CreatorSmart<'info> {
     pub basket: Account<'info, Basket>,
     #[account(mut, seeds = [SMART_SEED, basket.key().as_ref()], bump = smart.bump, has_one = basket)]
     pub smart: Box<Account<'info, Smart>>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -529,6 +462,9 @@ pub struct StrategistBasket<'info> {
     pub basket: Account<'info, Basket>,
     #[account(mut, seeds = [SMART_SEED, basket.key().as_ref()], bump = smart.bump, has_one = basket)]
     pub smart: Box<Account<'info, Smart>>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -546,6 +482,9 @@ pub struct StrategistAdd<'info> {
     pub asset_entry: UncheckedAccount<'info>,
     /// CHECK: the basket's vault for the asset, checked by `read_vault` (canonical ATA).
     pub vault: UncheckedAccount<'info>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -562,4 +501,7 @@ pub struct StrategistStop<'info> {
     #[account(seeds = [PRICE_SEED, asset_price.mint.as_ref()], bump = asset_price.bump)]
     pub asset_price: Account<'info, AssetPrice>,
     pub system_program: Program<'info, System>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }

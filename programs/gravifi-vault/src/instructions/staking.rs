@@ -11,26 +11,10 @@ use anchor_spl::token_interface::{self, Mint as MintI, TokenAccount as TokenAcco
 
 use crate::errors::VaultError;
 use crate::instructions::buyback::{finish_follows, oracle_floor, redeem_into};
+use crate::instructions::protocol::set_protocol_flag;
+use crate::params::{self, Params, PARAMS_ID};
 use crate::state::*;
 use crate::token_util::*;
-
-/// Sets a protocol flag, growing the protocol account's tail to hold it the first time.
-pub(crate) fn set_protocol_flag<'info>(protocol: &AccountInfo<'info>, payer: &AccountInfo<'info>, system_program: &AccountInfo<'info>, flag: u8, on: bool) -> Result<()> {
-    let need = PROTOCOL_FLAGS_OFFSET + 1;
-    if protocol.data_len() < need {
-        let short = Rent::get()?.minimum_balance(need).saturating_sub(protocol.lamports());
-        if short > 0 {
-            anchor_lang::system_program::transfer(
-                CpiContext::new(system_program.clone(), anchor_lang::system_program::Transfer { from: payer.clone(), to: protocol.clone() }),
-                short,
-            )?;
-        }
-        protocol.resize(need)?;
-    }
-    let mut data = protocol.try_borrow_mut_data()?;
-    data[PROTOCOL_FLAGS_OFFSET] = if on { data[PROTOCOL_FLAGS_OFFSET] | flag } else { data[PROTOCOL_FLAGS_OFFSET] & !flag };
-    Ok(())
-}
 
 /// Sets up the stake pool and turns staking on: from here every protocol fee owes stakers their
 /// share, for good. Protocol authority, once.
@@ -45,29 +29,13 @@ pub fn init_staking(ctx: Context<InitStaking>) -> Result<()> {
     set_protocol_flag(&a.protocol.to_account_info(), &a.authority.to_account_info(), &a.system_program.to_account_info(), FLAG_STAKING, true)
 }
 
-/// Moves the threshold, in GRAVI base units, up to its ceiling. Lower applies now; higher after
-/// STAKE_THRESHOLD_NOTICE_SECS. Either replaces a raise still waiting. Protocol authority.
-pub fn set_stake_threshold(ctx: Context<SetStakeThreshold>, threshold: u64) -> Result<()> {
-    let now = Clock::get()?.unix_timestamp;
-    let p = &mut ctx.accounts.pool;
-    let ceiling = MAX_STAKE_THRESHOLD_TOKENS.checked_mul(p.one_gravi).ok_or(VaultError::MathOverflow)?;
-    require!(threshold > 0 && threshold <= ceiling, VaultError::BadStakeThreshold);
-    p.threshold = p.threshold_at(now);
-    p.next_threshold_at = 0;
-    if threshold <= p.threshold {
-        p.threshold = threshold;
-    } else {
-        p.next_threshold = threshold;
-        p.next_threshold_at = now + STAKE_THRESHOLD_NOTICE_SECS;
-    }
-    Ok(())
-}
-
-/// Stakes `amount` GRAVI, any amount. It counts STAKE_WARMUP_SECS from now; a top-up waits on its own,
-/// and what already counts keeps counting.
+/// Stakes `amount` GRAVI, any amount. It counts the `STAKE_WARMUP_SECS` param (two days) from now; a
+/// top-up waits on its own, and what already counts keeps counting.
 pub fn stake(ctx: Context<StakeMove>, amount: u64) -> Result<()> {
     require!(amount > 0, VaultError::BadParameter);
-    let now = Clock::get()?.unix_timestamp;
+    let prm = Params::load(&ctx.accounts.params)?;
+    prm.require_on(params::FAMILY_STAKING)?;
+    let now = prm.now;
     let a = &mut *ctx.accounts;
     let before = read_vault(&a.pool_gravi.to_account_info(), &a.pool.key(), &a.gravi_mint.key())?.amount;
     token_interface::transfer_checked(
@@ -93,15 +61,19 @@ pub fn stake(ctx: Context<StakeMove>, amount: u64) -> Result<()> {
     s.sync(&mut a.pool, now)?;
     s.amount = s.amount.checked_add(received).ok_or(VaultError::MathOverflow)?;
     s.pending = s.pending.checked_add(received).ok_or(VaultError::MathOverflow)?;
-    s.pending_at = now;
+    // Written so that `pending_at + STAKE_WARMUP_SECS` is when it counts: the warm-up in force now
+    // is fixed on the stake, and a later change to it moves no stake already warming.
+    s.pending_at = now + prm.secs(params::STAKE_WARMUP_SECS) - STAKE_WARMUP_SECS;
     s.sync(&mut a.pool, now)
 }
 
 /// Starts `amount` on its way out, what's still warming first: it earns and frees nothing from now
-/// on, and can be withdrawn after STAKE_UNSTAKE_SECS. Asking again restarts the wait for all of it.
+/// on, and can be withdrawn after the `STAKE_UNSTAKE_SECS` param (seven days), the time written on
+/// the stake. Asking again restarts the wait for all of it.
 pub fn unstake(ctx: Context<StakeUpdate>, amount: u64) -> Result<()> {
     require!(amount > 0, VaultError::BadParameter);
-    let now = Clock::get()?.unix_timestamp;
+    let prm = Params::load(&ctx.accounts.params)?;
+    let now = prm.now;
     let a = &mut *ctx.accounts;
     require!(amount <= a.stake.amount, VaultError::NotEnoughStaked);
     a.pool.accrue(now)?;
@@ -111,7 +83,7 @@ pub fn unstake(ctx: Context<StakeUpdate>, amount: u64) -> Result<()> {
     s.pending -= s.pending.min(amount);
     s.amount -= amount;
     s.unstaking = s.unstaking.checked_add(amount).ok_or(VaultError::MathOverflow)?;
-    s.unstake_at = now + STAKE_UNSTAKE_SECS;
+    s.unstake_at = now + prm.secs(params::STAKE_UNSTAKE_SECS);
     s.sync(&mut a.pool, now)
 }
 
@@ -189,16 +161,18 @@ pub fn stake_refresh(ctx: Context<StakeRefresh>) -> Result<()> {
 }
 
 /// Streams whatever SOL the rewards PDA holds beyond what's already promised over the next
-/// STAKE_PERIOD_SECS. Anyone may call it, and anyone may add SOL to the pot first by sending
+/// `STAKE_PERIOD_SECS` param (30 days). Anyone may call it, and anyone may add SOL to the pot first by sending
 /// wrapped SOL to the account.
 ///
 /// Once the last month's has paid out, it starts the next month's. While one is running, it tops
-/// it up: what's left of it and the new SOL are spread over a fresh STAKE_PERIOD_SECS, so SOL that
-/// arrives after a month was started early (by a dust donation) waits for nothing. A top-up must
-/// bring at least what the running month has paid out so far, so the rate never falls: a dust
-/// top-up can't stretch a month's payout out.
+/// it up: what's left of it and the new SOL are spread over a fresh period, so SOL that arrives
+/// after a month was started early (by a dust donation) waits for nothing. The rate never falls: a
+/// dust top-up can't stretch a month's payout out. (With the period unchanged that's a top-up
+/// bringing at least what the running month has paid out so far.)
 pub fn stake_fund(ctx: Context<StakeFund>) -> Result<()> {
-    let now = Clock::get()?.unix_timestamp;
+    let prm = Params::load(&ctx.accounts.params)?;
+    let period = prm.secs(params::STAKE_PERIOD_SECS);
+    let now = prm.now;
     let a = &mut *ctx.accounts;
     a.pool.accrue(now)?;
     let held = read_vault(&a.pot.to_account_info(), &a.rewards.key(), &NATIVE_MINT)?.amount;
@@ -208,18 +182,18 @@ pub fn stake_fund(ctx: Context<StakeFund>) -> Result<()> {
     require!(new > 0, VaultError::NothingToTake);
     let new_scaled = new as u128 * STAKE_RATE_SCALE;
     let rate = if now < p.stream_end {
-        // Still to stream, and what the month has streamed so far, both at the running rate.
+        // What's still to stream at the running rate and the new SOL, over a fresh period.
         let left = p.rate.checked_mul((p.stream_end - now) as u128).ok_or(VaultError::MathOverflow)?;
-        let streamed = p.rate.checked_mul((STAKE_PERIOD_SECS - (p.stream_end - now)) as u128).ok_or(VaultError::MathOverflow)?;
-        require!(new_scaled >= streamed, VaultError::StreamRunning);
-        left.checked_add(new_scaled).ok_or(VaultError::MathOverflow)? / STAKE_PERIOD_SECS as u128
+        let rate = left.checked_add(new_scaled).ok_or(VaultError::MathOverflow)? / period as u128;
+        require!(rate >= p.rate, VaultError::StreamRunning);
+        rate
     } else {
         p.periods = p.periods.saturating_add(1);
-        new_scaled / STAKE_PERIOD_SECS as u128
+        new_scaled / period as u128
     };
     p.rate = rate;
     p.last_update = now;
-    p.stream_end = now + STAKE_PERIOD_SECS;
+    p.stream_end = now + period;
     p.funded = p.funded.checked_add(new).ok_or(VaultError::MathOverflow)?;
     Ok(())
 }
@@ -228,7 +202,6 @@ pub fn stake_fund(ctx: Context<StakeFund>) -> Result<()> {
 /// Permissionless.
 pub fn stake_sweep(ctx: Context<StakeSweep>) -> Result<()> {
     let a = &mut *ctx.accounts;
-    require!(a.basket.control != ControlMode::Dao, VaultError::BadParameter);
     let held = read_vault(&a.treasury_shares.to_account_info(), &a.protocol.key(), &a.share_mint.key())?.amount;
     read_vault(&a.reward_shares.to_account_info(), &a.rewards.key(), &a.share_mint.key())?;
     // What the treasury holds for the creator isn't stakers' to take.
@@ -282,12 +255,13 @@ pub fn stake_redeem<'info>(ctx: Context<'_, '_, 'info, 'info, StakeRedeem<'info>
 /// rebalancer, who delivers wrapped SOL to the pot in the same transaction. `stake_sell_finish`
 /// must follow and checks at least the oracle value, less `max_slippage_bps`, came back.
 pub fn stake_sell_start(ctx: Context<StakeSellStart>, sell_amount: u64, max_slippage_bps: u16, refund: u64) -> Result<()> {
+    let prm = Params::load(&ctx.accounts.params)?;
     require!(sell_amount > 0, VaultError::BadParameter);
-    require!(max_slippage_bps <= MAX_BUYBACK_SLIPPAGE_BPS, VaultError::BadParameter);
+    require!(max_slippage_bps <= prm.bps(params::BUYBACK_SLIPPAGE_BPS), VaultError::BadParameter);
     let a = &mut *ctx.accounts;
     require!(!a.pool.sale_pending, VaultError::BuybackPending);
     let sell_mint = a.sell_mint.to_account_info();
-    let min_sol = oracle_floor(sell_amount, &a.sell_price, &a.sol_price, max_slippage_bps, refund, &sell_mint)?;
+    let min_sol = oracle_floor(&prm, sell_amount, &a.sell_price, &a.sol_price, max_slippage_bps, refund, &sell_mint)?;
     finish_follows(&a.instructions, <crate::instruction::StakeSellFinish as anchor_lang::Discriminator>::DISCRIMINATOR)?;
     let bump = [ctx.bumps.rewards];
     let seeds: [&[u8]; 2] = [STAKE_REWARDS_SEED, &bump];
@@ -404,15 +378,6 @@ pub struct InitStaking<'info> {
 }
 
 #[derive(Accounts)]
-pub struct SetStakeThreshold<'info> {
-    pub authority: Signer<'info>,
-    #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump, has_one = authority @ VaultError::NotProtocolAuthority)]
-    pub protocol: Box<Account<'info, Protocol>>,
-    #[account(mut, seeds = [STAKE_POOL_SEED], bump = pool.bump)]
-    pub pool: Box<Account<'info, StakePool>>,
-}
-
-#[derive(Accounts)]
 pub struct StakeMove<'info> {
     #[account(mut)]
     pub wallet: Signer<'info>,
@@ -430,6 +395,9 @@ pub struct StakeMove<'info> {
     pub pool_gravi: UncheckedAccount<'info>,
     pub gravi_token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -439,6 +407,9 @@ pub struct StakeUpdate<'info> {
     pub pool: Box<Account<'info, StakePool>>,
     #[account(mut, seeds = [STAKE_SEED, wallet.key().as_ref()], bump = stake.bump)]
     pub stake: Box<Account<'info, Stake>>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -505,6 +476,9 @@ pub struct StakeFund<'info> {
     pub rewards: UncheckedAccount<'info>,
     /// CHECK: the rewards PDA's canonical SOL account, checked in the instruction.
     pub pot: UncheckedAccount<'info>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -568,6 +542,9 @@ pub struct StakeSellStart<'info> {
     /// CHECK: the instructions sysvar, to find the matching finish.
     #[account(address = anchor_lang::solana_program::sysvar::instructions::ID)]
     pub instructions: UncheckedAccount<'info>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]

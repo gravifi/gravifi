@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { Keypair, PublicKey, SystemProgram, TransactionInstruction } from "@solana/web3.js";
 import { createInitializeMint2Instruction } from "@solana/spl-token";
 import { BN, TOKEN_2022_PROGRAM_ID, createMint, expectError, fund, now, pda, rpc, send, warp, type Ctx } from "./helpers.ts";
-import { world } from "./fixtures.ts";
+import { world, initKeepers } from "./fixtures.ts";
 
 const RECEIVER = new PublicKey("rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ");
 const DISCRIMINATOR = Buffer.from([34, 241, 35, 99, 157, 126, 244, 205]);
@@ -17,7 +17,7 @@ const $ = (usd: number) => BigInt(Math.round(usd * 1e6)) * 1_000_000n; // USD x1
 async function priceWorld() {
   const w = await world();
   const keeper = fund(w.ctx);
-  await rpc(w.ctx, w.ctx.vault.methods.initKeepers(keeper.publicKey, keeper.publicKey).accountsPartial({ authority: w.ctx.payer.publicKey, keepers: pda.keepers() }));
+  await initKeepers(w.ctx, keeper.publicKey, keeper.publicKey);
   return { ...w, keeper };
 }
 type PW = Awaited<ReturnType<typeof priceWorld>>;

@@ -5,6 +5,7 @@ use anchor_spl::token_interface::{self, Mint as MintI, TokenAccount as TokenAcco
 
 use crate::errors::VaultError;
 use crate::instructions::invite::invited;
+use crate::params::{self, Params, PARAMS_ID};
 use crate::state::*;
 use crate::token_util::*;
 
@@ -17,6 +18,8 @@ pub fn seed_basket<'info>(
 ) -> Result<()> {
     require!(!ctx.accounts.basket.seeded, VaultError::AlreadySeeded);
     require!(!ctx.accounts.basket.mint_paused, VaultError::MintPaused);
+    let prm = Params::load(&ctx.accounts.params)?;
+    prm.require_on(params::FAMILY_MINT)?;
     require!(shares > 0, VaultError::ZeroShares);
     require_keys_eq!(
         ctx.accounts.payer.key(),
@@ -52,6 +55,7 @@ pub fn seed_basket<'info>(
         invited: false,
         creator_cut_bps: 0,
         min_net: 0,
+        fee_cap: prm.bps(params::TRANSFER_FEE_CAP_BPS),
     };
     collect_and_mint(deposit, ctx.remaining_accounts, shares)
 }
@@ -76,6 +80,8 @@ pub fn mint_in_kind<'info>(
     min_shares: u64,
 ) -> Result<()> {
     require!(ctx.accounts.basket.seeded, VaultError::NotSeeded);
+    let prm = Params::load(&ctx.accounts.params)?;
+    prm.require_on(params::FAMILY_MINT)?;
     let (quads, extra) = split_quads(ctx.remaining_accounts, ctx.accounts.basket.constituent_count)?;
     let invited = invited(extra, &ctx.accounts.payer.key())?;
     require!(!ctx.accounts.basket.mint_paused, VaultError::MintPaused);
@@ -126,6 +132,7 @@ pub fn mint_in_kind<'info>(
         invited,
         creator_cut_bps,
         min_net: if net_floor { floor } else { 0 },
+        fee_cap: prm.bps(params::TRANSFER_FEE_CAP_BPS),
     };
     collect_and_mint(deposit, quads, shares)
 }
@@ -276,6 +283,8 @@ pub(crate) struct Deposit<'a, 'info> {
     pub creator_cut_bps: u16,
     /// The fewest shares the payer must receive, after the fee and the cut.
     pub min_net: u64,
+    /// The highest transfer fee an asset may charge to take new money (`TRANSFER_FEE_CAP_BPS`).
+    pub fee_cap: u16,
 }
 
 /// Shared body of `seed_basket` and `mint_in_kind`: pull every sleeve in, then mint.
@@ -323,7 +332,7 @@ pub(crate) fn collect_and_mint<'info>(d: Deposit<'_, 'info>, remaining: &[Accoun
         // is credited the full amount. New money stops if the fee is raised past the cap.
         let fee = TransferFee::of(mint_ai)?;
         if amount > 0 {
-            fee.assert_within_cap()?;
+            fee.assert_within_cap(d.fee_cap)?;
         }
         transfer_from_user(
             mint_ai,
@@ -427,9 +436,9 @@ pub(crate) fn protocol_cut(shares: u64, protocol: &Account<Protocol>, basket: &B
 
 /// Counts the stakers' share of `fee` on the basket once staking is on: it stays in the treasury's
 /// shares, which `stake_sweep` moves it out of and `treasury_withdraw` leaves alone. Rounded up,
-/// never past the treasury's cut. A legacy Dao basket counts none (see `Basket::stake_owed`).
+/// never past the treasury's cut.
 fn owe_stakers(basket: &mut Basket, protocol: &Account<Protocol>, fee: u64, treasury_fee: u64) -> Result<()> {
-    if basket.control == ControlMode::Dao || protocol_flags(&protocol.to_account_info()) & FLAG_STAKING == 0 {
+    if protocol_flags(&protocol.to_account_info()) & FLAG_STAKING == 0 {
         return Ok(());
     }
     let share = u64::try_from((fee as u128 * STAKER_SHARE_BPS).div_ceil(BPS_DENOM)).map_err(|_| VaultError::MathOverflow)?.min(treasury_fee);
@@ -487,6 +496,9 @@ pub struct SeedBasket<'info> {
     pub treasury_shares: Box<InterfaceAccount<'info, TokenAccountI>>,
 
     pub share_token_program: Interface<'info, TokenInterface>,
+    /// CHECK: the params account (`params.rs`): the mint switch and the transfer-fee cap.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -520,6 +532,9 @@ pub struct MintInKind<'info> {
     pub allow_entry: Option<Account<'info, AllowEntry>>,
 
     pub share_token_program: Interface<'info, TokenInterface>,
+    /// CHECK: the params account (`params.rs`): the mint switch and the transfer-fee cap.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]

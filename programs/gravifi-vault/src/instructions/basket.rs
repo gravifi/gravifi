@@ -7,6 +7,7 @@ use anchor_lang::prelude::*;
 use anchor_spl::token_interface::TokenInterface;
 
 use crate::errors::VaultError;
+use crate::params::{self, Params, PARAMS_ID};
 use crate::state::*;
 use crate::token_util::*;
 use anchor_lang::solana_program::program::{invoke, invoke_signed};
@@ -41,12 +42,14 @@ pub fn initialize_basket<'info>(
     ctx: Context<'_, '_, 'info, 'info, InitializeBasket<'info>>,
     args: InitBasketArgs,
 ) -> Result<()> {
+    let prm = Params::load(&ctx.accounts.params)?;
+    prm.require_on(params::FAMILY_CREATE)?;
     let n = args.mints.len();
     require!(n == args.target_bps.len(), VaultError::BadRemainingAccounts);
     require!(n >= 2, VaultError::TooFewConstituents);
     require!(n <= MAX_LAUNCH_CONSTITUENTS, VaultError::TooManyConstituents);
     require!(args.mgmt_fee_bps <= MAX_CREATOR_FEE_BPS, VaultError::FeeTooHigh);
-    check_policy(args.rebalance_mode, args.interval_secs, args.drift_bps)?;
+    check_policy(&prm, args.rebalance_mode, args.interval_secs, args.drift_bps)?;
     require!(args.control != ControlMode::Dao, VaultError::GovernanceRemoved);
     // A basket becomes smart after it's created (`enable_smart`), which writes its guardrails.
     require!(args.control != ControlMode::Smart, VaultError::SmartNotAllowed);
@@ -80,7 +83,7 @@ pub fn initialize_basket<'info>(
         // Checked again, not just at listing: a hook authority can enable the hook later,
         // and a fee authority can raise the fee.
         assert_no_active_transfer_hook(mint_ai)?;
-        TransferFee::of(mint_ai)?.assert_within_cap()?;
+        TransferFee::of(mint_ai)?.assert_within_cap(prm.bps(params::TRANSFER_FEE_CAP_BPS))?;
 
         constituents.push(Constituent {
             mint: *mint_key,
@@ -138,7 +141,7 @@ pub(crate) struct GraviAccounts<'a, 'info> {
 }
 
 /// Burns the per-asset GRAVI for `assets` assets from `owner`'s account and counts it. The
-/// burn-exempt wallet (`set_burn_exempt`), if `owner` is it, burns nothing.
+/// burn-exempt wallet (`set_role` ROLE_BURN_EXEMPT), if `owner` is it, burns nothing.
 fn burn_per_asset<'info>(
     c: &mut CreationBurn,
     protocol: &Protocol,
@@ -212,11 +215,13 @@ pub fn set_targets(ctx: Context<Reconfigure>, target_bps: Vec<u16>) -> Result<()
 pub fn add_constituent(ctx: Context<AddConstituent>) -> Result<()> {
     authorise_recipe(&ctx.accounts.basket, &ctx.accounts.authority)?;
     let mint_key = ctx.accounts.mint.key();
+    let prm = Params::load(&ctx.accounts.params)?;
     check_addable(
         &ctx.accounts.basket,
         &ctx.accounts.mint.to_account_info(),
         &ctx.accounts.asset_entry.to_account_info(),
         &ctx.accounts.vault.to_account_info(),
+        &prm,
     )?;
 
     // An added asset pays its GRAVI burn as if the basket had started with it.
@@ -250,7 +255,7 @@ pub fn remove_constituent(ctx: Context<Reconfigure>, index: u8) -> Result<()> {
 
 /// What adding `mint` to `basket` needs, whoever adds it: a listed asset not already in it, room
 /// for one more, no active transfer hook or fee past the cap, and the basket's vault for it.
-pub(crate) fn check_addable(basket: &Account<Basket>, mint_ai: &AccountInfo, entry_ai: &AccountInfo, vault_ai: &AccountInfo) -> Result<()> {
+pub(crate) fn check_addable(basket: &Account<Basket>, mint_ai: &AccountInfo, entry_ai: &AccountInfo, vault_ai: &AccountInfo, prm: &Params) -> Result<()> {
     let mint_key = mint_ai.key();
     require!((basket.constituent_count as usize) < MAX_LAUNCH_CONSTITUENTS, VaultError::TooManyConstituents);
     require!(basket.active().iter().all(|c| c.mint != mint_key), VaultError::DuplicateConstituent);
@@ -258,7 +263,7 @@ pub(crate) fn check_addable(basket: &Account<Basket>, mint_ai: &AccountInfo, ent
     require_keys_eq!(entry.mint, mint_key, VaultError::AssetNotListed);
     require!(entry.status == AssetStatus::Listed, VaultError::AssetNotListed);
     assert_no_active_transfer_hook(mint_ai)?;
-    TransferFee::of(mint_ai)?.assert_within_cap()?;
+    TransferFee::of(mint_ai)?.assert_within_cap(prm.bps(params::TRANSFER_FEE_CAP_BPS))?;
     read_vault(vault_ai, &basket.key(), &mint_key)?;
     Ok(())
 }
@@ -291,7 +296,7 @@ pub fn set_policy(
     require!(mgmt_fee_bps <= MAX_CREATOR_FEE_BPS, VaultError::FeeTooHigh);
     // A basket has the yearly fee or the creator's cut, never both.
     require!(mgmt_fee_bps == 0 || ctx.accounts.basket.cut_bps() == 0, VaultError::FeeTooHigh);
-    check_policy(rebalance_mode, interval_secs, drift_bps)?;
+    check_policy(&Params::load(&ctx.accounts.params)?, rebalance_mode, interval_secs, drift_bps)?;
 
     let basket = &mut ctx.accounts.basket;
     if basket.mgmt_fee_bps != mgmt_fee_bps {
@@ -319,21 +324,12 @@ pub fn disallow_wallet(_ctx: Context<DisallowWallet>) -> Result<()> {
     Ok(())
 }
 
-/// Holder governance was removed. A basket that had been handed to its holders is
-/// otherwise frozen (no governor can act for it any more), so the protocol authority can
-/// return it to its creator. Only ever acts on such a basket, and none can be created now.
-pub fn restore_creator_control(ctx: Context<RestoreControl>) -> Result<()> {
-    let basket = &mut ctx.accounts.basket;
-    require!(basket.control == ControlMode::Dao, VaultError::NotDaoBasket);
-    basket.control = ControlMode::Creator;
-    // These bytes held its governor's address; clear them for their new use.
-    basket.rebalance_supply = 0;
-    basket.stake_owed = 0;
-    basket.community = 0;
-    basket.reserved = [0; 5];
-    basket.creator_cut_bps = 0;
-    basket.creator_unclaimed = 0;
-    Ok(())
+/// Creates a basket's extension account (`ext.rs`) if it isn't there yet, the payer paying its
+/// rent. Permissionless: it only holds room for features that need it, which write their own
+/// records; until one does it's empty.
+pub fn ext_init(ctx: Context<ExtInit>) -> Result<()> {
+    let a = &ctx.accounts;
+    crate::ext::ensure(&a.ext.to_account_info(), &a.basket.key(), &a.payer.to_account_info(), &a.system_program.to_account_info())
 }
 
 /// Splits (or reverse-splits) the basket's shares by `numerator`:`denominator` by
@@ -342,7 +338,8 @@ pub fn restore_creator_control(ctx: Context<RestoreControl>) -> Result<()> {
 /// Only the creator of a creator-managed basket can split it.
 pub fn split(ctx: Context<Split>, numerator: u16, denominator: u16) -> Result<()> {
     authorise_mandate(&ctx.accounts.basket, &ctx.accounts.authority)?;
-    apply_split(&ctx.accounts.basket, ctx.accounts.share_mint.as_ref(), ctx.accounts.token_program.as_ref(), numerator, denominator)
+    let cooldown = Params::load(&ctx.accounts.params)?.secs(params::SPLIT_COOLDOWN_SECS);
+    apply_split(&ctx.accounts.basket, ctx.accounts.share_mint.as_ref(), ctx.accounts.token_program.as_ref(), numerator, denominator, cooldown)
 }
 
 /// The split itself, for whoever was allowed to ask for it.
@@ -352,6 +349,7 @@ pub(crate) fn apply_split<'info>(
     token_program: &AccountInfo<'info>,
     numerator: u16,
     denominator: u16,
+    cooldown: i64,
 ) -> Result<()> {
     require!(
         (1..=100).contains(&numerator) && (1..=100).contains(&denominator) && numerator != denominator,
@@ -361,7 +359,7 @@ pub(crate) fn apply_split<'info>(
     let current = {
         let data = share_mint.try_borrow_data()?;
         let last = extensions::last_split_at(&data).ok_or(VaultError::SplitUnsupported)?;
-        require!(last == 0 || now >= last + SPLIT_COOLDOWN_SECS, VaultError::SplitTooSoon);
+        require!(last == 0 || now >= last + cooldown, VaultError::SplitTooSoon);
         extensions::current_multiplier(&data, now).ok_or(VaultError::SplitUnsupported)?
     };
     let next = current * numerator as f64 / denominator as f64;
@@ -422,14 +420,14 @@ pub(crate) fn create_share_mint(ctx: &Context<InitializeBasket>) -> Result<()> {
     Ok(())
 }
 
-/// A schedule (unless drift-only) of at least a day, and a drift tolerance (unless
-/// schedule-only) of at least 0.5%.
-pub(crate) fn check_policy(mode: RebalanceMode, interval_secs: i64, drift_bps: u16) -> Result<()> {
+/// A schedule (unless drift-only) of at least `POLICY_MIN_INTERVAL_SECS` (a day), and a drift
+/// tolerance (unless schedule-only) of at least `POLICY_MIN_DRIFT_BPS` (0.5%).
+pub(crate) fn check_policy(prm: &Params, mode: RebalanceMode, interval_secs: i64, drift_bps: u16) -> Result<()> {
     if mode != RebalanceMode::Drift {
-        require!(interval_secs >= MIN_POLICY_INTERVAL_SECS, VaultError::BadPolicy);
+        require!(interval_secs >= prm.secs(params::POLICY_MIN_INTERVAL_SECS), VaultError::BadPolicy);
     }
     if mode != RebalanceMode::Periodic {
-        require!(drift_bps >= MIN_POLICY_DRIFT_BPS && (drift_bps as u128) <= BPS_DENOM, VaultError::BadPolicy);
+        require!(drift_bps >= prm.bps(params::POLICY_MIN_DRIFT_BPS) && (drift_bps as u128) <= BPS_DENOM, VaultError::BadPolicy);
     }
     Ok(())
 }
@@ -494,6 +492,9 @@ pub struct InitializeBasket<'info> {
     #[account(mut)]
     pub creator_gravi: Option<UncheckedAccount<'info>>,
     pub gravi_token_program: Option<Interface<'info, TokenInterface>>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -501,6 +502,9 @@ pub struct Reconfigure<'info> {
     pub authority: Signer<'info>,
     #[account(mut)]
     pub basket: Account<'info, Basket>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -527,6 +531,9 @@ pub struct AddConstituent<'info> {
     #[account(mut)]
     pub creator_gravi: Option<UncheckedAccount<'info>>,
     pub gravi_token_program: Option<Interface<'info, TokenInterface>>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -572,15 +579,6 @@ pub struct DisallowWallet<'info> {
 }
 
 #[derive(Accounts)]
-pub struct RestoreControl<'info> {
-    pub authority: Signer<'info>,
-    #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump, has_one = authority @ VaultError::NotProtocolAuthority)]
-    pub protocol: Account<'info, Protocol>,
-    #[account(mut)]
-    pub basket: Account<'info, Basket>,
-}
-
-#[derive(Accounts)]
 pub struct Split<'info> {
     pub authority: Signer<'info>,
     #[account(has_one = share_mint)]
@@ -591,4 +589,18 @@ pub struct Split<'info> {
     #[account(address = anchor_spl::token_2022::ID)]
     /// CHECK: the Token-2022 program.
     pub token_program: UncheckedAccount<'info>,
+    /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
+    #[account(address = PARAMS_ID)]
+    pub params: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct ExtInit<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub basket: Account<'info, Basket>,
+    /// CHECK: `[EXT_SEED, basket]`, checked and created by hand in `ext::ensure`.
+    #[account(mut)]
+    pub ext: UncheckedAccount<'info>,
+    pub system_program: Program<'info, System>,
 }

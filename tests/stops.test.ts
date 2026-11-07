@@ -22,7 +22,7 @@ import {
   send,
   warp,
 } from "./helpers.ts";
-import { NO_GRAVI, SEED_SHARES, UNITS_A, UNITS_B, feeShares, listAsset, quads, world, type World } from "./fixtures.ts";
+import { NO_GRAVI, SEED_SHARES, UNITS_A, UNITS_B, feeShares, listAsset, quads, world, type World, initKeepers, setParam, PARAM, PARAM_NOTICE, FAMILY } from "./fixtures.ts";
 
 // World: 10 shares backed by 20 A ($1, 6 decimals) and 5 B ($6, 9 decimals): $20 + $30 = $50,
 // targets 60% A / 40% B.
@@ -36,7 +36,7 @@ const CONFIRM = 300;
 async function stopWorld(opts: Parameters<typeof world>[0] = {}) {
   const w = await world(opts);
   const keeper = fund(w.ctx);
-  await rpc(w.ctx, w.ctx.vault.methods.initKeepers(keeper.publicKey, keeper.publicKey).accountsPartial({ authority: w.ctx.payer.publicKey, keepers: pda.keepers() }));
+  await initKeepers(w.ctx, keeper.publicKey, keeper.publicKey);
   const keeperA = await createAta(w.ctx, w.mintA, keeper.publicKey, TOKEN_PROGRAM_ID);
   await mintTo(w.ctx, w.mintA, keeperA, 1_000n * ONE_A, TOKEN_PROGRAM_ID);
   const keeperB = await createAta(w.ctx, w.mintB, keeper.publicKey, TOKEN_2022_PROGRAM_ID);
@@ -160,6 +160,36 @@ describe("stop losses", () => {
     assert.equal(s.stops.length, 0);
     assert.equal(s.fired, 1);
     await expectError(checkStop(w, w.mintB), "StopNotSet");
+  });
+
+  it("the confirmation and the stop range are params, after their week's notice", async () => {
+    const w = await stopWorld();
+    await setParam(w.ctx, PARAM.STOP_CONFIRM_SECS, 600n);
+    await setParam(w.ctx, PARAM.STOP_MIN_BPS, 300n);
+    await expectError(setStops(w, [stopArgs(w.mintB, 400, PRICE_B)]), "BadStop");
+    warp(w.ctx, PARAM_NOTICE);
+    await prices(w, PRICE_A, PRICE_B);
+    await setStops(w, [stopArgs(w.mintB, 400, PRICE_B)]); // 4%: B's stop at $5.76
+    await prices(w, PRICE_A, 5_700_000_000_000n);
+    await checkStop(w, w.mintB);
+    warp(w.ctx, CONFIRM);
+    await prices(w, PRICE_A, 5_700_000_000_000n);
+    await checkStop(w, w.mintB);
+    assert.deepEqual(await targets(w), [6_000, 4_000], "five minutes isn't ten");
+    warp(w.ctx, 600 - CONFIRM);
+    await prices(w, PRICE_A, 5_700_000_000_000n);
+    await checkStop(w, w.mintB);
+    assert.deepEqual(await targets(w), [10_000, 0]);
+  });
+
+  it("the stops switch stops setting and firing them; closing them still works", async () => {
+    const w = await stopWorld();
+    await setStops(w, [stopArgs(w.mintB, 3_000, PRICE_B)]);
+    await setParam(w.ctx, PARAM.KILL, BigInt(FAMILY.stops));
+    await prices(w, PRICE_A, 4_100_000_000_000n);
+    await expectError(checkStop(w, w.mintB), "FeatureOff");
+    await expectError(setStops(w, [stopArgs(w.mintB, 2_000, 4_100_000_000_000n)]), "FeatureOff");
+    await rpc(w.ctx, w.ctx.vault.methods.closeStops().accountsPartial({ creator: w.creator.publicKey, basket: w.basket, stopLoss: w.stopLoss }), [w.creator]);
   });
 
   it("a price back above the stop disarms it, and arming starts over", async () => {

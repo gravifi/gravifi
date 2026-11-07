@@ -136,9 +136,10 @@ add, remove and reweight assets and set the mandate's stops. The changes are mad
 strategist key, which can do nothing else: not move a token, not change a fee or a limit, not
 touch another basket.
 
-The program holds every Smart basket to limits in its code: at most 40% of the targets changed
-in any 24 hours and 100% in any 7 days, at most 35% in one asset and 30% in one that isn't
-GraviFi Verified. A creator can set tighter ones, never looser. A new mandate or new limits wait
+The program holds every Smart basket to limits: at most 40% of the targets changed in any 24
+hours and 100% in any 7 days, at most 35% in one asset and 30% in one that isn't GraviFi
+Verified (the protocol authority can move them within bounds in the code, after 7 days' notice,
+section 8.2). A creator can set tighter ones, never looser. A new mandate or new limits wait
 a day, so holders who disagree can redeem first, and the creator or the guardian can pause the
 reviews. A Smart basket starts with at least $50.
 
@@ -156,7 +157,7 @@ comes round, or it drifts past its tolerance, a keeper trades it back:
   up to 50%, each still stopping at the bought asset's target.
 - **At unpredictable times**, so nobody can trade ahead of a known schedule.
 - **Against a price floor.** Each slice must fetch at least the oracle price, less a small
-  tolerance (1% for stocks and crypto; up to 3%, the program's ceiling, when a memecoin is
+  tolerance (1% for stocks and crypto; up to 3%, the program's ceiling today, when a memecoin is
   involved, whose pool fees alone can pass 1.5%), or the whole slice reverts. The keeper is lent the tokens to sell, and the program
   checks what comes back to the vault in the same transaction.
 
@@ -179,7 +180,7 @@ turns from the real ones. Each basket's page says when it's below the line.
 **The keeper is paid back, not paid.** Running a basket costs the keeper network fees: each
 slice, the prices posted for it, and once, the basket's rebalance record. Each slice pays it back
 what it spent on that basket so far, in the token the slice sells, and at most $0.05 a slice,
-a limit in the program's code. What isn't covered yet waits for the next slice. The keeper sells
+a limit the program enforces. What isn't covered yet waits for the next slice. The keeper sells
 those tokens for SOL. Holders pay that cost as a sliver of the sold token, and nobody earns
 anything from it. Sweeps pay back the same way. A buyback run pays the keeper back for all its
 sales at once, at most $0.50, only out of the burn's budget, and selling the stakers' tokens for
@@ -258,7 +259,8 @@ limits are in the program's code: the protocol fee can never
 exceed 0.50% (1.00% on a Smart basket), a creator's cut can never exceed 0.60% of a buy, a yearly fee can never exceed 0.20%, the creation burn can never exceed
 1,000,000 GRAVI per asset (the Smart burn 1,000,000 GRAVI once), and at least half of every protocol fee goes to the GRAVI burn, except
 an invited wallet's half fee in its first month (above). Changing
-any of them would take new code, in public.
+any of them would take new code, in public: the values the protocol authority can tune without
+an upgrade (section 8.2) include none of these ceilings.
 
 Opening a token account the first time a wallet holds an asset costs about 0.002 SOL of
 Solana rent, refunded when the account is closed. Trading shares wallet to wallet, or in any
@@ -398,7 +400,7 @@ or by its holders (section 8.1); there is no vote on the protocol. Control is sp
 | **A basket's creator** | Change their basket's weights, assets, rebalancing, cut (within the caps; a rise waits a day), stop losses, split; on a Smart basket, set its mandate and tighter limits (each waits a day) and pause it; set how wallets show its shares (name, ticker, picture); set an immutable basket's stop losses before its first deposit | Touch the vault's tokens; once the basket is immutable, anything but how wallets show its shares |
 | **The lister** (the app's listing key) | List a token a creator picked, inside the creator's own transaction, once it passed the app's checks | Anything else: delist, change a setting, move a token; or list a token whose new accounts start frozen, that can't move, or that's paused |
 | **The strategist** (the app's Smart-basket key) | Set a Smart basket's targets, add and remove its assets and put its mandate's stops on them, within that basket's limits | Move a token, change a fee or a limit, touch any basket that isn't Smart |
-| **The protocol authority** (the team) | List and delist assets, name the lister, the strategist and the guardian, set fees, the Smart fee, the creation burn and the Smart burn within the ceilings, name the one burn-exempt team wallet, move the staking threshold (a raise waits 7 days), open or close community mode, withdraw the treasury's shares (never what's owed to creators or stakers), match assets to Pyth feeds, name the keepers, set how wallets show any basket's shares, and upgrade the program | Through any of its settings: move a vault's tokens, block a redemption, exceed the fee or creation-burn ceilings, send less than half of the protocol fee to the burn (outside an invited wallet's half fee) |
+| **The protocol authority** (the team) | List and delist assets, name the lister, the strategist and the guardian, set fees, the Smart fee, the creation burn and the Smart burn within the ceilings, name the one burn-exempt team wallet, move the staking threshold (a raise waits 7 days), open or close community mode, tune the values and use the kill switches in section 8.2 within their bounds (user-facing changes wait 7 days), withdraw the treasury's shares (never what's owed to creators or stakers), match assets to Pyth feeds, name the keepers, set how wallets show any basket's shares, and upgrade the program | Through any of its settings: move a vault's tokens, block a redemption, exceed the fee or creation-burn ceilings or any bound in section 8.2, send less than half of the protocol fee to the burn (outside an invited wallet's half fee) |
 | **The price service** (its own key) | Post the prices rebalances, buybacks and stop losses are checked against, within the bounds above, read from Jupiter by itself | Anything else: trade, move a token, change a setting |
 | **The guardian** (none named today) | Delist an asset; pause a Smart basket's reviews | List anything, or anything else |
 | **The guard** (a separate server key) | Co-sign, with the app's key, a recurring plan's due fill or a hit stop's sale from that plan's or stop's own wallet (section 2.4) | Sign alone; touch a holder's main wallet; send funds anywhere but back to the owner |
@@ -442,6 +444,43 @@ sold or redeemed until withdrawn. In a community basket, staked shares vote:
 A majority can still do what its votes allow: within those limits it could replace a whole basket
 in about 6 days. A vote can be bought, and nothing on chain can stop that. Holders of a community
 basket are trusting its other holders, and can leave at any time.
+
+### 8.2 What the protocol authority can tune, and when
+
+Most of the numbers in this paper live in one account the protocol authority sets, so tuning them
+doesn't need a program upgrade. Each has bounds written in the code that no setting can pass, and
+none of them is a fee ceiling or the burn's floor: those stay in the code (section 5). Until a
+value is set it is the number this paper states.
+
+- **At once:** the longest invite (1 to 93 days).
+- **Tighter at once, looser after 7 days:** every value that bounds the app's own keys, so a lost
+  or misused team key can't loosen them overnight. Price checks (a move of 2%-30% per reference
+  without Pyth, over a reference of 15 minutes to a day; Pyth at most 15 minutes old and within
+  0.5%-10%), how fresh a price must be to trade on (30 seconds to 10 minutes), the keeper's
+  paybacks (at most $0.25 a slice and $2 a buyback run), the buyback's tolerance (0.5%-15%; it
+  sells fees, never a deposit), a rebalance's tolerance (0.1% to 5%), the slice cap (0.5% to 10%
+  of a basket) and a leaving asset's clip (5% to 100%).
+- **After 7 days' notice:** when an unpriced 0% asset counts as nothing (1 hour to 30 days), and
+  everything holders and creators live by. Stop losses (confirmation 1
+  to 60 minutes, the arming window 2 minutes to 3 hours, a stop 1%-20% to 50%-95% below its
+  reference), the policy minimums (a drift of 0.1%-5%, a schedule hourly to weekly), the
+  transfer-fee cap on new money (1% to 8%), the split cooldown (1 to 90 days), a cut rise's notice
+  (6 hours to 30 days), a mandate's notice (6 hours to 14 days), the Smart ceilings (5%-60% a day,
+  10%-150% a week, 10%-60% in one asset, 1%-50% unverified), staking's warm-up (1 hour to 14
+  days), unstaking (1 to 30 days) and a pot's month (7 to 90 days), and votes: voting 1 to 14
+  days, the wait 1 hour to 7 days, the window to run it 1 to 30 days, proposing 0.1%-10% of the
+  supply, quorum 1%-50%, a supermajority of 51%-90%, 1 to 10 open proposals.
+
+A change never moves a window already open: a proposal's vote, wait, window and passing rules,
+a stake's warm-up, an unstaking, a cut rise and a mandate keep the times and rules they started
+with.
+
+**Kill switches.** The authority can stop, at once, a family of instructions: new money in, new
+baskets, rebalancing, the buyback, stop losses, Smart baskets' strategist, new stakes, community
+votes, invites, or the lister. A switch only stops things; lifting it returns to the rules above.
+No switch reaches the way out: redeeming, unstaking and withdrawing, claiming, closing stops,
+pausing a Smart basket and handing a basket back to its creator always work. A new feature can be
+shipped switched off and turned on later, after the same 7 days' notice.
 
 ## 9. Risks
 

@@ -17,6 +17,7 @@ import {
   expectError,
   fund,
   mintTo,
+  now,
   pda,
   postPrices,
   rpc,
@@ -25,7 +26,7 @@ import {
   warp,
   type Ctx,
 } from "./helpers.ts";
-import { NO_GRAVI, SEED_SHARES, UNITS_A, UNITS_B, feeShares, fundHolder, initProtocol, listAsset, mintIx, quads, redeemIx, setCreationBurn, world } from "./fixtures.ts";
+import { NO_GRAVI, SEED_SHARES, UNITS_A, UNITS_B, feeShares, fundHolder, initProtocol, listAsset, mintIx, quads, redeemIx, setCreationBurn, world, initKeepers, protocolFeesIx, setRoleIx, setParamIx, ROLE, CONFIG, setParam, PARAM, PARAM_NOTICE, FAMILY } from "./fixtures.ts";
 
 const HOUR = 3_600;
 const DAY = 86_400;
@@ -47,11 +48,8 @@ type Guard = {
 const GUARD: Guard = { maxDayBps: 2_000, maxWeekBps: 5_000, maxWeightBps: 3_500, maxUnverifiedBps: 3_000, minAssets: 3, maxAssets: 6, stopBps: 3_500, stopTrailing: true };
 
 async function setSmartConfig(ctx: Ctx, strategist: PublicKey, feeBps: number, authority = ctx.payer) {
-  await rpc(
-    ctx,
-    ctx.vault.methods.setSmartConfig(strategist, feeBps).accountsPartial({ authority: authority.publicKey, protocol: pda.protocol(), strategist: pda.strategist() }),
-    [authority],
-  );
+  await rpc(ctx, setRoleIx(ctx, ROLE.strategist, strategist, authority.publicKey), [authority]);
+  await rpc(ctx, setParamIx(ctx, CONFIG.smartFee, feeBps, [], authority.publicKey), [authority]);
 }
 
 async function setVerified(ctx: Ctx, mint: PublicKey, verified: boolean, authority = ctx.payer) {
@@ -88,11 +86,7 @@ function forceSmart(ctx: Ctx, basket: PublicKey) {
 }
 
 async function setSmartBurn(ctx: Ctx, graviMint: PublicKey, amount: bigint, authority = ctx.payer) {
-  await rpc(
-    ctx,
-    ctx.vault.methods.setSmartBurn(new BN(amount.toString())).accountsPartial({ authority: authority.publicKey, protocol: pda.protocol(), graviMint }),
-    [authority],
-  );
+  await rpc(ctx, setParamIx(ctx, CONFIG.smartBurn, amount, [graviMint], authority.publicKey), [authority]);
 }
 
 /** Four listed assets at 25% each, A and B Verified, C and D not, and a fifth (E) listed with the
@@ -110,7 +104,7 @@ async function fourAssets(targetBps = [2_500, 2_500, 2_500, 2_500]) {
   const creator = fund(ctx);
   const strategist = fund(ctx);
   const guardian = fund(ctx);
-  await rpc(ctx, ctx.vault.methods.setGuardian(guardian.publicKey).accountsPartial({ authority: ctx.payer.publicKey, protocol: pda.protocol() }));
+  await rpc(ctx, setRoleIx(ctx, ROLE.guardian, guardian.publicKey, ctx.payer.publicKey));
   await setSmartConfig(ctx, strategist.publicKey, 80);
   await setVerified(ctx, A, true);
   await setVerified(ctx, B, true);
@@ -403,7 +397,7 @@ describe("smart baskets: the strategist", () => {
   it("puts the mandate's stop on an asset, below its fresh price, once", async () => {
     const w = await smartWorld();
     const keeper = fund(w.ctx);
-    await rpc(w.ctx, w.ctx.vault.methods.initKeepers(keeper.publicKey, keeper.publicKey).accountsPartial({ authority: w.ctx.payer.publicKey, keepers: pda.keepers() }));
+    await initKeepers(w.ctx, keeper.publicKey, keeper.publicKey);
     await postPrices(w.ctx, keeper, [[w.A, 2n * E12]]);
     const setStop = (mint: PublicKey, signer: Keypair = w.strategist) =>
       rpc(
@@ -432,7 +426,7 @@ describe("smart baskets: the strategist", () => {
 
     const noStop = await smartWorld({ ...GUARD, stopBps: 0 });
     const k2 = fund(noStop.ctx);
-    await rpc(noStop.ctx, noStop.ctx.vault.methods.initKeepers(k2.publicKey, k2.publicKey).accountsPartial({ authority: noStop.ctx.payer.publicKey, keepers: pda.keepers() }));
+    await initKeepers(noStop.ctx, k2.publicKey, k2.publicKey);
     await postPrices(noStop.ctx, k2, [[noStop.A, E12]]);
     await expectError(
       rpc(
@@ -469,7 +463,7 @@ describe("smart baskets: pause and mandate", () => {
 
     // A stop fires on a paused basket.
     const keeper = fund(w.ctx);
-    await rpc(w.ctx, w.ctx.vault.methods.initKeepers(keeper.publicKey, keeper.publicKey).accountsPartial({ authority: w.ctx.payer.publicKey, keepers: pda.keepers() }));
+    await initKeepers(w.ctx, keeper.publicKey, keeper.publicKey);
     await postPrices(w.ctx, keeper, [[w.A, E12]]);
     await rpc(
       w.ctx,
@@ -501,7 +495,7 @@ describe("smart baskets: pause and mandate", () => {
     const w = await smartWorld();
     warp(w.ctx, DAY); // off LiteSVM's clock at 0, where an arming time reads as none
     const keeper = fund(w.ctx);
-    await rpc(w.ctx, w.ctx.vault.methods.initKeepers(keeper.publicKey, keeper.publicKey).accountsPartial({ authority: w.ctx.payer.publicKey, keepers: pda.keepers() }));
+    await initKeepers(w.ctx, keeper.publicKey, keeper.publicKey);
     await postPrices(w.ctx, keeper, [[w.A, E12]]);
     // Before the first deposit a reference isn't checked against the price: the creator writes
     // one a hundred times A's price, so the stop arms at once.
@@ -548,6 +542,40 @@ describe("smart baskets: pause and mandate", () => {
     await expectError(apply(w), "NoPendingMandate");
     await expectError(setTargets(w, [2_500, 2_500, 2_500, 2_500]), "TurnoverDayCap");
     await setTargets(w, [3_000, 2_500, 2_500, 2_000]);
+  });
+
+  it("the notice and the ceilings are params: a mandate waits the notice in force when proposed, and a raised ceiling admits wider guardrails after its week", async () => {
+    const w = await smartWorld();
+    const next = hash('{"goal":"wider"}');
+    const wide = { ...GUARD, maxDayBps: 5_000, maxWeekBps: 10_000 };
+    await expectError(propose(w, next, wide), "BadGuardrails");
+    await setParam(w.ctx, PARAM.SMART_MAX_DAY_BPS, 5_000n);
+    await setParam(w.ctx, PARAM.MANDATE_NOTICE_SECS, BigInt(2 * DAY));
+    await expectError(propose(w, next, wide), "BadGuardrails");
+    warp(w.ctx, PARAM_NOTICE);
+    await propose(w, next, wide);
+    const at = Number((await smartAccount(w)).pendingAt);
+    assert.equal(at, now(w.ctx) + 2 * DAY);
+    // Shortened again: the mandate already waiting keeps its two days.
+    await setParam(w.ctx, PARAM.MANDATE_NOTICE_SECS, BigInt(6 * HOUR));
+    warp(w.ctx, PARAM_NOTICE);
+    assert.equal(Number((await smartAccount(w)).pendingAt), at);
+  });
+
+  it("the smart switch stops the strategist and new smart baskets; pausing and leaving still work", async () => {
+    const w = await smartWorld();
+    await setParam(w.ctx, PARAM.KILL, BigInt(FAMILY.smart));
+    await expectError(setTargets(w, [3_500, 2_500, 2_000, 2_000]), "FeatureOff");
+    await expectError(removeAsset(w, 0), "FeatureOff");
+    await pause(w, true, w.creator);
+    await pause(w, false, w.creator);
+    const other = await fourAssets();
+    await setParam(other.ctx, PARAM.KILL, BigInt(FAMILY.smart));
+    await expectError(enableSmart(other.ctx, other.basket, other.creator), "FeatureOff");
+    await propose(w, new Array(32).fill(0), GUARD, true);
+    warp(w.ctx, DAY);
+    await apply(w);
+    assert.deepEqual((await w.ctx.vault.account.basket.fetch(w.basket)).control, { creator: {} });
   });
 
   it("withdraws a waiting mandate, and hands the basket back to its creator after notice", async () => {
@@ -646,11 +674,11 @@ describe("smart baskets: the fee", () => {
     assert.equal(balance(w.ctx, ata(w.shareMint, w.creator.publicKey)), SEED_SHARES - fee);
     // The normal fee keeps its own 0.5% ceiling.
     await expectError(
-      rpc(w.ctx, w.ctx.vault.methods.setProtocolFees(51, 5_000).accountsPartial({ authority: w.ctx.payer.publicKey, protocol: pda.protocol() })),
+      rpc(w.ctx, protocolFeesIx(w.ctx, 51, 5_000)),
       "FeeTooHigh",
     );
     // A burn-exempt wallet set afterwards keeps the fee in place.
-    await rpc(w.ctx, w.ctx.vault.methods.setBurnExempt(w.creator.publicKey).accountsPartial({ authority: w.ctx.payer.publicKey, protocol: pda.protocol() }));
+    await rpc(w.ctx, setRoleIx(w.ctx, ROLE.burnExempt, w.creator.publicKey, w.ctx.payer.publicKey));
     const raw = Buffer.from(w.ctx.svm.getAccount(pda.protocol())!.data);
     assert.equal(raw.readUInt16LE(raw.length - 3), 100);
   });
@@ -711,7 +739,7 @@ describe("smart baskets: the smart burn", () => {
   it("burns nothing from the burn-exempt wallet (the team's)", async () => {
     const w = await fourAssets();
     await setSmartBurn(w.ctx, w.graviMint, 50_000n * GRAVI);
-    await rpc(w.ctx, w.ctx.vault.methods.setBurnExempt(w.creator.publicKey).accountsPartial({ authority: w.ctx.payer.publicKey, protocol: pda.protocol() }));
+    await rpc(w.ctx, setRoleIx(w.ctx, ROLE.burnExempt, w.creator.publicKey, w.ctx.payer.publicKey));
     await enableSmart(w.ctx, w.basket, w.creator, { ...GUARD, minAssets: 2 });
     assert.ok(await w.ctx.vault.account.smart.fetch(pda.smart(w.basket)));
   });

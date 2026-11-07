@@ -7,9 +7,11 @@
 use anchor_lang::prelude::*;
 
 pub mod errors;
+pub mod ext;
 pub mod extensions;
 pub mod instructions;
 pub mod metaplex;
+pub mod params;
 pub mod pyth;
 pub mod state;
 pub mod token_util;
@@ -38,40 +40,18 @@ pub mod gravifi_vault {
         instructions::protocol::init_protocol(ctx, gravi_mint, protocol_fee_bps, burn_share_bps)
     }
 
-    /// Hands the protocol to a new authority, e.g. from the deployer to the team multisig.
-    pub fn set_protocol_authority(ctx: Context<ProtocolAdmin>, new_authority: Pubkey) -> Result<()> {
-        instructions::protocol::set_protocol_authority(ctx, new_authority)
+    /// Names the key for a role (`ROLE_*` in `instructions/protocol.rs`): the authority, the
+    /// guardian, the GRAVI mint (once), the burn-exempt wallet, the lister, the strategist, the
+    /// price authority or the rebalancer. Protocol authority only.
+    pub fn set_role<'info>(ctx: Context<'_, '_, 'info, 'info, ProtocolConfig<'info>>, role: u8, key: Pubkey) -> Result<()> {
+        instructions::protocol::set_role(ctx, role, key)
     }
 
-    /// Sets the GRAVI mint, once. The token launches after the program, so `init_protocol`
-    /// may leave it unset; after this it can never change.
-    pub fn set_gravi_mint(ctx: Context<ProtocolAdmin>, gravi_mint: Pubkey) -> Result<()> {
-        instructions::protocol::set_gravi_mint(ctx, gravi_mint)
-    }
-
-    /// `Pubkey::default()` removes the guardian.
-    pub fn set_guardian(ctx: Context<ProtocolAdmin>, guardian: Pubkey) -> Result<()> {
-        instructions::protocol::set_guardian(ctx, guardian)
-    }
-
-    /// Names the lister, the one other key that may list assets (`register_asset`);
-    /// `Pubkey::default()` removes it. Protocol authority only.
-    pub fn set_lister(ctx: Context<SetLister>, lister: Pubkey) -> Result<()> {
-        instructions::protocol::set_lister(ctx, lister)
-    }
-
-    pub fn set_protocol_fees(
-        ctx: Context<ProtocolAdmin>,
-        protocol_fee_bps: u16,
-        burn_share_bps: u16,
-    ) -> Result<()> {
-        instructions::protocol::set_protocol_fees(ctx, protocol_fee_bps, burn_share_bps)
-    }
-
-    /// Sets the GRAVI a creator burns per asset in a basket, in base units; 0 turns it off.
-    /// Capped at `MAX_BURN_PER_ASSET_TOKENS` whole GRAVI. Protocol authority only.
-    pub fn set_creation_burn(ctx: Context<SetCreationBurn>, per_asset: u64) -> Result<()> {
-        instructions::protocol::set_creation_burn(ctx, per_asset)
+    /// Sets one of the protocol's tunables (`params.rs`), within the bounds and under the notice
+    /// written in the code, or one of its settings kept elsewhere (`CONFIG_*`: fees, burns, the
+    /// staking threshold, Community's door). Protocol authority only.
+    pub fn set_param<'info>(ctx: Context<'_, '_, 'info, 'info, ProtocolConfig<'info>>, id: u16, value: u64) -> Result<()> {
+        instructions::protocol::set_param(ctx, id, value)
     }
 
     /// Adds a mint to the set of assets baskets may be built from: signed by the protocol
@@ -99,7 +79,7 @@ pub mod gravifi_vault {
     // ------------------------------------------------------------------------------- baskets
 
     /// Creates the basket and its share mint, burning the creator's GRAVI for each of its assets
-    /// if the protocol asks for it (`set_creation_burn`). Remaining accounts are one `[mint, asset_entry]` pair per
+    /// if the protocol asks for it (`set_param` CONFIG_CREATION_BURN). Remaining accounts are one `[mint, asset_entry]` pair per
     /// constituent, in the order of `args.mints`.
     pub fn initialize_basket<'info>(
         ctx: Context<'_, '_, 'info, 'info, InitializeBasket<'info>>,
@@ -256,15 +236,6 @@ pub mod gravifi_vault {
 
     // -------------------------------------------------------------------- keepers and prices
 
-    /// Names who may post prices and who may run rebalances. Protocol authority only.
-    pub fn init_keepers(ctx: Context<InitKeepers>, price_authority: Pubkey, rebalancer: Pubkey) -> Result<()> {
-        instructions::protocol::init_keepers(ctx, price_authority, rebalancer)
-    }
-
-    pub fn set_keepers(ctx: Context<SetKeepers>, price_authority: Pubkey, rebalancer: Pubkey) -> Result<()> {
-        instructions::protocol::set_keepers(ctx, price_authority, rebalancer)
-    }
-
     /// Posts an asset's USD price (per whole token, x1e12). Bounded by its guard: within Pyth's
     /// confidence of a fresh Pyth price where the asset has a feed, else within 20% of an hourly
     /// reference.
@@ -276,12 +247,6 @@ pub mod gravifi_vault {
     /// Protocol authority only.
     pub fn set_price_feed(ctx: Context<SetPriceFeed>, feed_id: [u8; 32]) -> Result<()> {
         instructions::protocol::set_price_feed(ctx, feed_id)
-    }
-
-    /// Names the one wallet whose baskets burn no GRAVI (the team's); `Pubkey::default()`
-    /// removes it. Protocol authority only.
-    pub fn set_burn_exempt(ctx: Context<SetBurnExempt>, wallet: Pubkey) -> Result<()> {
-        instructions::protocol::set_burn_exempt(ctx, wallet)
     }
 
     /// Gives a referred wallet half the protocol fee, all to the treasury, until `until` (at
@@ -397,21 +362,6 @@ pub mod gravifi_vault {
 
     // ------------------------------------------------------------------------- smart baskets
 
-    /// Names the strategist, the app's key that runs smart baskets within their guardrails
-    /// (`Pubkey::default()` removes it), and sets the protocol fee on smart baskets' mints and
-    /// redeems, at most `MAX_SMART_FEE_BPS` (`SMART_FEE_DEFAULT_BPS` until set). Protocol
-    /// authority only.
-    pub fn set_smart_config(ctx: Context<SetSmartConfig>, strategist: Pubkey, fee_bps: u16) -> Result<()> {
-        instructions::smart::set_smart_config(ctx, strategist, fee_bps)
-    }
-
-    /// Sets the GRAVI a creator burns once on making a basket smart (`enable_smart`), on top of
-    /// the per-asset creation burn: 0 turns it off, at most `MAX_SMART_BURN_TOKENS` whole GRAVI.
-    /// Protocol authority only.
-    pub fn set_smart_burn(ctx: Context<SetSmartBurn>, amount: u64) -> Result<()> {
-        instructions::smart::set_smart_burn(ctx, amount)
-    }
-
     /// Marks an asset GraviFi Verified, or takes the mark away. A smart basket holds an asset
     /// without it to at most its Unverified cap. Protocol authority only.
     pub fn set_verified(ctx: Context<SetVerified>, verified: bool) -> Result<()> {
@@ -419,7 +369,7 @@ pub mod gravifi_vault {
     }
 
     /// Makes a creator-managed basket smart, before its first deposit, with its mandate's hash
-    /// and guardrails, burning the smart burn (`set_smart_burn`) from the creator's GRAVI.
+    /// and guardrails, burning the smart burn (`set_param` CONFIG_SMART_BURN) from the creator's GRAVI.
     /// Creator only.
     pub fn enable_smart<'info>(ctx: Context<'_, '_, 'info, 'info, EnableSmart<'info>>, mandate_hash: [u8; 32], guard: Guardrails) -> Result<()> {
         instructions::smart::enable_smart(ctx, mandate_hash, guard)
@@ -473,13 +423,11 @@ pub mod gravifi_vault {
         instructions::metadata::set_share_metadata(ctx, name, symbol, uri)
     }
 
-    // --------------------------------------------------------------------- legacy and splits
+    // ------------------------------------------------------------------ extension and splits
 
-    /// Holder governance was removed. A basket that had been handed to its holders is
-    /// otherwise frozen (no governor can act for it any more), so the protocol authority can
-    /// return it to its creator. Only ever acts on such a basket, and none can be created now.
-    pub fn restore_creator_control(ctx: Context<RestoreControl>) -> Result<()> {
-        instructions::basket::restore_creator_control(ctx)
+    /// Creates a basket's extension account (`ext.rs`), the payer paying its rent. Permissionless.
+    pub fn ext_init(ctx: Context<ExtInit>) -> Result<()> {
+        instructions::basket::ext_init(ctx)
     }
 
     /// Splits (or reverse-splits) the basket's shares by `numerator`:`denominator` by
@@ -495,11 +443,6 @@ pub mod gravifi_vault {
     /// Sets up the stake pool and turns staking on, for good. Protocol authority, once.
     pub fn init_staking(ctx: Context<InitStaking>) -> Result<()> {
         instructions::staking::init_staking(ctx)
-    }
-
-    /// Moves the staking threshold, up to its ceiling; a raise applies after a week's notice.
-    pub fn set_stake_threshold(ctx: Context<SetStakeThreshold>, threshold: u64) -> Result<()> {
-        instructions::staking::set_stake_threshold(ctx, threshold)
     }
 
     /// Stakes GRAVI. Perks start two days after the stake reaches the threshold.
@@ -563,11 +506,6 @@ pub mod gravifi_vault {
     }
 
     // ------------------------------------------------------------- share staking, community
-
-    /// Opens or closes the door to Community mode. Protocol authority.
-    pub fn set_community_open(ctx: Context<SetCommunityOpen>, open: bool) -> Result<()> {
-        instructions::community::set_community_open(ctx, open)
-    }
 
     /// Stakes a basket's shares. Any basket; votes count only in community ones.
     pub fn share_stake(ctx: Context<ShareStakeIn>, amount: u64) -> Result<()> {

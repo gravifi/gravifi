@@ -205,11 +205,52 @@ impl TransferFee {
         net.checked_add(fee).ok_or(VaultError::MathOverflow.into())
     }
 
-    /// Refuses a mint whose fee is above what the protocol accepts for new money.
-    pub fn assert_within_cap(&self) -> Result<()> {
-        require!(self.bps <= crate::state::MAX_TRANSFER_FEE_BPS, VaultError::TransferFeeTooHigh);
+    /// Refuses a mint whose fee is above what the protocol accepts for new money (`cap`: the
+    /// `TRANSFER_FEE_CAP_BPS` param).
+    pub fn assert_within_cap(&self, cap: u16) -> Result<()> {
+        require!(self.bps <= cap, VaultError::TransferFeeTooHigh);
         Ok(())
     }
+}
+
+/// Creates the program-owned PDA `target` (signed for with `seeds`, bump included) with `space`
+/// bytes, `payer` covering its rent. An address someone sent lamports to first is still the system
+/// program's and empty: it's topped up, given its space and assigned instead, as `create_account`
+/// would refuse it.
+pub fn create_pda<'info>(payer: &AccountInfo<'info>, target: &AccountInfo<'info>, system_program: &AccountInfo<'info>, seeds: &[&[u8]], space: usize) -> Result<()> {
+    use anchor_lang::system_program as sp;
+    require_keys_eq!(*target.owner, sp::ID, VaultError::BadParameter);
+    let rent = Rent::get()?.minimum_balance(space);
+    if target.lamports() == 0 {
+        return sp::create_account(
+            CpiContext::new_with_signer(system_program.clone(), sp::CreateAccount { from: payer.clone(), to: target.clone() }, &[seeds]),
+            rent,
+            space as u64,
+            &crate::ID,
+        );
+    }
+    let short = rent.saturating_sub(target.lamports());
+    if short > 0 {
+        sp::transfer(CpiContext::new(system_program.clone(), sp::Transfer { from: payer.clone(), to: target.clone() }), short)?;
+    }
+    sp::allocate(CpiContext::new_with_signer(system_program.clone(), sp::Allocate { account_to_allocate: target.clone() }, &[seeds]), space as u64)?;
+    sp::assign(CpiContext::new_with_signer(system_program.clone(), sp::Assign { account_to_assign: target.clone() }, &[seeds]), &crate::ID)
+}
+
+/// Grows a program-owned account to `need` bytes if it's shorter, `payer` topping up its rent.
+pub fn grow<'info>(ai: &AccountInfo<'info>, payer: &AccountInfo<'info>, system_program: &AccountInfo<'info>, need: usize) -> Result<()> {
+    if ai.data_len() >= need {
+        return Ok(());
+    }
+    let short = Rent::get()?.minimum_balance(need).saturating_sub(ai.lamports());
+    if short > 0 {
+        anchor_lang::system_program::transfer(
+            CpiContext::new(system_program.clone(), anchor_lang::system_program::Transfer { from: payer.clone(), to: ai.clone() }),
+            short,
+        )?;
+    }
+    ai.resize(need)?;
+    Ok(())
 }
 
 /// The associated token account program: a basket's vault for each constituent is its ATA.

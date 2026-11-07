@@ -23,7 +23,7 @@ import {
   setup,
   supply,
 } from "./helpers.ts";
-import { feeShares, fundHolder, mintIx, world } from "./fixtures.ts";
+import { feeShares, fundHolder, mintIx, world, initKeepers, protocolFeesIx, setRoleIx, ROLE, setParam, PARAM, FAMILY } from "./fixtures.ts";
 
 const PRICE_A = 1_000_000_000_000n; // $1.00
 const PRICE_B = 6_000_000_000_000n; // $6.00
@@ -34,9 +34,9 @@ async function buybackWorld() {
   // A 0.40% fee, half of it to the burn PDA: Alice minting 100 shares leaves 0.2 there.
   // (Seeded with no fee, then 0.40%, so the burn PDA holds exactly Alice's share of it.)
   const w = await world({ protocolFeeBps: 0 });
-  await rpc(w.ctx, w.ctx.vault.methods.setProtocolFees(40, 5_000).accountsPartial({ authority: w.ctx.payer.publicKey, protocol: pda.protocol() }));
+  await rpc(w.ctx, protocolFeesIx(w.ctx, 40, 5_000));
   const keeper = fund(w.ctx);
-  await rpc(w.ctx, w.ctx.vault.methods.initKeepers(keeper.publicKey, keeper.publicKey).accountsPartial({ authority: w.ctx.payer.publicKey, keepers: pda.keepers() }));
+  await initKeepers(w.ctx, keeper.publicKey, keeper.publicKey);
   const alice = fund(w.ctx);
   await fundHolder(w, alice);
   await rpc(w.ctx, mintIx(w, alice, 100n * 1_000_000_000n), [alice]);
@@ -223,6 +223,20 @@ describe("buyback and burn", () => {
     // 9.5% short of fair value, accepted at a 10% tolerance.
     await send(w.ctx, [await startIx(w, 400_000n, w.keeper, 1_000), deliver(w, 36n * ONE_GRAVI + 200_000_000n), await finishIx(w)], [w.keeper]);
     await expectError(send(w.ctx, [await startIx(w, 1n, w.keeper, 1_001), await finishIx(w)], [w.keeper]), "BadParameter");
+  });
+
+  it("the buyback's tolerance is a param, at once; the buyback switch stops its redeem and its sales", async () => {
+    const w = await buybackWorld();
+    await setParam(w.ctx, PARAM.BUYBACK_SLIPPAGE_BPS, 500n);
+    await setParam(w.ctx, PARAM.KILL, BigInt(FAMILY.buyback));
+    await expectError(rpc(w.ctx, redeemIx(w, balance(w.ctx, burnShares(w)))), "FeatureOff");
+    await setParam(w.ctx, PARAM.KILL, 0n);
+    await redeemAll(w);
+    await expectError(send(w.ctx, [await startIx(w, 1n, w.keeper, 501), await finishIx(w)], [w.keeper]), "BadParameter");
+    await setParam(w.ctx, PARAM.KILL, BigInt(FAMILY.buyback));
+    await expectError(send(w.ctx, [await startIx(w, 400_000n, w.keeper, 500), deliver(w, 40n * ONE_GRAVI), await finishIx(w)], [w.keeper]), "FeatureOff");
+    await setParam(w.ctx, PARAM.KILL, 0n);
+    await send(w.ctx, [await startIx(w, 400_000n, w.keeper, 500), deliver(w, 40n * ONE_GRAVI), await finishIx(w)], [w.keeper]);
   });
 
   it("nothing of the program's may run between start and finish", async () => {
@@ -422,7 +436,7 @@ describe("the GRAVI mint", () => {
   it("can be set once after launch, and never changed", async () => {
     const ctx = await bareProtocol();
     const gravi = PublicKey.unique();
-    const set = (mint: PublicKey) => ctx.vault.methods.setGraviMint(mint).accountsPartial({ authority: ctx.payer.publicKey, protocol: pda.protocol() });
+    const set = (mint: PublicKey) => setRoleIx(ctx, ROLE.graviMint, mint, ctx.payer.publicKey);
     await rpc(ctx, set(gravi));
     const p = await ctx.vault.account.protocol.fetch(pda.protocol());
     assert.ok(p.graviMint.equals(gravi));
@@ -433,7 +447,7 @@ describe("the GRAVI mint", () => {
     const ctx = await bareProtocol();
     const outsider = fund(ctx);
     await expectError(
-      rpc(ctx, ctx.vault.methods.setGraviMint(PublicKey.unique()).accountsPartial({ authority: outsider.publicKey, protocol: pda.protocol() }), [outsider]),
+      rpc(ctx, setRoleIx(ctx, ROLE.graviMint, PublicKey.unique(), outsider.publicKey), [outsider]),
       "NotProtocolAuthority",
     );
   });
