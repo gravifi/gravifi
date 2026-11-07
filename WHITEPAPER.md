@@ -2,7 +2,7 @@
 
 **Every market, in one orbit.**
 
-Whitepaper · October 2026 · [gravifi.xyz](https://gravifi.xyz) · [app.gravifi.xyz](https://app.gravifi.xyz) · [@gravifiXYZ](https://x.com/gravifiXYZ)
+Whitepaper · November 2026 · [gravifi.xyz](https://gravifi.xyz) · [app.gravifi.xyz](https://app.gravifi.xyz) · [@gravifiXYZ](https://x.com/gravifiXYZ)
 
 ---
 
@@ -11,11 +11,13 @@ Whitepaper · October 2026 · [gravifi.xyz](https://gravifi.xyz) · [app.gravifi
 GraviFi turns a mix of tokenized stocks, crypto and memecoins into a single token. Each
 **basket** is a vault on Solana that holds its tokens and issues one share token for them. A
 share is always worth its exact slice of what the vault holds, and can always be swapped back
-for that slice. Anyone can buy a basket with USDC or SOL, or build one from 133 listed assets.
-Every basket mint and redeem pays a 0.40% protocol fee; half of it buys **GRAVI** on the open
+for that slice. Anyone can buy a basket with USDC or SOL, or build one from 142 GraviFi Verified assets or any
+other Solana token that passes the listing check. Every basket mint and redeem pays a 0.40%
+protocol fee (0.80% on a Smart basket); half of it buys **GRAVI** on the open
 market and burns it. Creating a basket burns GRAVI too. GRAVI stakers share 10% of the protocol
 fee, paid in SOL, and each 5,000,000 GRAVI staked makes one basket a day without burning. A basket's
-holders can also run it themselves, by vote.
+holders can also run it themselves, by vote, and a Smart basket is reviewed every day within
+limits the program enforces.
 
 GraviFi has been live on Solana mainnet since 14 October 2026.
 
@@ -78,24 +80,39 @@ Selling runs the other way: redeem, then swap each token back to USDC or SOL. Or
 keep the tokens. Every step is approved in the buyer's wallet, and the full cost is shown
 before signing.
 
+### 2.4 Recurring plans, stop losses and take profits
+
+A holder can set up recurring buys or sells of a basket (daily to monthly, up to $10,000 a
+plan), and stop losses and take profits on any basket or token they hold: fixed or trailing,
+one or two levels on each side, sold at the market as soon as a level is reached, with
+confirmation at once or after 1, 5 or 15 minutes. These are the holder's own exits, not the
+creator's stops on a basket's assets (section 4.1).
+
+Each plan and each stop has a wallet of its own, which the holder owns and which holds exactly
+what it spends or protects. GraviFi can sign for it only through two keys together, the app's
+and a separate guard's, and the guard co-signs only a fill that is due or a sale of that stop's
+holding, paid back to the owner's main wallet. The owner's main wallet never gets a signer, and
+cancelling sends what's left back to it. These have no fee of their own.
+
 ## 3. Creating a basket
 
 Anyone can create a basket in the app:
 
 | Choice | Options |
 |---|---|
-| **Assets** | 2 to 14, from the 133 listed |
+| **Assets** | 2 to 14, from the 142 GraviFi Verified or any token that passes the listing check (section 7.1) |
 | **Weights** | Any split adding up to 100% |
 | **Rebalancing** | On a schedule, when it drifts past a tolerance, or both (at least a day apart, at least 0.5% drift). Rebalancing starts once the basket holds $50 (section 4) |
 | **Creator's cut** | 0% to 0.60% of each buy |
 | **Access** | Public; allowlist (only wallets the creator approves can mint); or private (only the creator can mint). Anyone holding shares can always redeem |
-| **Control** | Creator-managed, or immutable: locked forever, nobody can change it again |
+| **Run by** | Its creator; Smart (section 3.1); its holders (section 8.1, public baskets only); or nobody: immutable, locked forever |
+| **Stop losses** | Optional, per asset (section 4.1) |
 | **Starting price** | $1 to $10,000 a share |
 
 Creating the basket burns the GRAVI the protocol asks for (section 6.3); the creator then seeds
 it with at least $20, and its shares go live on the app's explore page. A creator-managed basket can later
-change its weights, add or remove assets, change its rebalancing policy and fee within the
-caps, and split its shares.
+change its weights, add or remove assets, change its rebalancing policy, stop losses and cut
+within the caps, and split its shares.
 
 **Splits.** A creator can split or reverse-split a basket's shares (1:100 to 100:1, at most
 once every 30 days). Every holder's balance and the price per share change together in one
@@ -109,6 +126,25 @@ buyer pays more than they were quoted. An immutable basket's is fixed at its fir
 **The yearly fee** is how creators earned before the cut: up to 0.20% a year, streamed as new
 shares while held. Baskets that have one keep it until their creator chooses a cut, which stops
 it. A basket has one or the other, never both, and new baskets are only offered the cut.
+
+### 3.1 Smart baskets
+
+A creator can make a basket Smart when creating it. The creator writes its rules (its mandate,
+whose hash is stored on chain), and the app reviews the basket against them every day (four
+times a day for a fast-moving "pump" mandate, weekly after 30 days with no change): a review may
+add, remove and reweight assets and set the mandate's stops. The changes are made by the app's
+strategist key, which can do nothing else: not move a token, not change a fee or a limit, not
+touch another basket.
+
+The program holds every Smart basket to limits in its code: at most 40% of the targets changed
+in any 24 hours and 100% in any 7 days, at most 35% in one asset and 30% in one that isn't
+GraviFi Verified. A creator can set tighter ones, never looser. A new mandate or new limits wait
+a day, so holders who disagree can redeem first, and the creator or the guardian can pause the
+reviews. A Smart basket starts with at least $50.
+
+Its protocol fee is 0.80% per mint and redeem (ceiling 1.00% in the code), split like the
+normal fee, for the daily reviews. Making a basket Smart burns 50,000 GRAVI once (ceiling
+1,000,000), on top of the per-asset burn; assets a review adds later burn nothing.
 
 ## 4. Rebalancing
 
@@ -145,8 +181,9 @@ slice, the prices posted for it, and once, the basket's rebalance record. Each s
 what it spent on that basket so far, in the token the slice sells, and at most $0.05 a slice,
 a limit in the program's code. What isn't covered yet waits for the next slice. The keeper sells
 those tokens for SOL. Holders pay that cost as a sliver of the sold token, and nobody earns
-anything from it. Sweeps and the buyback pay back the same way, the buyback from the tokens it
-sells for GRAVI.
+anything from it. Sweeps pay back the same way. A buyback run pays the keeper back for all its
+sales at once, at most $0.50, only out of the burn's budget, and selling the stakers' tokens for
+SOL works the same way out of theirs.
 
 **Taking turns.** The keeper runs a few slices an hour, shared by every basket. The baskets that
 want a slice go in order of how long they've waited since their last one: a basket goes to the
@@ -190,18 +227,21 @@ its first deposit and never change, and when one fires the basket follows that f
 | Fee | Rate | Who pays, when | Where it goes |
 |---|---|---|---|
 | **Protocol fee** | 0.40% | On every mint and redeem, including a creator's first deposit | Half to the GRAVI burn, a tenth to GRAVI stakers (section 6.4), the rest to the treasury |
+| **Smart basket fee** | 0.80% | Replaces the protocol fee on a Smart basket's mints and redeems | Split like the protocol fee |
 | **Creator's cut** | 0% to 0.60% | On each buy by someone else, on top of the protocol fee. Selling and holding don't pay it | The basket's creator |
 | **Yearly fee** | 0% to 0.20% a year | Holders, as share dilution while held, on baskets that haven't chosen a cut | The basket's creator |
-| **Creation burn** | 10,000 GRAVI per asset | The creator, for each asset a basket is created with or gets added | Burned |
-| **App fee** | 0.05% | On buys and sells through the app's USDC/SOL route | The treasury |
+| **Creation burn** | 10,000 GRAVI per asset | The creator, for each asset a basket is created with or gets added, unless a GRAVI stake covers it (section 6.4) | Burned |
+| **Smart burn** | 50,000 GRAVI | The creator, once, on making a basket Smart | Burned |
+| **App fee** | 0.05% | On basket buys and sells through the app's USDC/SOL route, and on single-token trades | The treasury |
 | **Network** | fractions of a cent | Every transaction | Solana validators |
 
 **Invited wallets.** A wallet that joins with someone's invite doesn't pay the GRAVI-burn half of
-the protocol fee for its first 30 days: it pays 0.20%, all of it to the treasury. The app fee is
+the protocol fee for its first 30 days: it pays 0.20% (0.40% on a Smart basket), none of it
+burned: a tenth of the full fee goes to stakers as usual, the rest to the treasury. The app fee is
 unchanged. The program reads the wallet's invite record, good for at most 31 days, which the
 wallet writes with its first trade and the keeper co-signs. The wallet puts down the record's
-rent, under 0.001 SOL, and gets it back with its first trade after the 30 days. For a year, the inviter receives half of the treasury's part of the protocol fee on
-that wallet's basket trades (0.10% of each trade), worked out in SOL at each trade's price and
+rent, under 0.001 SOL, and gets it back with its first trade after the 30 days. For a year, the inviter receives a quarter of the protocol fee on
+that wallet's basket trades (0.10% of each trade, 0.20% on a Smart basket), worked out in SOL at each trade's price and
 paid daily in SOL by the app. It is a share of fees from someone else's trading, not a return on
 anything held, and it never pays out more than those trades paid in.
 
@@ -209,8 +249,8 @@ The protocol fee rounds up, so no flow is too small to pay it, and it is kept in
 the vault stays fully backed. A creator's cut rounds up too and waits in the treasury's shares
 until it's claimed, by anyone, to the creator's own account; the treasury can't withdraw it. The
 limits are in the program's code: the protocol fee can never
-exceed 0.50%, a creator's cut can never exceed 0.60% of a buy, a yearly fee can never exceed 0.20%, the creation burn can never exceed
-1,000,000 GRAVI per asset, and at least half of every protocol fee goes to the GRAVI burn, except
+exceed 0.50% (1.00% on a Smart basket), a creator's cut can never exceed 0.60% of a buy, a yearly fee can never exceed 0.20%, the creation burn can never exceed
+1,000,000 GRAVI per asset (the Smart burn 1,000,000 GRAVI once), and at least half of every protocol fee goes to the GRAVI burn, except
 an invited wallet's half fee in its first month (above). Changing
 any of them would take new code, in public.
 
@@ -249,11 +289,13 @@ wait until they add up. Every burn is public on Solana, and the running total is
 
 ### 6.2 GRAVI's own trading fees
 
-GRAVI's pump.fun creator fees are claimed into the team's GRAVI wallet: half buys GRAVI and burns
-it, half goes to the treasury.
+GRAVI's pump.fun creator fees are claimed into the team's GRAVI wallet, about once a week: half
+buys GRAVI and burns it, half goes to the treasury.
 
-**Burn #1** (15 October 2026): 3.80 SOL of creator fees claimed; 1.90 SOL bought and burned
-**10,611,685 GRAVI**, 1.06% of supply. Supply after: 989,388,314.
+The first burn (15 October 2026) bought and burned 10,611,685 GRAVI with 1.90 SOL. By 7 November
+2026 all burns together had taken about 126 million GRAVI out of supply, 12.6% of it, most of it
+from these trading fees. Every claim and burn is public on Solana, and the live total is at
+[app.gravifi.xyz/pulse](https://app.gravifi.xyz/pulse).
 
 ### 6.3 Creation burn
 
@@ -285,7 +327,7 @@ Anyone can stake any amount of GRAVI. Two things follow:
 - **Free baskets.** Each **5,000,000 GRAVI** staked makes one basket a day with no GRAVI burned:
   5M gives one a day, 10M two, and so on. A free basket covers creating it, its assets, and making it
   smart while it's created; adding an asset to a basket later uses one too. Unused ones don't carry
-  over. The protocol authority can move the 1,000,000, up to a ceiling of 10,000,000 in the code; a
+  over. The protocol authority can move the 5,000,000, up to a ceiling of 10,000,000 in the code; a
   raise applies only after 7 days' notice.
 
 Staked GRAVI counts 2 days after it's staked; a top-up waits its own 2 days, and what already counts
@@ -298,9 +340,9 @@ a promise of any return. GRAVI's price can fall by more than a stake earns.
 
 ## 7. Assets
 
-133 assets are listed today:
+142 assets are GraviFi Verified today:
 
-- **Tokenized stocks and ETFs** issued on Solana (xStocks and others): NVIDIA, Apple, Tesla,
+- **Tokenized stocks and funds** issued on Solana (xStocks and others): NVIDIA, Apple, Tesla,
   the S&P 500, the Nasdaq 100, gold and more.
 - **Pre-IPO tokens**: Anthropic, OpenAI, Anduril, Polymarket and others.
 - **Crypto**: SOL, bitcoin (wBTC, cbBTC), ETH, HYPE, ZEC, Jupiter, TAO and more.
@@ -341,17 +383,20 @@ pools) can be promoted by the team. Every token shows its contract address.
 
 ## 8. Who controls what
 
-A basket is run by its creator unless it goes community (section 8.1); there is no vote on the
-protocol. Control is split so that no role can reach holders' funds:
+A basket is run by its creator, by the strategist within its limits if it's Smart (section 3.1),
+or by its holders (section 8.1); there is no vote on the protocol. Control is split so that no role can reach holders' funds:
 
 | Role | Can | Can't |
 |---|---|---|
 | **Holders** | Redeem at any time, send or trade their shares | |
-| **A basket's creator** | Change their basket's weights, assets, rebalancing, fee (within the caps), stop losses, split; set how wallets show its shares (name, ticker, picture); set an immutable basket's stop losses before its first deposit | Touch the vault's tokens; once the basket is immutable, anything but how wallets show its shares |
+| **A basket's creator** | Change their basket's weights, assets, rebalancing, cut (within the caps; a rise waits a day), stop losses, split; on a Smart basket, set its mandate and tighter limits (each waits a day) and pause it; set how wallets show its shares (name, ticker, picture); set an immutable basket's stop losses before its first deposit | Touch the vault's tokens; once the basket is immutable, anything but how wallets show its shares |
 | **The lister** (the app's listing key) | List a token a creator picked, inside the creator's own transaction, once it passed the app's checks | Anything else: delist, change a setting, move a token; or list a token whose new accounts start frozen, that can't move, or that's paused |
-| **The protocol authority** (the team) | List assets, name the lister, set fees and the creation burn within the ceilings, name the one burn-exempt team wallet, match assets to Pyth feeds, name the keepers, set how wallets show any basket's shares, and upgrade the program | Through any of its settings: move a vault's tokens, block a redemption, exceed the fee or creation-burn ceilings, send less than half of the protocol fee to the burn (outside an invited wallet's half fee) |
+| **The strategist** (the app's Smart-basket key) | Set a Smart basket's targets, add and remove its assets and put its mandate's stops on them, within that basket's limits | Move a token, change a fee or a limit, touch any basket that isn't Smart |
+| **The protocol authority** (the team) | List and delist assets, name the lister, the strategist and the guardian, set fees, the Smart fee, the creation burn and the Smart burn within the ceilings, name the one burn-exempt team wallet, move the staking threshold (a raise waits 7 days), open or close community mode, withdraw the treasury's shares (never what's owed to creators or stakers), match assets to Pyth feeds, name the keepers, set how wallets show any basket's shares, and upgrade the program | Through any of its settings: move a vault's tokens, block a redemption, exceed the fee or creation-burn ceilings, send less than half of the protocol fee to the burn (outside an invited wallet's half fee) |
 | **The price service** (its own key) | Post the prices rebalances, buybacks and stop losses are checked against, within the bounds above, read from Jupiter by itself | Anything else: trade, move a token, change a setting |
-| **The keeper** (the app's server) | Run rebalance and buyback slices within the program's checks, each paying it back at most $0.05 for its network costs; ask the price service to post a price (anyone may ask the program to check a stop); co-sign an invited wallet's invite record | Post or choose a price; move a vault's tokens outside a slice, or accept less back than the posted price allows; take more than $0.05 from a slice; give a wallet half fees for more than 31 days at a time |
+| **The guardian** (none named today) | Delist an asset; pause a Smart basket's reviews | List anything, or anything else |
+| **The guard** (a separate server key) | Co-sign, with the app's key, a recurring plan's due fill or a hit stop's sale from that plan's or stop's own wallet (section 2.4) | Sign alone; touch a holder's main wallet; send funds anywhere but back to the owner |
+| **The keeper** (the app's server) | Run rebalance, sweep and buyback slices within the program's checks, paying it back at most $0.05 a rebalance or sweep slice and $0.50 a buyback or stakers' sale, for its network costs; ask the price service to post a price (anyone may ask the program to check a stop); co-sign an invited wallet's invite record | Post or choose a price; move a vault's tokens outside a slice, or accept less back than the posted price allows; take more than those limits; give a wallet half fees for more than 31 days at a time |
 | **The burn address** | Buy GRAVI and burn it | Anything else: it has no key |
 
 The program and protocol authority are held today by one team key, and upgrading a program
@@ -396,9 +441,9 @@ GraviFi is new software. Before using it, know that:
 - **No independent audit yet.** The program has passed an internal security review and its
   test suite; an independent audit is next. Only put in what you can afford to lose.
 - **Key risk.** The team holds the keys that upgrade the program and post the prices
-  rebalances are checked against (section 8). Posted prices are bounded (section 6), but until
-  the multisig lands and prices and trading use separate keys, a lost or misused key could cost
-  basket holders money.
+  rebalances are checked against (section 8). Posted prices are bounded (section 4), and the
+  price and trading keys are held apart, but until the multisig lands a lost or misused team key
+  could cost basket holders money.
 - **Issuer risk.** Tokenized stocks and pre-IPO tokens depend on their issuers, who can pause,
   freeze or claw back their tokens. A holder can still redeem everything else and leave such a
   token in the basket (section 2.2).
@@ -415,8 +460,8 @@ Nothing in this paper is investment advice, or an offer to sell GRAVI or any oth
 1. **Independent security audit.**
 2. **Multisig** for the program and protocol authority, and a **verified build**, so anyone can
    check that the program on-chain is exactly this code.
-3. **Separate keys** for posting prices and for trading, and Pyth checks for more assets (the
-   tokenized stocks' feeds) as Pyth keeps them updated on chain.
+3. **Pyth checks for more assets** (the tokenized stocks' feeds) as Pyth keeps them updated on
+   chain.
 4. **Baskets of up to 16 assets.**
 
 ## Addresses

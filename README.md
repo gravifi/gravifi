@@ -22,7 +22,8 @@ test suite. How it all works is in the [whitepaper](WHITEPAPER.md)
   from swapping shares back for the tokens they represent.
 - **Every share is fully backed.** Deposits round up, payouts round down, and value leaves a
   vault only through a redemption, a checked rebalance slice or the buyback.
-- **Fee limits are code.** The protocol fee can't exceed 0.50% per mint or redeem, a creator's
+- **Fee limits are code.** The protocol fee can't exceed 0.50% per mint or redeem (1.00% on a
+  Smart basket), a creator's
   cut can't exceed 0.60% of a buy and is never charged on a redeem, a rise of it waits a day once
   a basket has shares, a yearly fee can't exceed 0.20%, and a change to one never applies to
   time already passed.
@@ -36,9 +37,12 @@ test suite. How it all works is in the [whitepaper](WHITEPAPER.md)
   wallet: for the assets it's created with, in the instruction that creates it, and for each
   asset added later. The amount can't exceed 1,000,000 GRAVI per asset. One team wallet, named
   on-chain by the protocol authority, can be exempt for its own baskets.
-- **The keeper is paid back at most $0.05 a slice.** Each rebalance, sweep or buyback slice may
-  give the keeper up to $0.05 of the token it sells, for the network fees it paid running the
-  basket.
+- **The keeper is paid back, within limits.** Each rebalance or sweep slice may give the keeper
+  up to $0.05 of the token it sells, and a buyback run (or a sale for stakers) up to $0.50, only
+  from the burn's or the stakers' budget, for the network fees it paid.
+- **Smart baskets have limits in code.** The strategist key can change at most 40% of a Smart
+  basket's targets a day and 100% a week, put at most 35% in one asset (30% if it isn't Verified),
+  and can't move a token or change a fee or a limit; a new mandate or new limits wait a day.
 - **Posted prices are bounded.** The prices rebalances and buybacks are checked against must be
   within 3-5% of a fresh, fully verified Pyth price where an asset has a feed, and otherwise can
   move at most 20% an hour from the last accepted one.
@@ -50,7 +54,8 @@ programs/gravifi-vault/        the vault program (Rust, Anchor 0.31.1)
   src/lib.rs                   the index of every instruction
   src/instructions/            their code and accounts, by area: protocol, basket,
                                mint_redeem, upkeep, rebalance, buyback, metadata
-                               (the share token's name and logo in wallets)
+                               (the share token's name and logo in wallets),
+                               creator_cut, invite, stops, smart, staking, community
   src/state.rs                 the accounts, and the limits the program enforces
 tests/                         the test suite, run against the compiled program in LiteSVM
 WHITEPAPER.md                  how GraviFi works
@@ -70,8 +75,9 @@ npm test
 The tests load `target/deploy/gravifi_vault.so` from the build and exercise it end to end:
 baskets, minting and redemption, rounding, fees, access modes, rebalancing and its price
 floor, sweeps of tokens a basket is sent, splits, Token-2022 transfer fees, the buyback and burn,
-the creation burn and its exemption, allowlists, bounded and Pyth-checked prices, and the share
-token's metadata, against the real Metaplex Token Metadata
+the creation burn and its exemption, allowlists, bounded and Pyth-checked prices, the creator's
+cut, invites, stop losses, Smart baskets and their limits, GRAVI staking, community votes, and the
+share token's metadata, against the real Metaplex Token Metadata
 program dumped from mainnet (it can no longer be upgraded).
 
 ## Verify it's the program on mainnet
