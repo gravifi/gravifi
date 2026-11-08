@@ -42,9 +42,11 @@ export const ONE_SHARE = 1_000_000_000n;
 
 export type Ctx = ReturnType<typeof setup>;
 
-export function setup() {
+/** A fresh LiteSVM with the vault program: this build, or the binary at `program` (an upgrade
+ *  rehearsal starts from the one on mainnet, then loads this build over it). */
+export function setup(program = `${root}target/deploy/gravifi_vault.so`) {
   const svm = new LiteSVM();
-  svm.addProgramFromFile(VAULT_ID, `${root}target/deploy/gravifi_vault.so`);
+  svm.addProgramFromFile(VAULT_ID, program);
 
   const payer = Keypair.generate();
   svm.airdrop(payer.publicKey, 1_000_000_000_000n);

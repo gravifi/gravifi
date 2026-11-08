@@ -397,7 +397,7 @@ describe("mint and redeem", () => {
     await rpc(w.ctx, mintIx(w, user, ONE_SHARE, entry), [user]);
 
     const stranger = fund(w.ctx);
-    await expectError(rpc(w.ctx, disallow(stranger), [stranger]), "ConstraintHasOne");
+    await expectError(rpc(w.ctx, disallow(stranger), [stranger]), "NotMandateAuthority");
     const rent = BigInt(w.ctx.svm.getBalance(entry) ?? 0n);
     const before = BigInt(w.ctx.svm.getBalance(w.creator.publicKey) ?? 0n);
     await rpc(w.ctx, disallow(w.creator), [w.creator]);

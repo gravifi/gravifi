@@ -23,7 +23,7 @@ pub fn seed_basket<'info>(
     require!(shares > 0, VaultError::ZeroShares);
     require_keys_eq!(
         ctx.accounts.payer.key(),
-        ctx.accounts.basket.creator,
+        ctx.accounts.basket.manager(),
         VaultError::MintNotPermitted
     );
     require!(
@@ -98,12 +98,12 @@ pub fn mint_in_kind<'info>(
     // outright, whatever was left behind in them (a forfeited sleeve, tokens sent there). Only
     // the creator can open an emptied basket again, as they opened it with the seed.
     if ctx.accounts.share_mint.supply == 0 {
-        require_keys_eq!(payer, basket.creator, VaultError::BasketEmpty);
+        require_keys_eq!(payer, basket.manager(), VaultError::BasketEmpty);
     }
     match basket.access {
         AccessMode::Public => {}
         AccessMode::Private => {
-            require_keys_eq!(payer, basket.creator, VaultError::MintNotPermitted);
+            require_keys_eq!(payer, basket.manager(), VaultError::MintNotPermitted);
         }
         AccessMode::Allowlist => {
             let entry = ctx
@@ -116,8 +116,8 @@ pub fn mint_in_kind<'info>(
         }
     }
 
-    // The creator's own mints would only pay themselves.
-    let creator_cut_bps = if payer == basket.creator { 0 } else { basket.cut_bps() };
+    // The manager's own mints would only pay themselves.
+    let creator_cut_bps = if payer == basket.manager() { 0 } else { basket.cut_bps() };
 
     let a = &mut *ctx.accounts;
     let deposit = Deposit {

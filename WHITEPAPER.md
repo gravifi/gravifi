@@ -127,6 +127,11 @@ buyer pays more than they were quoted. An immutable basket's is fixed at its fir
 shares while held. Baskets that have one keep it until their creator chooses a cut, which stops
 it. A basket has one or the other, never both, and new baskets are only offered the cut.
 
+**Handing a basket over.** A creator can hand their basket to another wallet at any time. That
+wallet then holds every power the creator had over it, and receives what the cut and the yearly
+fee earn, including any cut not yet claimed. Only it can hand the basket on, or back. The basket's
+address, its shares and its holders don't change, and nothing in its vaults moves.
+
 ### 3.1 Smart baskets
 
 A creator can make a basket Smart when creating it. The creator writes its rules (its mandate,
@@ -399,7 +404,7 @@ or by its holders (section 8.1); there is no vote on the protocol. Control is sp
 | Role | Can | Can't |
 |---|---|---|
 | **Holders** | Redeem at any time, send or trade their shares | |
-| **A basket's creator** | Change their basket's weights, assets, rebalancing, cut (within the caps; a rise waits a day, and lowering the cut calls off a rise still waiting), stop losses, split; on a Smart basket, set its mandate and tighter limits (each waits a day) and pause it; set how wallets show its shares (name, ticker, picture); set an immutable basket's stop losses before its first deposit | Touch the vault's tokens; once the basket is immutable, anything but how wallets show its shares |
+| **A basket's creator** | Change their basket's weights, assets, rebalancing, cut (within the caps; a rise waits a day, and lowering the cut calls off a rise still waiting), stop losses, split; on a Smart basket, set its mandate and tighter limits (each waits a day) and pause it; set how wallets show its shares (name, ticker, picture); set an immutable basket's stop losses before its first deposit; hand the basket to another wallet, which then holds all of this and what the cut and fee earn | Touch the vault's tokens; once the basket is immutable, anything but how wallets show its shares |
 | **The lister** (the app's listing key) | List a token a creator picked, inside the creator's own transaction, once it passed the app's checks | Anything else: delist, change a setting, move a token; or list a token whose new accounts start frozen, that can't move, or that's paused |
 | **The strategist** (the app's Smart-basket key) | Set a Smart basket's targets, add and remove its assets and put its mandate's stops on them, within that basket's limits | Move a token, change a fee or a limit, touch any basket that isn't Smart |
 | **The protocol authority** (the team) | List and delist assets, name the lister, the strategist and the guardian (a key named acts after 24 hours), set fees, the Smart fee, the creation burn and the Smart burn within the ceilings (a raise waits 7 days), name the one burn-exempt team wallet, move the staking threshold (a raise waits 7 days), open or close community mode, tune the values and use the kill switches in section 8.2 within their bounds (user-facing changes wait 7 days), withdraw the treasury's shares (never what's owed to creators or stakers), match assets to Pyth feeds, name the keepers, set how wallets show any basket's shares, and upgrade the program | Through any of its settings: move a vault's tokens, block a redemption, exceed the fee or creation-burn ceilings or any bound in section 8.2, send less than half of the protocol fee to the burn (outside an invited wallet's half fee) |

@@ -151,9 +151,10 @@ pub struct AccrueFees<'info> {
     #[account(mut)]
     pub share_mint: InterfaceAccount<'info, MintI>,
 
-    /// Pinned to the creator. This instruction is permissionless, so without the
-    /// authority check any caller could route the creator's fee into their own account.
-    #[account(mut, token::mint = share_mint, token::authority = basket.creator)]
+    /// Pinned to the manager (`Basket::manager`: the creator, unless they handed the basket over).
+    /// This instruction is permissionless, so without the authority check any caller could route
+    /// the fee into their own account.
+    #[account(mut, token::mint = share_mint, token::authority = basket.manager())]
     pub creator_shares: InterfaceAccount<'info, TokenAccountI>,
 
     pub share_token_program: Interface<'info, TokenInterface>,

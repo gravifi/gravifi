@@ -43,6 +43,8 @@ export interface WorldOpts {
   issuerB?: { freezable?: boolean; pausable?: boolean };
   /** GRAVI's token program and decimals: mainnet's GRAVI is Token-2022 with 6. */
   gravi?: { program: PublicKey; decimals: number };
+  /** The vault program's binary, when not this build (`setup`). */
+  program?: string;
 }
 
 export async function listAsset(ctx: Ctx, mint: PublicKey) {
@@ -242,7 +244,7 @@ export function protocolFeesIx(ctx: Ctx, feeBps: number, burnShareBps: number, a
 }
 
 export async function world(opts: WorldOpts = {}) {
-  const ctx = setup();
+  const ctx = setup(opts.program);
   // No mint/redeem fee unless a test asks for one, so share arithmetic elsewhere stays exact.
   const graviMint = await initProtocol(ctx, opts.protocolFeeBps ?? 0, opts.burnShareBps ?? 5_000, opts.gravi);
 

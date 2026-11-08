@@ -2,6 +2,8 @@
 //! what the basket is (recipe, policy, splits) goes through `authorise_mandate`, so an
 //! immutable basket refuses all of them. The allowlist is who may buy into an allowlist
 //! basket, not what it holds: it stays with the creator, immutable or not, and moves no funds.
+//! "The creator" here means the basket's manager (`Basket::manager`): the creator, until they
+//! hand the basket to another wallet (`hand_over`).
 
 use anchor_lang::prelude::*;
 use anchor_spl::token_interface::TokenInterface;
@@ -131,6 +133,7 @@ pub fn initialize_basket<'info>(
     b.mint_paused = false;
     b.constituent_count = n as u8;
     b.constituents = constituents;
+    b.handed_to = Pubkey::default();
 
     Ok(())
 }
@@ -327,6 +330,33 @@ pub fn disallow_wallet(_ctx: Context<DisallowWallet>) -> Result<()> {
     Ok(())
 }
 
+/// Hands the basket to `new_manager`, who from now on holds every power its creator had: changing
+/// it, its stops and allowlist, its cut, its metadata, minting first or privately and free of the
+/// cut, and receiving the cut, the yearly fee and the rent of the accounts it closes. Signed by the
+/// manager now (the creator, unless it was handed over before); handing it back to the creator is
+/// one more handover. Any basket, whatever its control: an immutable basket's manager still owns
+/// its cut and its metadata, and a community basket's its fee.
+///
+/// `creator` never changes: it's the basket's PDA seed, so the basket keeps signing for its vaults
+/// and its share mint as before. What the old manager already holds (claimed shares, an open
+/// proposal of their own) stays theirs; the cut still unclaimed goes to the new one.
+pub fn hand_over(ctx: Context<HandOver>, new_manager: Pubkey) -> Result<()> {
+    let basket = &mut ctx.accounts.basket;
+    let from = basket.manager();
+    require_keys_eq!(ctx.accounts.manager.key(), from, VaultError::NotMandateAuthority);
+    require!(new_manager != Pubkey::default() && new_manager != from, VaultError::BadNewManager);
+    basket.set_manager(new_manager);
+    emit!(BasketHandedOver { basket: basket.key(), from, to: new_manager });
+    Ok(())
+}
+
+#[event]
+pub struct BasketHandedOver {
+    pub basket: Pubkey,
+    pub from: Pubkey,
+    pub to: Pubkey,
+}
+
 /// Creates a basket's extension account (`ext.rs`) if it isn't there yet, the payer paying its
 /// rent. Permissionless: it only holds room for features that need it, which write their own
 /// records; until one does it's empty.
@@ -435,7 +465,8 @@ pub(crate) fn check_policy(prm: &Params, mode: RebalanceMode, interval_secs: i64
     Ok(())
 }
 
-/// The creator's changes to a basket: its policy, splits and stops. A smart basket's creator keeps
+/// The manager's changes to a basket (its creator's, unless they handed it over): its policy,
+/// splits and stops. A smart basket's creator keeps
 /// these; what it holds is the strategist's (`authorise_recipe`).
 pub(crate) fn authorise_mandate(basket: &Account<Basket>, authority: &Signer) -> Result<()> {
     match basket.control {
@@ -443,7 +474,7 @@ pub(crate) fn authorise_mandate(basket: &Account<Basket>, authority: &Signer) ->
         ControlMode::Community => Err(VaultError::CommunityManaged.into()),
         ControlMode::Smart if basket.by_vote() => Err(VaultError::CommunityManaged.into()),
         ControlMode::Creator | ControlMode::Smart => {
-            require_keys_eq!(authority.key(), basket.creator, VaultError::NotMandateAuthority);
+            require_keys_eq!(authority.key(), basket.manager(), VaultError::NotMandateAuthority);
             Ok(())
         }
         ControlMode::Dao => Err(VaultError::GovernanceRemoved.into()),
@@ -468,7 +499,7 @@ pub struct InitializeBasket<'info> {
     #[account(
         init,
         payer = creator,
-        space = 8 + Basket::INIT_SPACE,
+        space = BASKET_SPACE,
         seeds = [b"basket", creator.key().as_ref(), args.basket_id.as_ref()],
         bump
     )]
@@ -540,11 +571,20 @@ pub struct AddConstituent<'info> {
 }
 
 #[derive(Accounts)]
+pub struct HandOver<'info> {
+    /// The basket's manager now (`Basket::manager`).
+    pub manager: Signer<'info>,
+    #[account(mut)]
+    pub basket: Account<'info, Basket>,
+}
+
+#[derive(Accounts)]
 pub struct AllowWallet<'info> {
+    /// The basket's manager (`Basket::manager`): its creator, or whoever they handed it to.
     #[account(mut)]
     pub creator: Signer<'info>,
 
-    #[account(has_one = creator)]
+    #[account(constraint = basket.manager() == creator.key() @ VaultError::NotMandateAuthority)]
     pub basket: Account<'info, Basket>,
 
     /// CHECK: recorded as the permitted wallet; never signed or written through.
@@ -564,9 +604,10 @@ pub struct AllowWallet<'info> {
 
 #[derive(Accounts)]
 pub struct DisallowWallet<'info> {
+    /// The basket's manager (`Basket::manager`), who gets the entry's rent back.
     #[account(mut)]
     pub creator: Signer<'info>,
-    #[account(has_one = creator)]
+    #[account(constraint = basket.manager() == creator.key() @ VaultError::NotMandateAuthority)]
     pub basket: Account<'info, Basket>,
     /// CHECK: the wallet being taken off; only its address is used, for the entry's seeds.
     pub wallet: UncheckedAccount<'info>,

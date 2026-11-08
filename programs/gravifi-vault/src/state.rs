@@ -10,8 +10,11 @@ pub const MAX_CONSTITUENTS: usize = 16;
 ///
 /// Each mint, seed and redeem names every constituent in one transaction; through the
 /// basket's lookup table 14 fit with room to spare (tests/_capacity.ts measures them), 16 do
-/// not without trimming. Storage keeps room for 16, so raising this later needs no migration.
+/// not without trimming. The account was sized for 16, and the manager (`Basket::handed_to`) now
+/// sits after the list, in what the 16th would have used: so at most 15, ever, without a realloc.
 pub const MAX_LAUNCH_CONSTITUENTS: usize = 14;
+/// The most constituents a basket's account holds beside its manager (see `BASKET_SPACE`).
+pub const MAX_STORED_CONSTITUENTS: usize = 15;
 
 /// Hard ceilings on the two fees: the creator's, in bps per year, streamed while shares are
 /// held; and the protocol's, in bps of the shares on every mint and every redeem. Holding
@@ -121,8 +124,9 @@ pub struct Basket {
     /// to the strategist, when `control` reads Smart. Read through `by_vote`.
     pub community: u8,
     /// Bytes 0..4: when a vote last added an asset (`community_execute_add`), unix seconds as a
-    /// u32, read through `vote_added_at`; 0 for never. Byte 4: 1 once the cut was set or lowered
-    /// after the pending rise was asked for, which calls that rise off (`cut_rise_void`).
+    /// u32, read through `vote_added_at`; 0 for never. Byte 4, bit 0 (`CUT_RISE_VOID`): set once
+    /// the cut was set or lowered after the pending rise was asked for, which calls that rise off
+    /// (`cut_rise_void`). Byte 4, bit 1 (`HANDED_OVER`): `handed_to` holds the manager.
     pub reserved: [u8; 5],
     /// The creator's cut of every mint by someone else, in bps of the shares (`creator_cut.rs`).
     /// (No basket handed to holder governance (`ControlMode::Dao`) exists on mainnet, whose spare
@@ -153,9 +157,50 @@ pub struct Basket {
     pub constituent_count: u8,
     #[max_len(MAX_CONSTITUENTS)]
     pub constituents: Vec<Constituent>,
+    /// Who runs the basket, once its creator handed it over (`hand_over`); read through
+    /// `manager`, never directly. Meaningful only while `reserved[4]`'s `HANDED_OVER` bit is set:
+    /// a basket made before this field existed has whatever followed its list here (zeros, or a
+    /// removed asset's leftover bytes), and the bit, never set on it, says to ignore them. It
+    /// follows the variable-length list, so it moves when the list grows or shrinks; every write
+    /// serialises the whole account, so it's always read from where it was last written.
+    pub handed_to: Pubkey,
 }
 
+/// `reserved[4]`, bit 0: the pending cut rise was called off.
+pub const CUT_RISE_VOID: u8 = 1;
+/// `reserved[4]`, bit 1: the basket was handed over; `handed_to` is its manager.
+pub const HANDED_OVER: u8 = 2;
+
+/// The Basket account's size: as it was before `handed_to` (every basket on chain has this size),
+/// which leaves room for `MAX_STORED_CONSTITUENTS` and the manager.
+pub const BASKET_SPACE: usize = 8 + Basket::INIT_SPACE - 32;
+const _: () = assert!(BASKET_SPACE >= 8 + Basket::INIT_SPACE - (MAX_CONSTITUENTS - MAX_STORED_CONSTITUENTS) * Constituent::INIT_SPACE);
+const _: () = assert!(MAX_LAUNCH_CONSTITUENTS <= MAX_STORED_CONSTITUENTS);
+
 impl Basket {
+    /// Who runs the basket: whoever its creator handed it to, or the creator. Every creator power
+    /// (changing it, its stops, allowlist, cut, metadata, minting first or privately, claiming the
+    /// cut and the fee, getting rent back) checks or pays this key. `creator` stays the PDA's seed,
+    /// so the basket signs for its vaults as it always did.
+    pub fn manager(&self) -> Pubkey {
+        if self.reserved[4] & HANDED_OVER != 0 {
+            self.handed_to
+        } else {
+            self.creator
+        }
+    }
+
+    /// Hands the basket to `to`. Back to the creator clears the field, as if it never moved.
+    pub fn set_manager(&mut self, to: Pubkey) {
+        if to == self.creator {
+            self.reserved[4] &= !HANDED_OVER;
+            self.handed_to = Pubkey::default();
+        } else {
+            self.reserved[4] |= HANDED_OVER;
+            self.handed_to = to;
+        }
+    }
+
     /// The creator's cut of a mint.
     pub fn cut_bps(&self) -> u16 {
         self.creator_cut_bps
@@ -184,11 +229,15 @@ impl Basket {
     /// Whether the creator's pending cut rise, if any, was called off: the cut was set or lowered
     /// since it was asked for (`propose_cut_rise` clears it).
     pub fn cut_rise_void(&self) -> bool {
-        self.reserved[4] != 0
+        self.reserved[4] & CUT_RISE_VOID != 0
     }
 
     pub fn set_cut_rise_void(&mut self, void: bool) {
-        self.reserved[4] = void as u8;
+        if void {
+            self.reserved[4] |= CUT_RISE_VOID;
+        } else {
+            self.reserved[4] &= !CUT_RISE_VOID;
+        }
     }
 
     pub fn set_vote_added_at(&mut self, now: i64) {

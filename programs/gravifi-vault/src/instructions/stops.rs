@@ -64,7 +64,7 @@ pub struct StopFired {
 pub fn set_stops<'info>(ctx: Context<'_, '_, 'info, 'info, SetStops<'info>>, mut stops: Vec<StopArgs>) -> Result<()> {
     let basket = &ctx.accounts.basket;
     if basket.control == ControlMode::Immutable {
-        require_keys_eq!(ctx.accounts.creator.key(), basket.creator, VaultError::NotMandateAuthority);
+        require_keys_eq!(ctx.accounts.creator.key(), basket.manager(), VaultError::NotMandateAuthority);
         require!(!basket.seeded, VaultError::StopsFixed);
     } else {
         authorise_mandate(basket, &ctx.accounts.creator)?;

@@ -266,4 +266,6 @@ pub enum VaultError {
     CutRiseVoid,
     #[msg("The Pyth price is published in the future")]
     PythPriceAhead,
+    #[msg("Hand the basket to another wallet: not the empty address, nor the one running it now")]
+    BadNewManager,
 }

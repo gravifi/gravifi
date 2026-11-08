@@ -490,9 +490,10 @@ pub struct ShareStakeOut<'info> {
 
 #[derive(Accounts)]
 pub struct EnterCommunity<'info> {
+    /// The basket's manager (`Basket::manager`).
     #[account(mut)]
     pub creator: Signer<'info>,
-    #[account(mut, has_one = creator @ VaultError::NotMandateAuthority)]
+    #[account(mut, constraint = basket.manager() == creator.key() @ VaultError::NotMandateAuthority)]
     pub basket: Box<Account<'info, Basket>>,
     #[account(init_if_needed, payer = creator, space = 8 + Community::INIT_SPACE, seeds = [COMMUNITY_SEED, basket.key().as_ref()], bump)]
     pub community: Box<Account<'info, Community>>,
@@ -639,8 +640,8 @@ pub struct CommunityExecuteSmart<'info> {
     pub proposal: Box<Account<'info, Proposal>>,
     #[account(init_if_needed, payer = payer, space = 8 + Smart::INIT_SPACE, seeds = [SMART_SEED, basket.key().as_ref()], bump)]
     pub smart: Box<Account<'info, Smart>>,
-    /// CHECK: the basket's creator, who gets the rules account's rent back on leaving.
-    #[account(mut, address = basket.creator @ VaultError::NotMandateAuthority)]
+    /// CHECK: the basket's manager (`Basket::manager`), who gets the rules account's rent back on leaving.
+    #[account(mut, address = basket.manager() @ VaultError::NotMandateAuthority)]
     pub creator: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
     /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.

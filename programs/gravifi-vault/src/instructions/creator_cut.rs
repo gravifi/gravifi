@@ -35,7 +35,7 @@ pub fn set_creator_cut(ctx: Context<SetCreatorCut>, bps: u16) -> Result<()> {
     require!(bps <= MAX_CREATOR_CUT_BPS, VaultError::FeeTooHigh);
     let basket = &mut ctx.accounts.basket;
     if basket.control == ControlMode::Immutable {
-        require_keys_eq!(ctx.accounts.authority.key(), basket.creator, VaultError::NotMandateAuthority);
+        require_keys_eq!(ctx.accounts.authority.key(), basket.manager(), VaultError::NotMandateAuthority);
         require!(!basket.seeded, VaultError::BasketImmutable);
     } else {
         authorise_mandate(basket, &ctx.accounts.authority)?;
@@ -149,8 +149,8 @@ pub struct ApplyCutRise<'info> {
     pub basket: Account<'info, Basket>,
     #[account(mut, close = creator, has_one = basket, seeds = [CUT_NOTICE_SEED, basket.key().as_ref()], bump = notice.bump)]
     pub notice: Account<'info, CutNotice>,
-    /// CHECK: the basket's creator, who gets the notice's rent back.
-    #[account(mut, address = basket.creator @ VaultError::NotMandateAuthority)]
+    /// CHECK: the basket's manager (`Basket::manager`), who gets the notice's rent back.
+    #[account(mut, address = basket.manager() @ VaultError::NotMandateAuthority)]
     pub creator: UncheckedAccount<'info>,
 }
 
@@ -167,8 +167,9 @@ pub struct ClaimCreatorCut<'info> {
     #[account(mut, token::mint = share_mint, token::authority = protocol, constraint = is_ata(&treasury_shares.to_account_info(), &protocol.key(), &share_mint.key()) @ VaultError::NotBasketVault)]
     pub treasury_shares: InterfaceAccount<'info, TokenAccountI>,
 
-    /// Pinned to the creator: anyone may call this, and it must not pay anyone else.
-    #[account(mut, token::mint = share_mint, token::authority = basket.creator)]
+    /// Pinned to the manager (`Basket::manager`: the creator, unless they handed the basket over):
+    /// anyone may call this, and it must not pay anyone else.
+    #[account(mut, token::mint = share_mint, token::authority = basket.manager())]
     pub creator_shares: InterfaceAccount<'info, TokenAccountI>,
 
     pub share_token_program: Interface<'info, TokenInterface>,

@@ -867,3 +867,28 @@ describe("community: at 14 assets", () => {
     assert.deepEqual(await targets(w), next);
   });
 });
+
+describe("community: handed over", () => {
+  it("handing it to its holders is the manager's, and the fee keeps streaming to the manager", async () => {
+    const w = await communityWorld();
+    await openDoor(w);
+    const carol = fund(w.ctx);
+    await rpc(w.ctx, w.ctx.vault.methods.handOver(carol.publicKey).accountsPartial({ manager: w.creator.publicKey, basket: w.basket }), [w.creator]);
+    await expectError(enter(w), "NotMandateAuthority");
+    await enter(w, carol);
+    assert.equal((await basketOf(w)).community, 1);
+    // A community basket's manager still holds its fee, and can hand that on.
+    const dave = fund(w.ctx);
+    await rpc(w.ctx, w.ctx.vault.methods.handOver(dave.publicKey).accountsPartial({ manager: carol.publicKey, basket: w.basket }), [carol]);
+    warp(w.ctx, 30 * DAY);
+    const daveShares = await createAta(w.ctx, w.shareMint, dave.publicKey, w.shareProgram);
+    await rpc(
+      w.ctx,
+      w.ctx.vault.methods
+        .accrueFees()
+        .accountsPartial({ basket: w.basket, shareMint: w.shareMint, creatorShares: daveShares, shareTokenProgram: w.shareProgram })
+        .remainingAccounts([w.vaultA, w.vaultB].map((pubkey) => ({ pubkey, isSigner: false, isWritable: false }))),
+    );
+    assert.ok(balance(w.ctx, daveShares) > 0n);
+  });
+});

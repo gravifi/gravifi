@@ -788,3 +788,29 @@ describe("smart baskets: Verified records", () => {
     );
   });
 });
+
+describe("smart baskets: handed over", () => {
+  const handOver = (w: { ctx: Ctx; basket: PublicKey }, to: PublicKey, signer: Keypair) =>
+    rpc(w.ctx, w.ctx.vault.methods.handOver(to).accountsPartial({ manager: signer.publicKey, basket: w.basket }), [signer]);
+
+  it("making it smart, pausing, proposing and leaving are the manager's; the rules' rent goes to them", async () => {
+    const w = await fourAssets();
+    const bob = fund(w.ctx);
+    await handOver(w, bob.publicKey, w.creator);
+    await expectError(enableSmart(w.ctx, w.basket, w.creator), "NotMandateAuthority");
+    await enableSmart(w.ctx, w.basket, bob);
+    const sw = w as SW;
+    await expectError(pause(sw, true, w.creator), "NotPauser");
+    await pause(sw, true, bob);
+    await pause(sw, false, bob);
+    await expectError(propose(sw, MANDATE, GUARD, true, w.creator), "NotMandateAuthority");
+    await propose(sw, MANDATE, GUARD, true, bob);
+    warp(w.ctx, DAY + 1);
+    // Applying is permissionless, but the rent goes to the manager only.
+    await expectError(apply(sw), "NotMandateAuthority");
+    const before = w.ctx.svm.getBalance(bob.publicKey)!;
+    await rpc(w.ctx, w.ctx.vault.methods.applyMandate().accountsPartial({ basket: w.basket, smart: pda.smart(w.basket), creator: bob.publicKey }));
+    assert.ok(w.ctx.svm.getBalance(bob.publicKey)! > before);
+    assert.ok("creator" in (await w.ctx.vault.account.basket.fetch(w.basket)).control);
+  });
+});

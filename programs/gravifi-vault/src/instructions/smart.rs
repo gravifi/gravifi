@@ -252,7 +252,7 @@ pub fn apply_mandate(ctx: Context<ApplyMandate>) -> Result<()> {
 /// pause is lifted by whoever made it, or by the guardian.
 pub fn set_smart_pause(ctx: Context<SetSmartPause>, paused: bool) -> Result<()> {
     let signer = ctx.accounts.signer.key();
-    let is_creator = signer == ctx.accounts.basket.creator && !ctx.accounts.basket.by_vote();
+    let is_creator = signer == ctx.accounts.basket.manager() && !ctx.accounts.basket.by_vote();
     let guardian = guardian_of(&ctx.accounts.protocol.to_account_info());
     let is_guardian = guardian != Pubkey::default() && signer == guardian;
     require!(is_creator || is_guardian, VaultError::NotPauser);
@@ -394,9 +394,10 @@ pub struct SetVerified<'info> {
 
 #[derive(Accounts)]
 pub struct EnableSmart<'info> {
+    /// The basket's manager (`Basket::manager`).
     #[account(mut)]
     pub creator: Signer<'info>,
-    #[account(mut, has_one = creator @ VaultError::NotMandateAuthority)]
+    #[account(mut, constraint = basket.manager() == creator.key() @ VaultError::NotMandateAuthority)]
     pub basket: Account<'info, Basket>,
     #[account(init, payer = creator, space = 8 + Smart::INIT_SPACE, seeds = [SMART_SEED, basket.key().as_ref()], bump)]
     pub smart: Box<Account<'info, Smart>>,
@@ -422,8 +423,9 @@ pub struct EnableSmart<'info> {
 
 #[derive(Accounts)]
 pub struct CreatorSmart<'info> {
+    /// The basket's manager (`Basket::manager`).
     pub creator: Signer<'info>,
-    #[account(has_one = creator @ VaultError::NotMandateAuthority)]
+    #[account(constraint = basket.manager() == creator.key() @ VaultError::NotMandateAuthority)]
     pub basket: Account<'info, Basket>,
     #[account(mut, seeds = [SMART_SEED, basket.key().as_ref()], bump = smart.bump, has_one = basket)]
     pub smart: Box<Account<'info, Smart>>,
@@ -438,8 +440,8 @@ pub struct ApplyMandate<'info> {
     pub basket: Account<'info, Basket>,
     #[account(mut, seeds = [SMART_SEED, basket.key().as_ref()], bump = smart.bump, has_one = basket)]
     pub smart: Box<Account<'info, Smart>>,
-    /// CHECK: the basket's creator, who gets the rules account's rent back on leaving.
-    #[account(mut, address = basket.creator @ VaultError::NotMandateAuthority)]
+    /// CHECK: the basket's manager (`Basket::manager`), who gets the rules account's rent back on leaving.
+    #[account(mut, address = basket.manager() @ VaultError::NotMandateAuthority)]
     pub creator: UncheckedAccount<'info>,
 }
 

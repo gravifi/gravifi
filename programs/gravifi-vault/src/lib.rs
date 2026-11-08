@@ -428,6 +428,12 @@ pub mod gravifi_vault {
 
     // ------------------------------------------------------------------ extension and splits
 
+    /// Hands the basket to another wallet, which then holds every creator power and payout. The
+    /// manager now signs (the creator, until a first handover). `creator` stays the PDA's seed.
+    pub fn hand_over(ctx: Context<HandOver>, new_manager: Pubkey) -> Result<()> {
+        instructions::basket::hand_over(ctx, new_manager)
+    }
+
     /// Creates a basket's extension account (`ext.rs`), the payer paying its rent. Permissionless.
     pub fn ext_init(ctx: Context<ExtInit>) -> Result<()> {
         instructions::basket::ext_init(ctx)

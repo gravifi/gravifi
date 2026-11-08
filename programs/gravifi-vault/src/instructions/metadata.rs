@@ -16,7 +16,7 @@ use crate::state::*;
 pub fn set_share_metadata(ctx: Context<SetShareMetadata>, name: String, symbol: String, uri: String) -> Result<()> {
     let a = &ctx.accounts;
     let signer = a.authority.key();
-    require!(signer == a.basket.creator || signer == authority_of(&a.protocol.to_account_info()), VaultError::NotMetadataAuthority);
+    require!(signer == a.basket.manager() || signer == authority_of(&a.protocol.to_account_info()), VaultError::NotMetadataAuthority);
     require!(
         (1..=metaplex::MAX_NAME_LEN).contains(&name.len())
             && (1..=metaplex::MAX_SYMBOL_LEN).contains(&symbol.len())
