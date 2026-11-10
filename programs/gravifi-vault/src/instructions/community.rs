@@ -12,6 +12,7 @@ use crate::errors::VaultError;
 use crate::instructions::basket::{apply_split, burn_gravi, check_addable, check_policy, drop_emptied, GraviAccounts};
 use crate::instructions::smart::{check_guardrails, is_verified};
 use crate::instructions::staking::{burn_skip, FreeUse};
+use crate::instructions::stake_cut;
 use crate::instructions::stops::{check_stops, hold_to_price, write_stops};
 use crate::params::{self, Params, PARAMS_ID};
 use crate::state::*;
@@ -21,7 +22,25 @@ use crate::token_util::*;
 pub fn share_stake(ctx: Context<ShareStakeIn>, amount: u64) -> Result<()> {
     require!(amount > 0, VaultError::BadParameter);
     let a = &mut *ctx.accounts;
-    read_vault(&a.escrow.to_account_info(), &a.escrow_authority.key(), &a.share_mint.key())?;
+    let staked = read_vault(&a.escrow.to_account_info(), &a.escrow_authority.key(), &a.share_mint.key())?.amount;
+    let (ext_ai, stake_ai) = (a.ext.to_account_info(), a.share_stake.to_account_info());
+    let (wallet_ai, system_ai) = (a.wallet.to_account_info(), a.system_program.to_account_info());
+    // Created by hand, room for the stakers' cut position included: an account grown to hold it
+    // must still be accepted on a top-up, which `init_if_needed`'s exact size check wouldn't.
+    let basket_key = a.basket.key();
+    let wallet_key = a.wallet.key();
+    let mut stake: ShareStake = if stake_ai.owner == &crate::ID {
+        ShareStake::try_deserialize(&mut &stake_ai.try_borrow_data()?[..])?
+    } else {
+        let bump = ctx.bumps.share_stake;
+        create_pda(&wallet_ai, &stake_ai, &system_ai, &[SHARE_STAKE_SEED, basket_key.as_ref(), wallet_key.as_ref(), &[bump]], stake_cut::STAKE_FULL_LEN)?;
+        ShareStake { bump, basket: basket_key, wallet: wallet_key, amount: 0, since: 0, locked_until: 0 }
+    };
+    require!(stake.basket == basket_key && stake.wallet == wallet_key, VaultError::BadParameter);
+    // A vote-run basket's cut: what this stake earned so far is settled before it grows, in shares
+    // and in USDC (the pot is the first remaining account for a basket with a cut record).
+    let cut = stake_cut::before_change(&mut a.basket, &ext_ai, &stake_ai, staked, stake.amount)?;
+    let cut_usdc = stake_cut::before_change_usdc(&mut a.basket, &ext_ai, ctx.remaining_accounts, &stake_ai, staked, stake.amount)?;
     token_interface::transfer_checked(
         CpiContext::new(
             a.share_token_program.to_account_info(),
@@ -35,21 +54,39 @@ pub fn share_stake(ctx: Context<ShareStakeIn>, amount: u64) -> Result<()> {
         amount,
         a.share_mint.decimals,
     )?;
-    let s = &mut a.share_stake;
-    s.bump = ctx.bumps.share_stake;
-    s.basket = a.basket.key();
-    s.wallet = a.wallet.key();
-    s.add(amount, Clock::get()?.unix_timestamp)
+    let now = Clock::get()?.unix_timestamp;
+    stake.add(amount, now)?;
+    // Staked shares stay a day (a stake or a top-up): nobody stakes for a moment just to take a cut.
+    stake.locked_until = stake.locked_until.max(now + SHARE_STAKE_LOCK_SECS);
+    let now_amount = stake.amount;
+    {
+        let mut data = stake_ai.try_borrow_mut_data()?;
+        let mut out: &mut [u8] = &mut data;
+        stake.try_serialize(&mut out)?;
+    }
+    if let Some((rec, owed)) = cut {
+        stake_cut::store(&basket_key, &ext_ai, &rec)?;
+        stake_cut::put_stake_tail(&stake_ai, &wallet_ai, &system_ai, stake_cut::debt_of(now_amount, rec.acc)?, owed)?;
+    }
+    if let Some((rec, owed)) = cut_usdc {
+        stake_cut::store_usdc(&basket_key, &ext_ai, &rec)?;
+        stake_cut::put_usdc_tail(&stake_ai, &wallet_ai, &system_ai, stake_cut::debt_of(now_amount, rec.acc)?, owed)?;
+    }
+    Ok(())
 }
 
-/// Takes staked shares back, unless they voted in a vote still running. The account closes when
+/// Takes staked shares back, unless they voted in a vote still running or were staked (or topped
+/// up) less than a day ago. The account closes when
 /// it empties, its rent back to the wallet.
 pub fn share_unstake(ctx: Context<ShareStakeOut>, amount: u64) -> Result<()> {
     require!(amount > 0, VaultError::BadParameter);
     let a = &mut *ctx.accounts;
     require!(amount <= a.share_stake.amount, VaultError::NotEnoughStaked);
     require!(Clock::get()?.unix_timestamp >= a.share_stake.locked_until, VaultError::SharesLocked);
-    read_vault(&a.escrow.to_account_info(), &a.escrow_authority.key(), &a.share_mint.key())?;
+    let staked = read_vault(&a.escrow.to_account_info(), &a.escrow_authority.key(), &a.share_mint.key())?.amount;
+    let (ext_ai, stake_ai) = (a.ext.to_account_info(), a.share_stake.to_account_info());
+    let cut = stake_cut::before_change(&mut a.basket, &ext_ai, &stake_ai, staked, a.share_stake.amount)?;
+    let cut_usdc = stake_cut::before_change_usdc(&mut a.basket, &ext_ai, ctx.remaining_accounts, &stake_ai, staked, a.share_stake.amount)?;
     let bump = [ctx.bumps.escrow_authority];
     let seeds: [&[u8]; 2] = [SHARE_ESCROW_SEED, &bump];
     token_interface::transfer_checked(
@@ -67,7 +104,28 @@ pub fn share_unstake(ctx: Context<ShareStakeOut>, amount: u64) -> Result<()> {
         a.share_mint.decimals,
     )?;
     a.share_stake.amount -= amount;
-    if a.share_stake.amount == 0 {
+    let left = a.share_stake.amount;
+    // Still owed some of the cut, in shares or USDC: the account stays until it's claimed.
+    let mut keep = left > 0;
+    if let Some((rec, owed)) = cut {
+        stake_cut::store(&a.basket.key(), &ext_ai, &rec)?;
+        if left > 0 || owed > 0 {
+            keep = true;
+            stake_cut::put_stake_tail(&stake_ai, &a.wallet.to_account_info(), &a.system_program.to_account_info(), stake_cut::debt_of(left, rec.acc)?, owed)?;
+        }
+    }
+    if let Some((rec, owed)) = cut_usdc {
+        stake_cut::store_usdc(&a.basket.key(), &ext_ai, &rec)?;
+        if left > 0 || owed > 0 {
+            keep = true;
+            stake_cut::put_usdc_tail(&stake_ai, &a.wallet.to_account_info(), &a.system_program.to_account_info(), stake_cut::debt_of(left, rec.acc)?, owed)?;
+        }
+    }
+    if keep {
+        // Written above: the account stays.
+        return Ok(());
+    }
+    if left == 0 {
         return a.share_stake.close(a.wallet.to_account_info());
     }
     Ok(())
@@ -89,6 +147,8 @@ pub fn enter_community(ctx: Context<EnterCommunity>) -> Result<()> {
     c.basket = b.key();
     c.hour = Clock::get()?.unix_timestamp / 3_600;
     c.turnover = [0; TURNOVER_HOURS];
+    // From now on the creator's cut goes to the share stakers; what was owed the creator stays theirs.
+    stake_cut::begin(&mut a.basket, &a.ext.to_account_info(), &a.creator.to_account_info(), &a.system_program.to_account_info())?;
     Ok(())
 }
 
@@ -110,7 +170,7 @@ fn check_action(prm: &Params, basket: &Basket, action: &ProposalAction) -> Resul
             require!(sum == BPS_DENOM as u32, VaultError::WeightsNotNormalised);
             require!(target_bps.iter().filter(|t| **t > 0).count() >= 2, VaultError::AssetCountOutOfRange);
             let change: u32 = target_bps.iter().zip(basket.active()).map(|(new, c)| new.saturating_sub(c.target_bps) as u32).sum();
-            require!(change <= prm.smart_caps().0 as u32, VaultError::TurnoverDayCap);
+            require!(change <= prm.vote_caps().0 as u32, VaultError::TurnoverDayCap);
         }
         ProposalAction::AddAsset { mint } => {
             require!(voting && (basket.constituent_count as usize) < MAX_LAUNCH_CONSTITUENTS, VaultError::BadProposal);
@@ -244,7 +304,15 @@ fn take_ready(basket: &Basket, community: &Community, proposal: &mut Account<Pro
 }
 
 /// Hands a basket back to its creator.
-fn leave(basket: &mut Basket, community: &mut Community) -> Result<()> {
+fn leave(basket: &mut Account<Basket>, community: &mut Community, remaining: &[AccountInfo]) -> Result<()> {
+    // What the stakers earned and wasn't shared yet stays theirs: the extension account rides along.
+    if basket.flag(STAKER_CUT) {
+        let (expected, _) = crate::ext::address(&basket.key());
+        let ext_ai = remaining.iter().find(|a| *a.key == expected).ok_or(VaultError::BadExt)?;
+        let mut rec = stake_cut::load(basket, ext_ai)?.unwrap_or_default();
+        stake_cut::freeze(basket, &mut rec);
+        stake_cut::store(&basket.key(), ext_ai, &rec)?;
+    }
     basket.control = ControlMode::Creator;
     basket.community = 0;
     community.epoch = community.epoch.checked_add(1).ok_or(VaultError::MathOverflow)?;
@@ -258,13 +326,14 @@ fn leave(basket: &mut Basket, community: &mut Community) -> Result<()> {
 /// streamed would otherwise be forfeit, and anyone can execute.
 pub fn community_execute<'info>(ctx: Context<'_, '_, 'info, 'info, CommunityExecute<'info>>) -> Result<()> {
     let prm = Params::load(&ctx.accounts.params)?;
-    let (day_cap, week_cap, weight_cap, unverified_cap) = prm.smart_caps();
+    let (day_cap, week_cap, weight_cap, unverified_cap) = prm.vote_caps();
     let a = &mut *ctx.accounts;
     take_ready(&a.basket, &a.community, &mut a.proposal, &prm)?;
     match &a.proposal.action {
         ProposalAction::Reweight { target_bps, mints_hash: pinned } => {
             let b = &mut a.basket;
             require!(b.control == ControlMode::Community, VaultError::NotExecutable);
+            require!(!b.flag(TRIP_OPEN), VaultError::TripOpen);
             require!(*pinned == mints_hash(b), VaultError::AssetsChanged);
             let n = b.constituent_count as usize;
             require!(ctx.remaining_accounts.len() == n, VaultError::BadRemainingAccounts);
@@ -311,7 +380,7 @@ pub fn community_execute<'info>(ctx: Context<'_, '_, 'info, 'info, CommunityExec
         }
         ProposalAction::Leave => {
             require!(a.basket.control == ControlMode::Community, VaultError::NotExecutable);
-            leave(&mut a.basket, &mut a.community)?;
+            leave(&mut a.basket, &mut a.community, ctx.remaining_accounts)?;
         }
         _ => return err!(VaultError::BadProposal),
     }
@@ -389,7 +458,7 @@ pub fn community_execute_smart(ctx: Context<CommunityExecuteSmart>) -> Result<()
         }
         ProposalAction::Leave => {
             require!(a.basket.control == ControlMode::Smart, VaultError::NotExecutable);
-            leave(&mut a.basket, &mut a.community)?;
+            leave(&mut a.basket, &mut a.community, ctx.remaining_accounts)?;
             return a.smart.close(a.creator.to_account_info());
         }
         _ => return err!(VaultError::BadProposal),
@@ -398,12 +467,28 @@ pub fn community_execute_smart(ctx: Context<CommunityExecuteSmart>) -> Result<()
 }
 
 /// Drops an asset a community basket has sold out (0% target, no units). Permissionless: no holder's
-/// claim changes. Not while a proposal is open (a Reweight pins the basket's assets, and removing
-/// one would void it), nor for REMOVE_GRACE_SECS after a vote added an asset (which sits at 0%
-/// with nothing in it until the Reweight that weights it runs). Close finished proposals first.
-pub fn community_remove(ctx: Context<CommunityRemove>, index: u8) -> Result<()> {
+/// claim changes. Not while a proposal it would void is open: a Reweight (it pins the basket's
+/// assets) or Stops naming the asset, not yet run, in this epoch. Remaining accounts: every open
+/// proposal of the basket (`community.open` of them), so none is left out. Nor for
+/// REMOVE_GRACE_SECS after a vote added an asset (which sits at 0% with nothing in it until the
+/// Reweight that weights it runs).
+pub fn community_remove<'info>(ctx: Context<'_, '_, 'info, 'info, CommunityRemove<'info>>, index: u8) -> Result<()> {
     require!(ctx.accounts.basket.control == ControlMode::Community, VaultError::NotCommunity);
-    require!(ctx.accounts.community.open == 0, VaultError::RemovalWaitsForVotes);
+    let basket_key = ctx.accounts.basket.key();
+    let mint = ctx.accounts.basket.active().get(index as usize).map(|c| c.mint).ok_or(VaultError::BadParameter)?;
+    let (open, epoch) = (ctx.accounts.community.open as usize, ctx.accounts.community.epoch);
+    require!(ctx.remaining_accounts.len() == open, VaultError::RemovalWaitsForVotes);
+    for (k, ai) in ctx.remaining_accounts.iter().enumerate() {
+        require!(ai.owner == &crate::ID && ctx.remaining_accounts[..k].iter().all(|o| o.key != ai.key), VaultError::RemovalWaitsForVotes);
+        let p = Proposal::try_deserialize(&mut &ai.try_borrow_data()?[..])?;
+        require_keys_eq!(p.basket, basket_key, VaultError::RemovalWaitsForVotes);
+        let touches = match &p.action {
+            ProposalAction::Reweight { .. } => true,
+            ProposalAction::Stops { stops } => stops.iter().any(|s| s.mint == mint),
+            _ => false,
+        };
+        require!(p.executed || p.epoch != epoch || !touches, VaultError::RemovalWaitsForVotes);
+    }
     let prm = Params::load(&ctx.accounts.params)?;
     require!(prm.now >= ctx.accounts.basket.vote_added_at() + prm.remove_grace(), VaultError::AssetJustAdded);
     drop_emptied(&mut ctx.accounts.basket, index)
@@ -449,20 +534,24 @@ pub fn community_close_vote(ctx: Context<CommunityCloseVote>) -> Result<()> {
 pub struct ShareStakeIn<'info> {
     #[account(mut)]
     pub wallet: Signer<'info>,
-    #[account(has_one = share_mint)]
+    #[account(mut, has_one = share_mint)]
     pub basket: Box<Account<'info, Basket>>,
     pub share_mint: Box<InterfaceAccount<'info, MintI>>,
     /// CHECK: the wallet's share account; the token program checks it as it moves.
     #[account(mut)]
     pub wallet_shares: UncheckedAccount<'info>,
+    /// CHECK: `[EXT_SEED, basket]`: a vote-run basket's stakers' cut record (`stake_cut.rs`).
+    #[account(mut)]
+    pub ext: UncheckedAccount<'info>,
     /// CHECK: address-only PDA, the owner of staked shares.
     #[account(seeds = [SHARE_ESCROW_SEED], bump)]
     pub escrow_authority: UncheckedAccount<'info>,
     /// CHECK: the escrow's canonical account for this share mint, checked in the instruction.
     #[account(mut)]
     pub escrow: UncheckedAccount<'info>,
-    #[account(init_if_needed, payer = wallet, space = 8 + ShareStake::INIT_SPACE, seeds = [SHARE_STAKE_SEED, basket.key().as_ref(), wallet.key().as_ref()], bump)]
-    pub share_stake: Box<Account<'info, ShareStake>>,
+    /// CHECK: `[SHARE_STAKE_SEED, basket, wallet]`, created by hand in `share_stake` the first time.
+    #[account(mut, seeds = [SHARE_STAKE_SEED, basket.key().as_ref(), wallet.key().as_ref()], bump)]
+    pub share_stake: UncheckedAccount<'info>,
     pub share_token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
 }
@@ -471,12 +560,15 @@ pub struct ShareStakeIn<'info> {
 pub struct ShareStakeOut<'info> {
     #[account(mut)]
     pub wallet: Signer<'info>,
-    #[account(has_one = share_mint)]
+    #[account(mut, has_one = share_mint)]
     pub basket: Box<Account<'info, Basket>>,
     pub share_mint: Box<InterfaceAccount<'info, MintI>>,
     /// CHECK: the wallet's share account; the token program checks it as it moves.
     #[account(mut)]
     pub wallet_shares: UncheckedAccount<'info>,
+    /// CHECK: `[EXT_SEED, basket]`: a vote-run basket's stakers' cut record (`stake_cut.rs`).
+    #[account(mut)]
+    pub ext: UncheckedAccount<'info>,
     /// CHECK: address-only PDA; signs as the owner of staked shares.
     #[account(seeds = [SHARE_ESCROW_SEED], bump)]
     pub escrow_authority: UncheckedAccount<'info>,
@@ -486,6 +578,7 @@ pub struct ShareStakeOut<'info> {
     #[account(mut, seeds = [SHARE_STAKE_SEED, basket.key().as_ref(), wallet.key().as_ref()], bump = share_stake.bump)]
     pub share_stake: Box<Account<'info, ShareStake>>,
     pub share_token_program: Interface<'info, TokenInterface>,
+    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
@@ -497,6 +590,9 @@ pub struct EnterCommunity<'info> {
     pub basket: Box<Account<'info, Basket>>,
     #[account(init_if_needed, payer = creator, space = 8 + Community::INIT_SPACE, seeds = [COMMUNITY_SEED, basket.key().as_ref()], bump)]
     pub community: Box<Account<'info, Community>>,
+    /// CHECK: `[EXT_SEED, basket]`, created by `ext::ensure` for the stakers' cut record.
+    #[account(mut)]
+    pub ext: UncheckedAccount<'info>,
     /// Read for its flags.
     #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump)]
     pub protocol: Box<Account<'info, Protocol>>,

@@ -102,8 +102,9 @@ pub mod gravifi_vault {
         instructions::mint_redeem::seed_basket(ctx, shares, units_per_share)
     }
 
-    /// Deposit the exact underlying basket for up to `shares`, receive them less the
-    /// protocol's mint fee. No oracle is consulted.
+    /// Deposit the exact underlying basket for up to `shares`, receive them. The protocol's mint
+    /// fee is paid in USDC when the fee accounts follow the quads and the payer's USDC covers it
+    /// (priced from the posted prices), else kept in shares as before.
     pub fn mint_in_kind<'info>(
         ctx: Context<'_, '_, 'info, 'info, MintInKind<'info>>,
         shares: u64,
@@ -112,9 +113,10 @@ pub mod gravifi_vault {
         instructions::mint_redeem::mint_in_kind(ctx, shares, min_shares)
     }
 
-    /// Hand in `shares`: the protocol's redeem fee is kept in shares, the rest are burned
-    /// and their underlying paid out pro-rata. Never gated — not by access mode, not
-    /// by a delisting. A holder who cannot redeem holds a promise, not a claim.
+    /// Hand in `shares`: they're burned and their underlying paid out pro-rata. The protocol's
+    /// redeem fee is paid in USDC when it can be, else kept in shares. Never gated — not by
+    /// access mode, not by a delisting, not by the fee. A holder who cannot redeem holds a
+    /// promise, not a claim.
     pub fn redeem_in_kind<'info>(
         ctx: Context<'_, '_, 'info, 'info, RedeemInKind<'info>>,
         shares: u64,
@@ -151,7 +153,8 @@ pub mod gravifi_vault {
 
     /// Replace the target weights. `Immutable` rejects unconditionally, which is the whole
     /// promise of that mode; a smart basket's targets are its strategist's (`smart_set_targets`).
-    pub fn set_targets(ctx: Context<Reconfigure>, target_bps: Vec<u16>) -> Result<()> {
+    /// Once others hold shares, the change is announced and applies 24 hours later (`apply_targets`).
+    pub fn set_targets<'info>(ctx: Context<'_, '_, 'info, 'info, Reconfigure<'info>>, target_bps: Vec<u16>) -> Result<()> {
         instructions::basket::set_targets(ctx, target_bps)
     }
 
@@ -159,6 +162,11 @@ pub mod gravifi_vault {
     /// deposited or moved, but the asset's GRAVI burn is paid, as at creation. A `set_targets`
     /// (normally in the same transaction) gives it a weight, and rebalancing then buys it in,
     /// slice by slice, like any underweight sleeve.
+    /// Puts a creator's announced weights in force once their notice is over. Permissionless.
+    pub fn apply_targets(ctx: Context<ApplyTargets>) -> Result<()> {
+        instructions::basket::apply_targets(ctx)
+    }
+
     pub fn add_constituent(ctx: Context<AddConstituent>) -> Result<()> {
         instructions::basket::add_constituent(ctx)
     }
@@ -371,6 +379,83 @@ pub mod gravifi_vault {
         instructions::smart::set_verified(ctx, verified)
     }
 
+    /// Gives one of our parts (a mixed basket's Robinhood Chain side, bridged as an OFT token) a
+    /// Verified record once its mint, OFT store, store admin and peer prove it. Permissionless.
+    pub fn verify_part(ctx: Context<VerifyPart>, remote_eid: u32) -> Result<()> {
+        instructions::smart::verify_part(ctx, remote_eid)
+    }
+
+    /// Starts a cross-chain trip of a mixed basket: the trip key takes `sell_amount` of an
+    /// overweight sleeve out, toward an underweight one, one of them a part, no further than the
+    /// drift needs. Mints wait until it settles; redeems take an IOU for their slice of it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn trip_start<'info>(
+        ctx: Context<'_, '_, 'info, 'info, TripStart<'info>>,
+        id: u32,
+        sell_index: u8,
+        buy_index: u8,
+        sell_amount: u64,
+        max_slippage_bps: u16,
+        refund: u64,
+        remote_eid: u32,
+    ) -> Result<()> {
+        instructions::trip::trip_start(ctx, id, sell_index, buy_index, sell_amount, max_slippage_bps, refund, remote_eid)
+    }
+
+    /// Puts what a trip brought back into the basket, at least its floor (none once failed), less
+    /// the IOUs' slice. Permissionless.
+    pub fn trip_settle(ctx: Context<TripSettle>) -> Result<()> {
+        instructions::trip::trip_settle(ctx)
+    }
+
+    /// Marks a trip failed past its deadline: mints reopen, new trips wait for the guardian.
+    /// Permissionless.
+    pub fn trip_fail(ctx: Context<TripFail>) -> Result<()> {
+        instructions::trip::trip_fail(ctx)
+    }
+
+    /// Lets trips start again after a failed one. Guardian or protocol authority.
+    pub fn trip_clear(ctx: Context<TripClear>) -> Result<()> {
+        instructions::trip::trip_clear(ctx)
+    }
+
+    /// Starts or brings up to date a vote-run basket's stakers' cut record. Permissionless.
+    pub fn sync_stake_cut(ctx: Context<SyncStakeCut>) -> Result<()> {
+        instructions::stake_cut::sync_stake_cut(ctx)
+    }
+
+    /// Pays a share stake what a vote-run basket's creator cut earned it.
+    pub fn claim_stake_cut(ctx: Context<ClaimStakeCut>) -> Result<()> {
+        instructions::stake_cut::claim_stake_cut(ctx)
+    }
+
+    /// Pays a stake its share of a vote-run basket's cut paid in USDC, from the basket's pot.
+    pub fn claim_stake_cut_usdc(ctx: Context<ClaimStakeCutUsdc>) -> Result<()> {
+        instructions::stake_cut::claim_stake_cut_usdc(ctx)
+    }
+
+    /// Pays a redeemer's IOU from what a trip brought back.
+    pub fn trip_claim(ctx: Context<TripClaim>) -> Result<()> {
+        instructions::trip::trip_claim(ctx)
+    }
+
+    /// Gives a redeemer back the rent of an IOU whose trip was cleared with nothing come back.
+    pub fn trip_iou_close(ctx: Context<TripIouClose>) -> Result<()> {
+        instructions::trip::trip_iou_close(ctx)
+    }
+
+    /// Once every share is gone, sends what's left in the named vaults to the manager and closes
+    /// them, their rent to the manager. Manager only; as often as needed.
+    pub fn close_vaults<'info>(ctx: Context<'_, '_, 'info, 'info, CloseVaults<'info>>) -> Result<()> {
+        instructions::close::close_vaults(ctx)
+    }
+
+    /// Closes an emptied basket whose vaults are closed, with the side accounts named, their rent
+    /// to the manager. Manager only.
+    pub fn close_basket<'info>(ctx: Context<'_, '_, 'info, 'info, CloseBasket<'info>>) -> Result<()> {
+        instructions::close::close_basket(ctx)
+    }
+
     /// Makes a creator-managed basket smart, before its first deposit, with its mandate's hash
     /// and guardrails, burning the smart burn (`set_param` CONFIG_SMART_BURN) from the creator's GRAVI.
     /// Creator only.
@@ -437,6 +522,12 @@ pub mod gravifi_vault {
     /// Creates a basket's extension account (`ext.rs`), the payer paying its rent. Permissionless.
     pub fn ext_init(ctx: Context<ExtInit>) -> Result<()> {
         instructions::basket::ext_init(ctx)
+    }
+
+    /// Moves to the treasury's USDC what came into a vote-run basket's pot while nobody was staked.
+    /// Permissionless.
+    pub fn pot_to_treasury(ctx: Context<PotToTreasury>) -> Result<()> {
+        instructions::stake_cut::pot_to_treasury(ctx)
     }
 
     /// Splits (or reverse-splits) the basket's shares by `numerator`:`denominator` by
@@ -567,7 +658,7 @@ pub mod gravifi_vault {
     }
 
     /// Drops an asset a community basket has sold out. Permissionless.
-    pub fn community_remove(ctx: Context<CommunityRemove>, index: u8) -> Result<()> {
+    pub fn community_remove<'info>(ctx: Context<'_, '_, 'info, 'info, CommunityRemove<'info>>, index: u8) -> Result<()> {
         instructions::community::community_remove(ctx, index)
     }
 
@@ -579,5 +670,27 @@ pub mod gravifi_vault {
     /// Closes a vote record once its vote has ended. Permissionless.
     pub fn community_close_vote(ctx: Context<CommunityCloseVote>) -> Result<()> {
         instructions::community::community_close_vote(ctx)
+    }
+
+    /// The price key vouches for the dollar value of the mint, seed or redeem right after it, which
+    /// then takes its fees in USDC at the program's rates. Moves nothing.
+    pub fn fee_quote(ctx: Context<SignFeeQuote>, value: u64) -> Result<()> {
+        instructions::mint_redeem::fee_quote(ctx, value)
+    }
+
+    /// Moves what's left in a trip's token account to the basket's vault and closes what it can, once
+    /// the trip is gone or settled with every IOU paid. Permissionless.
+    pub fn trip_sweep(ctx: Context<TripSweep>, id: u32) -> Result<()> {
+        instructions::trip::trip_sweep(ctx, id)
+    }
+
+    /// Reads a price guard, nothing else: keeps its type in the IDL for clients to decode.
+    pub fn read_price_guard(ctx: Context<ReadPriceGuard>) -> Result<()> {
+        instructions::protocol::read_price_guard(ctx)
+    }
+
+    /// Moves the treasury's USDC (its side of the fees paid in USDC). Protocol authority.
+    pub fn treasury_withdraw_usdc(ctx: Context<TreasuryWithdrawUsdc>, amount: u64) -> Result<()> {
+        instructions::protocol::treasury_withdraw_usdc(ctx, amount)
     }
 }

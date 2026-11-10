@@ -42,7 +42,9 @@ pub fn accrue_fees<'info>(ctx: Context<'_, '_, 'info, 'info, AccrueFees<'info>>)
     // Otherwise leave the clock alone when nothing was minted. Advancing it anyway would let
     // anyone call this every slot, round each period's fee down to zero, and erase
     // the fee entirely.
-    if creator_fee == 0 {
+    // While a cross-chain trip is out the supply must stay as it was (`trip.rs`): the fee waits,
+    // the clock with it, so nothing is lost.
+    if creator_fee == 0 || ctx.accounts.basket.flag(TRIP_OPEN) {
         return Ok(());
     }
 

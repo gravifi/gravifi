@@ -25,7 +25,8 @@ import {
   warp,
   type Ctx,
 } from "./helpers.ts";
-import { NO_GRAVI, feeShares, fundHolder, listAsset, mintIx, setCreationBurn, world, type WorldOpts, initKeepers, setParamIx, CONFIG, setParam, PARAM, PARAM_NOTICE, FAMILY } from "./fixtures.ts";
+import { NO_GRAVI, feeShares, fundHolder, listAsset, mintIx, redeemIx, setCreationBurn, world, type WorldOpts, initKeepers, setParamIx, CONFIG, setParam, PARAM, PARAM_NOTICE, FAMILY, potOf, potOwner, USDC } from "./fixtures.ts";
+import { closeBasket, closeVaults, gone } from "./_close.ts";
 
 const DAY = 86_400;
 const SHARES = 1_000_000_000n;
@@ -57,7 +58,7 @@ const openDoor = (w: Pick<W, "ctx">, open = true, authority = w.ctx.payer) =>
   rpc(w.ctx, setParamIx(w.ctx, CONFIG.communityOpen, open ? 1 : 0, [], authority.publicKey), [authority]);
 
 const enter = (w: W, who = w.creator) =>
-  rpc(w.ctx, w.ctx.vault.methods.enterCommunity().accountsPartial({ creator: who.publicKey, basket: w.basket, community: pda.community(w.basket), protocol: pda.protocol() }), [who]);
+  rpc(w.ctx, w.ctx.vault.methods.enterCommunity().accountsPartial({ creator: who.publicKey, basket: w.basket, community: pda.community(w.basket), ext: pda.ext(w.basket), protocol: pda.protocol() }), [who]);
 
 async function goCommunity(opts: WorldOpts = {}) {
   const w = await communityWorld(opts);
@@ -74,12 +75,23 @@ const shareStake = (w: W, who: Keypair, amount: bigint) =>
       basket: w.basket,
       shareMint: w.shareMint,
       walletShares: ata(w.shareMint, who.publicKey, w.shareProgram),
+      ext: pda.ext(w.basket),
       escrow: ata(w.shareMint, pda.shareEscrow(), w.shareProgram),
       shareStake: pda.shareStake(w.basket, who.publicKey),
       shareTokenProgram: w.shareProgram,
-    }),
+    }).remainingAccounts([{ pubkey: potOf(w.basket), isSigner: false, isWritable: false }]),
     [who],
   );
+
+/** Lifts the day a stake stays (SHARE_STAKE_LOCK_SECS), for tests about something else: its
+ *  `locked_until` back to 0. Not for a stake that voted. */
+function unlock(w: W, who: Keypair) {
+  const k = pda.shareStake(w.basket, who.publicKey);
+  const a = w.ctx.svm.getAccount(k)!;
+  const d = Buffer.from(a.data);
+  d.writeBigInt64LE(0n, 8 + 1 + 32 + 32 + 8 + 8);
+  w.ctx.svm.setAccount(k, { ...a, data: d });
+}
 
 const shareUnstake = (w: W, who: Keypair, amount: bigint) =>
   rpc(
@@ -89,10 +101,11 @@ const shareUnstake = (w: W, who: Keypair, amount: bigint) =>
       basket: w.basket,
       shareMint: w.shareMint,
       walletShares: ata(w.shareMint, who.publicKey, w.shareProgram),
+      ext: pda.ext(w.basket),
       escrow: ata(w.shareMint, pda.shareEscrow(), w.shareProgram),
       shareStake: pda.shareStake(w.basket, who.publicKey),
       shareTokenProgram: w.shareProgram,
-    }),
+    }).remainingAccounts([{ pubkey: potOf(w.basket), isSigner: false, isWritable: false }]),
     [who],
   );
 
@@ -144,7 +157,8 @@ const execute = (w: W, id: number, verified: PublicKey[] = []) =>
     w.ctx.vault.methods
       .communityExecute()
       .accountsPartial({ basket: w.basket, community: pda.community(w.basket), proposal: pda.proposal(w.basket, id) })
-      .remainingAccounts(verified.map((pubkey) => ({ pubkey, isSigner: false, isWritable: false }))),
+      // A Reweight names each asset's Verified record; a Leave, the extension account (the stakers' cut).
+      .remainingAccounts(verified.length ? verified.map((pubkey) => ({ pubkey, isSigner: false, isWritable: false })) : [{ pubkey: pda.ext(w.basket), isSigner: false, isWritable: true }]),
   );
 
 /** A wallet's one open proposal on the basket. */
@@ -206,6 +220,9 @@ describe("share staking", () => {
     await shareStake(w, w.alice, 40n * SHARES);
     assert.equal(balance(w.ctx, shares), 50n * SHARES);
     assert.equal(balance(w.ctx, ata(w.shareMint, pda.shareEscrow())), 40n * SHARES);
+    // A stake stays a day: nobody stakes for a moment just to take a cut.
+    await expectError(shareUnstake(w, w.alice, 10n * SHARES), "SharesLocked");
+    warp(w.ctx, 86_400);
     await shareUnstake(w, w.alice, 10n * SHARES);
     assert.equal(balance(w.ctx, shares), 60n * SHARES);
     await expectError(shareUnstake(w, w.alice, 31n * SHARES), "NotEnoughStaked");
@@ -224,6 +241,7 @@ describe("share staking", () => {
           basket: w.basket,
           shareMint: w.shareMint,
           walletShares: ata(w.shareMint, w.bob.publicKey),
+          ext: pda.ext(w.basket),
           escrow: ata(w.shareMint, pda.shareEscrow()),
           shareStake: pda.shareStake(w.basket, w.alice.publicKey),
           shareTokenProgram: w.shareProgram,
@@ -238,6 +256,7 @@ describe("share staking", () => {
     const w = await communityWorld({ shareTokenProgram: TOKEN_2022_PROGRAM_ID });
     await shareStake(w, w.alice, 40n * SHARES);
     assert.equal(balance(w.ctx, ata(w.shareMint, pda.shareEscrow(), TOKEN_2022_PROGRAM_ID)), 40n * SHARES);
+    unlock(w, w.alice);
     await shareUnstake(w, w.alice, 40n * SHARES);
   });
 });
@@ -426,15 +445,15 @@ describe("community: passing", () => {
     await enter(other);
   });
 
-  it("needs 10% of the supply to vote", async () => {
+  it("needs 20% of the supply to vote", async () => {
     const w = await goCommunity();
-    await shareStake(w, w.alice, 90n * SHARES); // 9%
+    await shareStake(w, w.bob, 190n * SHARES); // 19%
     warp(w.ctx, VOTE);
-    const id = await propose(w, w.alice, { policy: { rebalanceMode: { hybrid: {} }, intervalSecs: new BN(2 * DAY), driftBps: 600 } });
-    await vote(w, w.alice, id);
+    const id = await propose(w, w.bob, { policy: { rebalanceMode: { hybrid: {} }, intervalSecs: new BN(2 * DAY), driftBps: 600 } });
+    await vote(w, w.bob, id);
     warp(w.ctx, VOTE + WAIT);
     await expectError(execute(w, id), "NotExecutable");
-    await close(w, id, w.alice.publicKey);
+    await close(w, id, w.bob.publicKey);
   });
 
   it("needs over half, and 66% for the fee, going Smart and leaving", async () => {
@@ -672,30 +691,13 @@ describe("community: what a vote does", () => {
     assert.deepEqual(await targets(w), [0, 3_334, 3_333, 3_333]);
   });
 
-  it("a vote's stop moves no weight past the caps: a two-asset basket's can't fire (M1)", async () => {
+  it("a vote can't put a stop on a two-asset basket: two assets must stay without one", async () => {
     const w = await goCommunity();
     await bobReady(w);
     const keeper = fund(w.ctx);
     await initKeepers(w.ctx, keeper.publicKey, keeper.publicKey);
     await postPrices(w.ctx, keeper, [[w.mintA, 1_000_000_000_000n]]);
-    const id = await passed(w, { stops: { stops: [{ mint: w.mintA, pctBps: 1_000, trailing: false, referenceE12: new BN("1000000000000") }] } });
-    await postPrices(w.ctx, keeper, [[w.mintA, 1_000_000_000_000n]]);
-    await rpc(
-      w.ctx,
-      w.ctx.vault.methods
-        .communityExecuteStops()
-        .accountsPartial({ payer: w.ctx.payer.publicKey, basket: w.basket, community: pda.community(w.basket), proposal: pda.proposal(w.basket, id), stopLoss: pda.stop(w.basket) })
-        .remainingAccounts([{ pubkey: pda.price(w.mintA), isSigner: false, isWritable: false }]),
-    );
-    const records = (await verifiedOf(w)).map((pubkey) => ({ pubkey, isSigner: false, isWritable: false }));
-    const check = () => rpc(w.ctx, w.ctx.vault.methods.checkStop().accountsPartial({ basket: w.basket, stopLoss: pda.stop(w.basket), assetPrice: pda.price(w.mintA) }).remainingAccounts(records));
-    await postPrices(w.ctx, keeper, [[w.mintA, 800_000_000_000n]]);
-    await check();
-    warp(w.ctx, 300);
-    await postPrices(w.ctx, keeper, [[w.mintA, 800_000_000_000n]]);
-    // B (40%, Unverified) would go to 100%, which no Reweight could do: refused, still armed.
-    await expectError(check(), "StopNoRoom");
-    assert.deepEqual(await targets(w), [6_000, 4_000]);
+    await expectError(passed(w, { stops: { stops: [{ mint: w.mintA, pctBps: 1_000, trailing: false, referenceE12: new BN("1000000000000") }] } }), "TooManyStops");
   });
 
   it("splits", async () => {
@@ -721,8 +723,31 @@ describe("community: what a vote does", () => {
     warp(w.ctx, VOTE + WAIT + 7 * DAY);
     const rw = await propose(w, w.bob, await reweight(w, [5_000, 4_000, 1_000]));
     await expectError(remove(2), "RemovalWaitsForVotes");
+    // Naming it doesn't help: a Reweight would be voided.
+    const named = (i: number, ids: number[]) =>
+      rpc(w.ctx, w.ctx.vault.methods.communityRemove(i).accountsPartial({ basket: w.basket, community: pda.community(w.basket) }).remainingAccounts(ids.map((id) => ({ pubkey: pda.proposal(w.basket, id), isSigner: false, isWritable: false }))));
+    await expectError(named(2, [rw]), "RemovalWaitsForVotes");
     warp(w.ctx, VOTE);
     await close(w, rw, w.bob.publicKey); // nobody voted: failed
+    // A vote that doesn't touch it (a policy change) no longer holds it up, once it's named:
+    // three wallets can't keep an emptied asset in by opening proposals.
+    const policy = await propose(w, w.bob, { policy: { rebalanceMode: { hybrid: {} }, intervalSecs: new BN(2 * DAY), driftBps: 600 } });
+    await expectError(remove(2), "RemovalWaitsForVotes");
+    await expectError(named(0, [policy]), "ConstituentNotEmpty");
+    await named(2, [policy]);
+    assert.equal((await basketOf(w)).constituentCount, 2);
+    await expectError(named(0, [policy]), "TooFewConstituents");
+  });
+
+  it("removing with every open vote named, the old way, still works when none is open", async () => {
+    const w = await goCommunity();
+    await bobReady(w);
+    const { C, vault } = await assetC(w);
+    const add = await passed(w, { addAsset: { mint: C } });
+    await executeAdd(w, add, C, vault);
+    await close(w, add, w.bob.publicKey);
+    warp(w.ctx, VOTE + WAIT + 7 * DAY);
+    const remove = (i: number) => rpc(w.ctx, w.ctx.vault.methods.communityRemove(i).accountsPartial({ basket: w.basket, community: pda.community(w.basket) }));
     await expectError(remove(0), "ConstituentNotEmpty");
     await remove(2);
     assert.equal((await basketOf(w)).constituentCount, 2);
@@ -801,7 +826,7 @@ describe("community: the creator's cut", () => {
 
 describe("community: handing it to the strategist", () => {
   const executeSmart = (w: W, id: number) =>
-    rpc(w.ctx, w.ctx.vault.methods.communityExecuteSmart().accountsPartial({ payer: w.ctx.payer.publicKey, basket: w.basket, community: pda.community(w.basket), proposal: pda.proposal(w.basket, id), smart: pda.smart(w.basket), creator: w.creator.publicKey }));
+    rpc(w.ctx, w.ctx.vault.methods.communityExecuteSmart().accountsPartial({ payer: w.ctx.payer.publicKey, basket: w.basket, community: pda.community(w.basket), proposal: pda.proposal(w.basket, id), smart: pda.smart(w.basket), creator: w.creator.publicKey }).remainingAccounts([{ pubkey: pda.ext(w.basket), isSigner: false, isWritable: true }]));
 
   it("the vote holds the creator's Smart powers, and takes it back", async () => {
     const w = await goCommunity();
@@ -840,10 +865,11 @@ describe("community: handing it to the strategist", () => {
     assert.ok((await basketOf(w)).control.creator);
   });
 
-  it("guardrails past the code's ceilings can't be proposed", async () => {
+  it("guardrails that don't hold together can't be proposed (smart baskets have no protocol ceiling since 8 Nov 2026)", async () => {
     const w = await goCommunity();
     await bobReady(w);
-    await expectError(propose(w, w.bob, { goSmart: { mandateHash: hash("x"), guard: { ...GUARD, maxDayBps: 4_001 } } }), "BadGuardrails");
+    await expectError(propose(w, w.bob, { goSmart: { mandateHash: hash("x"), guard: { ...GUARD, maxDayBps: 6_000, maxWeekBps: 5_000 } } }), "BadGuardrails");
+    await propose(w, w.bob, { goSmart: { mandateHash: hash("x"), guard: { ...GUARD, maxDayBps: 4_001, maxWeekBps: 12_000 } } });
   });
 });
 
@@ -890,5 +916,367 @@ describe("community: handed over", () => {
         .remainingAccounts([w.vaultA, w.vaultB].map((pubkey) => ({ pubkey, isSigner: false, isWritable: false }))),
     );
     assert.ok(balance(w.ctx, daveShares) > 0n);
+  });
+});
+
+describe("community: the creator's cut goes to share stakers", () => {
+  const CUT = 60;
+  /** A cut of 0.6%, raised before the basket is handed over, and Carol, who buys. */
+  async function cutWorld() {
+    const w = await communityWorld();
+    await openDoor(w);
+    await rpc(w.ctx, w.ctx.vault.methods.proposeCutRise(CUT).accountsPartial({ authority: w.creator.publicKey, basket: w.basket, notice: pda.cutNotice(w.basket) }), [w.creator]);
+    warp(w.ctx, 2 * DAY);
+    await rpc(w.ctx, w.ctx.vault.methods.applyCutRise().accountsPartial({ basket: w.basket, notice: pda.cutNotice(w.basket), creator: w.creator.publicKey }));
+    const carol = fund(w.ctx);
+    await fundHolder(w, carol);
+    return { ...w, carol };
+  }
+  type CW = Awaited<ReturnType<typeof cutWorld>>;
+  const buy = (w: CW, shares: bigint) => rpc(w.ctx, mintIx(w, w.carol, shares), [w.carol]);
+  const claimStake = (w: CW, who: Keypair) =>
+    rpc(
+      w.ctx,
+      w.ctx.vault.methods.claimStakeCut().accountsPartial({
+        wallet: who.publicKey,
+        basket: w.basket,
+        shareMint: w.shareMint,
+        ext: pda.ext(w.basket),
+        escrow: ata(w.shareMint, pda.shareEscrow(), w.shareProgram),
+        shareStake: pda.shareStake(w.basket, who.publicKey),
+        protocol: pda.protocol(),
+        treasuryShares: feeShares(w.shareMint, w.shareProgram).treasuryShares,
+        walletShares: ata(w.shareMint, who.publicKey, w.shareProgram),
+        shareTokenProgram: w.shareProgram,
+      }),
+      [who],
+    );
+  const claimCreator = (w: CW, ext: PublicKey | null = pda.ext(w.basket)) =>
+    rpc(
+      w.ctx,
+      w.ctx.vault.methods.claimCreatorCut().accountsPartial({
+        basket: w.basket,
+        protocol: pda.protocol(),
+        shareMint: w.shareMint,
+        treasuryShares: feeShares(w.shareMint, w.shareProgram).treasuryShares,
+        creatorShares: ata(w.shareMint, w.creator.publicKey, w.shareProgram),
+        shareTokenProgram: w.shareProgram,
+        ext,
+      }),
+    );
+  const sharesOf = (w: CW, who: PublicKey) => balance(w.ctx, ata(w.shareMint, who, w.shareProgram));
+
+  it("before the handover it's the creator's; after, the stakers', pro rata to what they stake", async () => {
+    const w = await cutWorld();
+    await buy(w, 100n * SHARES); // 0.6 shares to the creator
+    await enter(w);
+    await shareStake(w, w.bob, 500n * SHARES);
+    await shareStake(w, w.alice, 50n * SHARES);
+    await buy(w, 100n * SHARES); // 0.6 shares to the stakers: 500/550 Bob, 50/550 Alice
+    // The creator takes only what was theirs before; leaving out the record is refused.
+    await expectError(claimCreator(w, null), "BadExt");
+    const c0 = sharesOf(w, w.creator.publicKey);
+    await claimCreator(w);
+    assert.equal(sharesOf(w, w.creator.publicKey) - c0, 600_000_000n);
+    // What the app shows each staker (web/src/lib/stakeCut.ts) is what the program pays.
+    const { cutOwed, readCutRec, readStakeTail } = await import("../web/src/lib/stakeCut.ts");
+    const b = (await basketOf(w)) as any;
+    const shown = (who: Keypair, amount: bigint) =>
+      cutOwed({
+        rec: readCutRec(w.ctx.svm.getAccount(pda.ext(w.basket))!.data)!,
+        byVote: true,
+        creatorUnclaimed: BigInt(b.creatorUnclaimed.toString()),
+        staked: balance(w.ctx, ata(w.shareMint, pda.shareEscrow(), w.shareProgram)),
+        amount,
+        ...readStakeTail(w.ctx.svm.getAccount(pda.shareStake(w.basket, who.publicKey))!.data),
+      });
+    const [showBob, showAlice] = [shown(w.bob, 500n * SHARES), shown(w.alice, 50n * SHARES)];
+    const [b0, a0] = [sharesOf(w, w.bob.publicKey), sharesOf(w, w.alice.publicKey)];
+    await claimStake(w, w.bob);
+    await claimStake(w, w.alice);
+    const [bob, alice] = [sharesOf(w, w.bob.publicKey) - b0, sharesOf(w, w.alice.publicKey) - a0];
+    assert.equal(showBob, bob, "the app's figure for Bob");
+    assert.equal(showAlice, alice, "the app's figure for Alice");
+    assert.ok(bob >= 545_454_544n && bob <= 545_454_546n, `bob ${bob}`);
+    assert.ok(alice >= 54_545_453n && alice <= 54_545_455n, `alice ${alice}`);
+    // Claimed in full: claiming again pays nothing.
+    await claimStake(w, w.bob);
+    assert.equal(sharesOf(w, w.bob.publicKey) - b0, bob);
+  });
+
+  it("the cut that accrued with nobody staked is the treasury's, not the first staker's (bug bounty, 10 Nov)", async () => {
+    const w = await cutWorld();
+    await enter(w);
+    await buy(w, 100n * SHARES); // 0.6 shares accrue, nobody staked
+    const owed = BigInt((await basketOf(w)).creatorUnclaimed.toString());
+    await shareStake(w, w.bob, 90n * SHARES);
+    // The stake's sync moved the backlog out of what's owed (to the treasury's shares).
+    assert.equal(BigInt((await basketOf(w)).creatorUnclaimed.toString()), owed - 600_000_000n);
+    const b0 = sharesOf(w, w.bob.publicKey);
+    await claimStake(w, w.bob);
+    assert.equal(sharesOf(w, w.bob.publicKey) - b0, 0n);
+  });
+
+  it("a stake joining later doesn't share what accrued before it; one leaving keeps what it earned", async () => {
+    const w = await cutWorld();
+    await enter(w);
+    await shareStake(w, w.bob, 90n * SHARES);
+    await buy(w, 100n * SHARES); // all 0.6 to Bob
+    await shareStake(w, w.alice, 90n * SHARES);
+    await buy(w, 100n * SHARES); // 0.3 each
+    // Bob takes all his shares back: the account stays until he claims what he's owed.
+    unlock(w, w.bob);
+    await shareUnstake(w, w.bob, 90n * SHARES);
+    assert.ok((w.ctx.svm.getAccount(pda.shareStake(w.basket, w.bob.publicKey))?.lamports ?? 0) > 0);
+    const [b0, a0] = [sharesOf(w, w.bob.publicKey), sharesOf(w, w.alice.publicKey)];
+    await claimStake(w, w.bob);
+    await claimStake(w, w.alice);
+    // Rounded down per staked share, a base unit at most.
+    assert.ok(900_000_000n - (sharesOf(w, w.bob.publicKey) - b0) <= 1n);
+    assert.ok(300_000_000n - (sharesOf(w, w.alice.publicKey) - a0) <= 1n);
+    assert.equal(w.ctx.svm.getAccount(pda.shareStake(w.basket, w.bob.publicKey))?.lamports ?? 0, 0, "closed once paid");
+  });
+
+  it("leaving keeps what the stakers earned theirs; after it, the cut is the creator's again", async () => {
+    const w = await cutWorld();
+    await enter(w);
+    await bobReady(w); // 900 staked
+    await buy(w, 100n * SHARES); // 0.6 to the stakers, not shared yet
+    await execute(w, await passed(w, { leave: {} }));
+    assert.ok((await basketOf(w)).control.creator);
+    await buy(w, 100n * SHARES); // 0.6 to the creator
+    const c0 = sharesOf(w, w.creator.publicKey);
+    await claimCreator(w);
+    assert.equal(sharesOf(w, w.creator.publicKey) - c0, 600_000_000n, "only what accrued after leaving");
+    const b0 = sharesOf(w, w.bob.publicKey);
+    await claimStake(w, w.bob);
+    // Rounded down per staked share: a base unit of dust stays with the stakers' record.
+    assert.ok(600_000_000n - (sharesOf(w, w.bob.publicKey) - b0) <= 1n);
+  });
+
+  it("a basket vote-run before the upgrade starts its record with sync_stake_cut", async () => {
+    const w = await cutWorld();
+    await enter(w);
+    // As if entered on the old program: no record yet.
+    const acct = w.ctx.svm.getAccount(w.basket)!;
+    const data = Buffer.from(acct.data);
+    data[94] &= ~4;
+    w.ctx.svm.setAccount(w.basket, { ...acct, data });
+    await buy(w, 100n * SHARES); // before the record: still the creator's
+    await rpc(
+      w.ctx,
+      w.ctx.vault.methods.syncStakeCut().accountsPartial({ payer: w.ctx.payer.publicKey, basket: w.basket, shareMint: w.shareMint, ext: pda.ext(w.basket), escrow: ata(w.shareMint, pda.shareEscrow(), w.shareProgram) }),
+    );
+    await shareStake(w, w.bob, 500n * SHARES);
+    await buy(w, 100n * SHARES);
+    const c0 = sharesOf(w, w.creator.publicKey);
+    await claimCreator(w);
+    assert.equal(sharesOf(w, w.creator.publicKey) - c0, 600_000_000n);
+    const b0 = sharesOf(w, w.bob.publicKey);
+    await claimStake(w, w.bob);
+    assert.equal(sharesOf(w, w.bob.publicKey) - b0, 600_000_000n);
+  });
+});
+
+describe("community: closing an emptied community basket", () => {
+  it("waits for every proposal to be closed, then closes the community state and the extension account too", async () => {
+    const w = await goCommunity({ creatorFeeBps: 0 });
+    await bobReady(w);
+    const id = await propose(w, w.bob, { split: { numerator: 2, denominator: 1 } });
+    warp(w.ctx, VOTE + WAIT);
+    await shareUnstake(w, w.bob, 900n * SHARES);
+    for (const [who, n] of [[w.creator, 10n], [w.alice, 90n], [w.bob, 900n]] as const) await rpc(w.ctx, redeemIx(w, who, n * SHARES), [who]);
+    assert.equal(supply(w.ctx, w.shareMint), 0n);
+    await closeVaults(w, w.creator);
+    // The USDC pot of a basket that's been vote-run is named too (never created here, so nothing to close).
+    const side = [pda.ext(w.basket), pda.community(w.basket), potOf(w.basket)];
+    // The lapsed proposal still counts as open until someone closes it (its rent is its proposer's).
+    await expectError(closeBasket(w, w.creator, side), "BasketBusy");
+    await close(w, id, w.bob.publicKey);
+    await closeBasket(w, w.creator, side);
+    for (const k of [w.basket, ...side.slice(0, 2)]) assert.ok(gone(w, k));
+  });
+});
+
+describe("community: the cut in USDC goes to share stakers too", () => {
+  // The team, 9 Nov 2026: "community basket fees go to holders staking the shares of the basket, those
+  // have to be paid in native as well".
+  const CUT = 60;
+  const DOLLAR = 1_000_000n;
+  async function usdcWorld(protocolFeeBps = 40) {
+    const { usdcMint, usdcSides, feeBlock, quoteIx } = await import("./_usdc.ts");
+    const w = await communityWorld({ protocolFeeBps });
+    await openDoor(w);
+    await rpc(w.ctx, w.ctx.vault.methods.proposeCutRise(CUT).accountsPartial({ authority: w.creator.publicKey, basket: w.basket, notice: pda.cutNotice(w.basket) }), [w.creator]);
+    warp(w.ctx, 2 * DAY);
+    await rpc(w.ctx, w.ctx.vault.methods.applyCutRise().accountsPartial({ basket: w.basket, notice: pda.cutNotice(w.basket), creator: w.creator.publicKey }));
+    usdcMint(w.ctx);
+    const sides = await usdcSides(w.ctx);
+    const priceKey = fund(w.ctx);
+    await initKeepers(w.ctx, priceKey.publicKey, priceKey.publicKey);
+    const pot = await createAta(w.ctx, USDC, potOwner(w.basket));
+    const carol = fund(w.ctx);
+    await fundHolder(w, carol);
+    const carolUsdc = await createAta(w.ctx, USDC, carol.publicKey);
+    await mintTo(w.ctx, USDC, carolUsdc, 1_000n * DOLLAR);
+    /** Carol buys `shares` worth $`dollars`, the cut to `cut` (the pot by default). */
+    const buy = async (shares: bigint, dollars: bigint, cut = pot) => {
+      const b = mintIx(w, carol, shares).remainingAccounts(feeBlock(sides, carol.publicKey, cut));
+      await send(w.ctx, [await quoteIx(w.ctx, priceKey, dollars * DOLLAR), await b.instruction()], [carol, priceKey]);
+    };
+    return { ...w, sides, priceKey, pot, carol, carolUsdc, buy };
+  }
+  type UW = Awaited<ReturnType<typeof usdcWorld>>;
+  const claimUsdc = async (w: UW, who: Keypair) => {
+    const to = ata(USDC, who.publicKey);
+    if (!w.ctx.svm.getAccount(to)) await createAta(w.ctx, USDC, who.publicKey);
+    await rpc(
+      w.ctx,
+      w.ctx.vault.methods.claimStakeCutUsdc().accountsPartial({
+        wallet: who.publicKey,
+        basket: w.basket,
+        shareMint: w.shareMint,
+        ext: pda.ext(w.basket),
+        escrow: ata(w.shareMint, pda.shareEscrow(), w.shareProgram),
+        shareStake: pda.shareStake(w.basket, who.publicKey),
+        pot: w.pot,
+        walletUsdc: to,
+      }),
+      [who],
+    );
+    return balance(w.ctx, to);
+  };
+
+  it("what comes in with nobody staked is the treasury's: the first staker doesn't take it (bug bounty, 10 Nov)", async () => {
+    const w = await usdcWorld();
+    await enter(w);
+    await w.buy(100n * SHARES, 100n); // $0.60 into the pot, nobody staked
+    await shareStake(w, w.bob, 500n * SHARES);
+    assert.equal(await claimUsdc(w, w.bob), 0n, "none of the backlog");
+    const treasury = balance(w.ctx, w.sides.treasury);
+    await rpc(
+      w.ctx,
+      w.ctx.vault.methods.potToTreasury().accountsPartial({
+        basket: w.basket,
+        shareMint: w.shareMint,
+        ext: pda.ext(w.basket),
+        escrow: ata(w.shareMint, pda.shareEscrow(), w.shareProgram),
+        pot: w.pot,
+        treasuryUsdc: w.sides.treasury,
+      }),
+    );
+    assert.equal(balance(w.ctx, w.sides.treasury) - treasury, 600_000n);
+    // From then on the stakers share it as before.
+    await w.buy(100n * SHARES, 100n);
+    assert.equal(await claimUsdc(w, w.bob), 600_000n);
+  });
+
+  it("before the handover the cut is the creator's USDC; after, the stakers', pro rata", async () => {
+    const w = await usdcWorld();
+    const creatorUsdc = await createAta(w.ctx, USDC, w.creator.publicKey);
+    await w.buy(100n * SHARES, 100n, creatorUsdc);
+    assert.equal(balance(w.ctx, creatorUsdc), 600_000n, "$0.60 straight to the creator");
+    await enter(w);
+    await shareStake(w, w.bob, 500n * SHARES);
+    await shareStake(w, w.alice, 50n * SHARES);
+    // Vote-run: the cut to the creator's account is refused as a USDC cut (kept in shares instead).
+    await w.buy(100n * SHARES, 100n);
+    assert.equal(balance(w.ctx, w.pot), 600_000n);
+    assert.equal(balance(w.ctx, creatorUsdc), 600_000n, "nothing more to the creator");
+    assert.equal(await claimUsdc(w, w.bob), (600_000n * 500n) / 550n);
+    assert.equal(await claimUsdc(w, w.alice), (600_000n * 50n) / 550n);
+    // Claiming again pays nothing more.
+    assert.equal(await claimUsdc(w, w.bob), (600_000n * 500n) / 550n);
+  });
+
+  it("a stake joining later doesn't share what came before it; one leaving keeps what it earned", async () => {
+    const w = await usdcWorld();
+    await enter(w);
+    await shareStake(w, w.bob, 80n * SHARES);
+    await w.buy(100n * SHARES, 100n); // $0.60, all Bob's
+    await shareStake(w, w.alice, 80n * SHARES);
+    await w.buy(100n * SHARES, 100n); // $0.60, half each
+    unlock(w, w.bob);
+    await shareUnstake(w, w.bob, 80n * SHARES);
+    // Bob unstaked everything but is still owed USDC: his stake account stays until he claims.
+    assert.ok(w.ctx.svm.getAccount(pda.shareStake(w.basket, w.bob.publicKey)));
+    await w.buy(100n * SHARES, 100n); // all Alice's
+    assert.equal(await claimUsdc(w, w.bob), 600_000n + 300_000n);
+    assert.equal(w.ctx.svm.getAccount(pda.shareStake(w.basket, w.bob.publicKey))?.lamports ?? 0, 0, "paid in full: closed");
+    assert.equal(await claimUsdc(w, w.alice), 300_000n + 600_000n);
+  });
+
+  it("a cut aimed anywhere but the pot falls back to shares, counted for the stakers", async () => {
+    const w = await usdcWorld();
+    await enter(w);
+    await shareStake(w, w.bob, 500n * SHARES);
+    const before = (await basketOf(w)).creatorUnclaimed.toString();
+    await w.buy(100n * SHARES, 100n, w.carolUsdc);
+    assert.equal(balance(w.ctx, w.pot), 0n);
+    assert.ok(BigInt((await basketOf(w)).creatorUnclaimed.toString()) > BigInt(before));
+  });
+
+  it("staking without the pot is refused once the basket has a cut record", async () => {
+    const w = await usdcWorld();
+    await enter(w);
+    await expectError(
+      rpc(
+        w.ctx,
+        w.ctx.vault.methods.shareStake(new BN(SHARES.toString())).accountsPartial({
+          wallet: w.bob.publicKey,
+          basket: w.basket,
+          shareMint: w.shareMint,
+          walletShares: ata(w.shareMint, w.bob.publicKey, w.shareProgram),
+          ext: pda.ext(w.basket),
+          escrow: ata(w.shareMint, pda.shareEscrow(), w.shareProgram),
+          shareStake: pda.shareStake(w.basket, w.bob.publicKey),
+          shareTokenProgram: w.shareProgram,
+        }),
+        [w.bob],
+      ),
+      "BadPot",
+    );
+  });
+
+  it("closing the basket waits for the pot to be claimed, then closes it too", async () => {
+    // No protocol fee here, so no fee shares are left to keep the supply above 0: the cut alone, in USDC.
+    const w = await usdcWorld(0);
+    await enter(w);
+    await shareStake(w, w.bob, 500n * SHARES);
+    await w.buy(100n * SHARES, 100n);
+    unlock(w, w.bob);
+    await shareUnstake(w, w.bob, 500n * SHARES);
+    // Everyone out.
+    for (const who of [w.creator, w.alice, w.bob, w.carol]) {
+      const held = balance(w.ctx, ata(w.shareMint, who.publicKey, w.shareProgram));
+      if (held > 0n) await rpc(w.ctx, redeemIx(w, who, held), [who]);
+    }
+    assert.equal(supply(w.ctx, w.shareMint), 0n);
+    await closeVaults(w, w.creator);
+    const side = [pda.ext(w.basket), pda.community(w.basket), w.pot, potOwner(w.basket), TOKEN_PROGRAM_ID];
+    await expectError(closeBasket(w, w.creator, side), "BasketNotEmpty");
+    await claimUsdc(w, w.bob);
+    assert.equal(balance(w.ctx, w.pot), 0n);
+    // Anyone sending dust to the pot can't block the close: with nothing owed past dust, what's left
+    // goes to a USDC account of the manager's, named alongside.
+    await mintTo(w.ctx, USDC, w.pot, 5n);
+    await expectError(closeBasket(w, w.creator, side), "BadPot");
+    const creatorUsdc = await createAta(w.ctx, USDC, w.creator.publicKey);
+    await closeBasket(w, w.creator, [...side, creatorUsdc]);
+    assert.equal(balance(w.ctx, creatorUsdc), 5n);
+    for (const k of [w.basket, pda.ext(w.basket), w.pot]) assert.ok(gone(w, k));
+  });
+
+  it("on a vote-run basket the manager's own buy pays the cut too: it's the stakers'", async () => {
+    const { feeBlock, quoteIx } = await import("./_usdc.ts");
+    const w = await usdcWorld();
+    await enter(w);
+    await shareStake(w, w.bob, 500n * SHARES);
+    const creatorUsdc = await createAta(w.ctx, USDC, w.creator.publicKey);
+    await mintTo(w.ctx, USDC, creatorUsdc, 10n * DOLLAR);
+    await fundHolder(w, w.creator);
+    const b = mintIx(w, w.creator, 10n * SHARES).remainingAccounts(feeBlock(w.sides, w.creator.publicKey, w.pot));
+    await send(w.ctx, [await quoteIx(w.ctx, w.priceKey, 10n * DOLLAR), await b.instruction()], [w.creator, w.priceKey]);
+    assert.equal(balance(w.ctx, w.pot), 60_000n, "0.60% of $10 to the stakers' pot");
   });
 });

@@ -93,9 +93,24 @@ pub fn apply_cut_rise(ctx: Context<ApplyCutRise>) -> Result<()> {
 /// aren't in it).
 pub fn claim_creator_cut(ctx: Context<ClaimCreatorCut>) -> Result<()> {
     let owed = ctx.accounts.basket.owed_to_creator();
-    let amount = owed.min(ctx.accounts.treasury_shares.amount);
+    // A basket that's been vote-run: only the creator's part of it (`stake_cut.rs`); the stakers'
+    // stays. Its extension account must be passed.
+    let rec = if ctx.accounts.basket.flag(STAKER_CUT) {
+        let ext_ai = ctx.accounts.ext.as_ref().ok_or(VaultError::BadExt)?.to_account_info();
+        Some((crate::instructions::stake_cut::load(&ctx.accounts.basket, &ext_ai)?.unwrap_or_default(), ext_ai))
+    } else {
+        None
+    };
+    let mine = rec.as_ref().map_or(owed, |(r, _)| r.creator_part(&ctx.accounts.basket).min(owed));
+    let amount = mine.min(ctx.accounts.treasury_shares.amount);
     if amount == 0 {
         return Ok(());
+    }
+    if let Some((mut r, ext_ai)) = rec {
+        if ctx.accounts.basket.by_vote() {
+            r.base -= amount;
+            crate::instructions::stake_cut::store(&ctx.accounts.basket.key(), &ext_ai, &r)?;
+        }
     }
     ctx.accounts.basket.creator_unclaimed = owed - amount;
     let bump = [ctx.accounts.protocol.bump];
@@ -173,4 +188,7 @@ pub struct ClaimCreatorCut<'info> {
     pub creator_shares: InterfaceAccount<'info, TokenAccountI>,
 
     pub share_token_program: Interface<'info, TokenInterface>,
+    /// CHECK: `[EXT_SEED, basket]`, needed once the basket has a stakers' cut record (`stake_cut.rs`).
+    #[account(mut)]
+    pub ext: Option<UncheckedAccount<'info>>,
 }

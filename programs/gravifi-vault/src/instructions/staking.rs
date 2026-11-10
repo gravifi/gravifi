@@ -317,8 +317,8 @@ pub fn stake_close_account(ctx: Context<StakeCloseAccount>) -> Result<()> {
     ))
 }
 
-/// What a free basket costs a stake: one of the day's (a creation, an added asset), or nothing but
-/// having one a day (making a basket smart while it's being created).
+/// What a free basket costs a stake: one of the day's (a creation, an added asset), or (making a
+/// basket smart while it's being created) one free smart burn per basket made free today.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FreeUse {
     TakeOne,
@@ -341,19 +341,16 @@ pub(crate) fn burn_skip(owner: &Pubkey, extra: &[AccountInfo], protocol: &Accoun
         require_keys_eq!(stake.wallet, *owner, VaultError::BadStake);
         let now = Clock::get()?.unix_timestamp;
         let threshold = pool.threshold_at(now);
+        require!(stake_ai.is_writable, VaultError::BadStake);
         let free = match use_ {
-            FreeUse::HaveOne => stake.free_per_day(threshold, now) > 0,
-            FreeUse::TakeOne => {
-                require!(stake_ai.is_writable, VaultError::BadStake);
-                let took = stake.take_free(threshold, now);
-                if took {
-                    let mut data = stake_ai.try_borrow_mut_data()?;
-                    let mut out: &mut [u8] = &mut data;
-                    stake.try_serialize(&mut out)?;
-                }
-                took
-            }
+            FreeUse::HaveOne => stake.take_free_smart(now),
+            FreeUse::TakeOne => stake.take_free(threshold, now),
         };
+        if free {
+            let mut data = stake_ai.try_borrow_mut_data()?;
+            let mut out: &mut [u8] = &mut data;
+            stake.try_serialize(&mut out)?;
+        }
         if free {
             return Ok(Some(*owner));
         }

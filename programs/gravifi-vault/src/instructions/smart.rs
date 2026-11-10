@@ -55,6 +55,13 @@ pub struct MandateApplied {
 }
 
 #[event]
+pub struct PartVerified {
+    pub mint: Pubkey,
+    pub oft_store: Pubkey,
+    pub remote_eid: u32,
+}
+
+#[event]
 pub struct SmartPauseSet {
     pub basket: Pubkey,
     pub paused_by: u8,
@@ -72,31 +79,7 @@ pub fn set_verified(ctx: Context<SetVerified>, verified: bool) -> Result<()> {
     require_keys_eq!(*ai.key, expected, VaultError::BadVerifiedRecord);
     let authority = ctx.accounts.authority.to_account_info();
     if verified && !exists {
-        let space = 8 + VerifiedAsset::INIT_SPACE;
-        let seeds: [&[u8]; 3] = [VERIFIED_SEED, mint.as_ref(), &[bump]];
-        let short = Rent::get()?.minimum_balance(space).saturating_sub(ai.lamports());
-        if short > 0 {
-            anchor_lang::system_program::transfer(
-                CpiContext::new(
-                    ctx.accounts.system_program.to_account_info(),
-                    anchor_lang::system_program::Transfer { from: authority.clone(), to: ai.clone() },
-                ),
-                short,
-            )?;
-        }
-        let system = ctx.accounts.system_program.to_account_info();
-        anchor_lang::system_program::allocate(
-            CpiContext::new_with_signer(system.clone(), anchor_lang::system_program::Allocate { account_to_allocate: ai.clone() }, &[&seeds]),
-            space as u64,
-        )?;
-        anchor_lang::system_program::assign(
-            CpiContext::new_with_signer(system, anchor_lang::system_program::Assign { account_to_assign: ai.clone() }, &[&seeds]),
-            &crate::ID,
-        )?;
-        let record = VerifiedAsset { bump, mint };
-        let mut data = ai.try_borrow_mut_data()?;
-        let mut out: &mut [u8] = &mut data;
-        record.try_serialize(&mut out)?;
+        create_verified(&authority, &ai, &ctx.accounts.system_program.to_account_info(), mint, bump)?;
     } else if !verified && exists {
         let lamports = ai.lamports();
         **ai.try_borrow_mut_lamports()? = 0;
@@ -104,6 +87,97 @@ pub fn set_verified(ctx: Context<SetVerified>, verified: bool) -> Result<()> {
         ai.resize(0)?;
         ai.assign(&anchor_lang::solana_program::system_program::ID);
     }
+    Ok(())
+}
+
+/// Creates `mint`'s Verified record at `ai` (`[VERIFIED_SEED, mint]`, bump `bump`), `payer` topping
+/// its rent up to what it needs.
+fn create_verified<'info>(payer: &AccountInfo<'info>, ai: &AccountInfo<'info>, system: &AccountInfo<'info>, mint: Pubkey, bump: u8) -> Result<()> {
+    let space = 8 + VerifiedAsset::INIT_SPACE;
+    let seeds: [&[u8]; 3] = [VERIFIED_SEED, mint.as_ref(), &[bump]];
+    let short = Rent::get()?.minimum_balance(space).saturating_sub(ai.lamports());
+    if short > 0 {
+        anchor_lang::system_program::transfer(
+            CpiContext::new(system.clone(), anchor_lang::system_program::Transfer { from: payer.clone(), to: ai.clone() }),
+            short,
+        )?;
+    }
+    anchor_lang::system_program::allocate(
+        CpiContext::new_with_signer(system.clone(), anchor_lang::system_program::Allocate { account_to_allocate: ai.clone() }, &[&seeds]),
+        space as u64,
+    )?;
+    anchor_lang::system_program::assign(
+        CpiContext::new_with_signer(system.clone(), anchor_lang::system_program::Assign { account_to_assign: ai.clone() }, &[&seeds]),
+        &crate::ID,
+    )?;
+    let record = VerifiedAsset { bump, mint };
+    let mut data = ai.try_borrow_mut_data()?;
+    let mut out: &mut [u8] = &mut data;
+    record.try_serialize(&mut out)?;
+    Ok(())
+}
+
+/// Anchor's discriminators of the OFT program's `OFTStore` and `PeerConfig` accounts.
+const OFT_STORE_DISCRIMINATOR: [u8; 8] = [195, 215, 104, 134, 185, 195, 240, 114];
+const PEER_CONFIG_DISCRIMINATOR: [u8; 8] = [181, 157, 86, 198, 33, 193, 94, 203];
+/// In an `OFTStore`: the token mint (after the discriminator, the type and `ld2sd_rate`), and the admin
+/// (after the escrow, the endpoint, the bump and `tvl_ld`).
+const STORE_MINT_AT: usize = 17;
+const STORE_ADMIN_AT: usize = 122;
+/// In a `PeerConfig`: the remote peer's address, right after the discriminator.
+const PEER_ADDRESS_AT: usize = 8;
+
+/// Proves `mint` is one of our parts (see `verify_part`): its authority is `store`, an OFTStore of
+/// the parts' OFT program for this mint, run by the parts' store admin, with a peer on `remote_eid`.
+pub(crate) fn prove_part(parts: &AccountInfo, mint: &AccountInfo, store: &AccountInfo, peer: &AccountInfo, remote_eid: u32) -> Result<()> {
+    let (expected_parts, _) = Pubkey::find_program_address(&[PARTS_SEED], &crate::ID);
+    require_keys_eq!(*parts.key, expected_parts, VaultError::NotAPart);
+    require_keys_eq!(*parts.owner, crate::ID, VaultError::NotAPart);
+    let (admin, oft) = (part_admin_of(parts), part_oft_of(parts));
+    require!(admin != Pubkey::default() && oft != Pubkey::default(), VaultError::NotAPart);
+    // A mint (classic or Token-2022) whose authority is the store.
+    require!(mint.owner == &anchor_spl::token::ID || mint.owner == &anchor_spl::token_2022::ID, VaultError::NotAPart);
+    let m = mint.try_borrow_data()?;
+    require!(m.len() >= 82 && m[0..4] == [1, 0, 0, 0] && m[4..36] == store.key.to_bytes(), VaultError::NotAPart);
+    // The store: the OFT program's, for this mint, run by the parts' admin.
+    require_keys_eq!(*store.owner, oft, VaultError::NotAPart);
+    let d = store.try_borrow_data()?;
+    require!(d.len() >= STORE_ADMIN_AT + 32 && d[..8] == OFT_STORE_DISCRIMINATOR, VaultError::NotAPart);
+    require!(d[STORE_MINT_AT..STORE_MINT_AT + 32] == mint.key.to_bytes(), VaultError::NotAPart);
+    require!(d[STORE_ADMIN_AT..STORE_ADMIN_AT + 32] == admin.to_bytes(), VaultError::NotAPart);
+    // Its peer on the remote chain, which only the admin can set.
+    let (expected, _) = Pubkey::find_program_address(&[b"Peer", store.key.as_ref(), &remote_eid.to_be_bytes()], &oft);
+    require_keys_eq!(*peer.key, expected, VaultError::NotAPart);
+    require_keys_eq!(*peer.owner, oft, VaultError::NotAPart);
+    let p = peer.try_borrow_data()?;
+    require!(p.len() >= PEER_ADDRESS_AT + 32 && p[..8] == PEER_CONFIG_DISCRIMINATOR, VaultError::NotAPart);
+    require!(p[PEER_ADDRESS_AT..PEER_ADDRESS_AT + 32].iter().any(|b| *b != 0), VaultError::NotAPart);
+    Ok(())
+}
+
+/// Gives a part (a mixed basket's Robinhood Chain side, bridged here as an OFT token) a Verified
+/// record, so a smart basket holds it to its weight cap rather than its Unverified cap.
+/// Permissionless: the payer pays the record's rent. What it proves, link by link, as the price
+/// service does (web/prices/parts.ts) for the half that lives on Solana:
+///   1. the mint's authority is `oft_store`, an `OFTStore` of the parts' OFT program (`[PARTS_SEED]`),
+///      for this very mint;
+///   2. that store's admin is the parts' store admin (the app's server key);
+///   3. the store has a peer on `remote_eid` (its `PeerConfig` at `["Peer", store, eid]`), with an
+///      address. Anyone may make a store naming any admin, but only the admin can give it a peer,
+///      so the peer shows the admin wired this part.
+/// The protocol authority can take the record away (`set_verified` false), but while the part still
+/// proves itself anyone can call this again: to stop that, clear ROLE_PART_ADMIN first.
+pub fn verify_part(ctx: Context<VerifyPart>, remote_eid: u32) -> Result<()> {
+    let mint = ctx.accounts.mint.to_account_info();
+    let store = ctx.accounts.oft_store.to_account_info();
+    prove_part(&ctx.accounts.parts.to_account_info(), &mint, &store, &ctx.accounts.peer.to_account_info(), remote_eid)?;
+
+    let ai = ctx.accounts.verified.to_account_info();
+    let (expected, bump) = Pubkey::find_program_address(&[VERIFIED_SEED, mint.key.as_ref()], &crate::ID);
+    require_keys_eq!(*ai.key, expected, VaultError::BadVerifiedRecord);
+    require!(!(ai.owner == &crate::ID && ai.data_len() > 0), VaultError::AlreadyVerified);
+    create_verified(&ctx.accounts.payer.to_account_info(), &ai, &ctx.accounts.system_program.to_account_info(), *mint.key, bump)?;
+    emit!(PartVerified { mint: *mint.key, oft_store: *store.key, remote_eid });
     Ok(())
 }
 
@@ -117,16 +191,18 @@ pub(crate) fn is_verified(ai: &AccountInfo, mint: &Pubkey) -> Result<bool> {
 
 // -------------------------------------------------------------------------------- creator
 
-/// Ranges a creator's guardrails must fall in: never looser than the protocol's ceilings (the
-/// `SMART_MAX_*` params), and satisfiable (enough assets at the weight cap to fill the basket).
+/// What makes a creator's guardrails usable: coherent (a week allows at least what a day does, the
+/// Unverified cap is no looser than the weight cap) and satisfiable (enough assets at the weight cap
+/// to fill the basket). There is no protocol ceiling on them (the team, 8 Nov 2026: "I want them
+/// gone"): the creator's own limits are the only ones, and holders read them before they buy.
 pub(crate) fn check_guardrails(prm: &Params, g: &Guardrails, mandate_hash: &[u8; 32]) -> Result<()> {
-    let (day, week, weight, unverified) = prm.smart_caps();
     let (stop_lo, stop_hi) = prm.stop_range();
     let ok = *mandate_hash != [0u8; 32]
-        && (1..=day).contains(&g.max_day_bps)
-        && (g.max_day_bps..=week).contains(&g.max_week_bps)
-        && (1..=weight).contains(&g.max_weight_bps)
-        && g.max_unverified_bps <= unverified.min(g.max_weight_bps)
+        && g.max_day_bps >= 1
+        && g.max_week_bps >= g.max_day_bps
+        && g.max_weight_bps >= 1
+        && g.max_weight_bps as u128 <= BPS_DENOM
+        && g.max_unverified_bps <= g.max_weight_bps
         && g.min_assets >= 2
         && g.min_assets <= g.max_assets
         && g.max_assets as usize <= MAX_LAUNCH_CONSTITUENTS
@@ -285,6 +361,7 @@ fn check_running(basket: &Basket, smart: &Smart, params: &AccountInfo) -> Result
 /// - the change, the sum of the increases, within what's left of the 24-hour and 7-day caps.
 pub fn smart_set_targets<'info>(ctx: Context<'_, '_, 'info, 'info, StrategistBasket<'info>>, target_bps: Vec<u16>) -> Result<()> {
     check_running(&ctx.accounts.basket, &ctx.accounts.smart, &ctx.accounts.params)?;
+    require!(!ctx.accounts.basket.flag(TRIP_OPEN), VaultError::TripOpen);
     let basket = &mut ctx.accounts.basket;
     let s = &mut ctx.accounts.smart;
     let g = s.guard;
@@ -373,6 +450,8 @@ pub fn smart_set_stop(ctx: Context<StrategistStop>) -> Result<()> {
     st.stops.retain(|s| basket.active().iter().any(|c| c.mint == s.mint));
     require!(st.stops.iter().all(|s| s.mint != price.mint), VaultError::SmartStopNotAllowed);
     st.stops.push(Stop { mint: price.mint, pct_bps: g.stop_bps, trailing: g.stop_trailing, reference_e12: price.price_e12, armed_at: 0 });
+    // Two assets at least stay without a stop, as for a creator's stops (`check_stops`).
+    require!(crate::instructions::stops::unstopped(basket.active(), st.stops.iter().map(|s| s.mint)) >= crate::instructions::stops::MIN_UNSTOPPED, VaultError::TooManyStops);
     Ok(())
 }
 
@@ -387,6 +466,25 @@ pub struct SetVerified<'info> {
     /// CHECK: any mint; only its address is recorded.
     pub mint: UncheckedAccount<'info>,
     /// CHECK: `[VERIFIED_SEED, mint]`, created or closed by hand in `set_verified`.
+    #[account(mut)]
+    pub verified: UncheckedAccount<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct VerifyPart<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    /// CHECK: `[PARTS_SEED]`, read by hand (`part_admin_of`, `part_oft_of`); refused if not set up.
+    #[account(seeds = [PARTS_SEED], bump)]
+    pub parts: UncheckedAccount<'info>,
+    /// CHECK: the part's mint, read by hand in `verify_part`.
+    pub mint: UncheckedAccount<'info>,
+    /// CHECK: the mint's OFT store, read by hand in `verify_part`.
+    pub oft_store: UncheckedAccount<'info>,
+    /// CHECK: the store's peer on the remote chain, read by hand in `verify_part`.
+    pub peer: UncheckedAccount<'info>,
+    /// CHECK: `[VERIFIED_SEED, mint]`, created by hand in `verify_part`.
     #[account(mut)]
     pub verified: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,

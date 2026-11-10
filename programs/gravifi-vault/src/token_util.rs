@@ -117,6 +117,38 @@ pub fn transfer_from_vault<'info>(
     .map_err(Into::into)
 }
 
+/// Closes `account` (a token account `authority` owns, signing with `signer_seeds`) to
+/// `destination` if it holds nothing and has no Token-2022 transfer fees withheld, which the token
+/// program would refuse to close (those need a harvest to the mint first). Returns whether it closed.
+pub fn close_if_empty<'info>(
+    account: &AccountInfo<'info>,
+    destination: &AccountInfo<'info>,
+    authority: &AccountInfo<'info>,
+    token_program: &AccountInfo<'info>,
+    signer_seeds: &[&[&[u8]]],
+) -> Result<bool> {
+    require_keys_eq!(*account.owner, *token_program.key, VaultError::ConstituentMismatch);
+    {
+        let data = account.try_borrow_data()?;
+        let state = StateWithExtensions::<spl_token_2022::state::Account>::unpack(&data)
+            .map_err(|_| error!(VaultError::ConstituentMismatch))?;
+        if state.base.amount > 0 {
+            return Ok(false);
+        }
+        if let Ok(fees) = state.get_extension::<spl_token_2022::extension::transfer_fee::TransferFeeAmount>() {
+            if u64::from(fees.withheld_amount) > 0 {
+                return Ok(false);
+            }
+        }
+    }
+    token_interface::close_account(CpiContext::new_with_signer(
+        token_program.clone(),
+        token_interface::CloseAccount { account: account.clone(), destination: destination.clone(), authority: authority.clone() },
+        signer_seeds,
+    ))?;
+    Ok(true)
+}
+
 /// Reads `decimals` straight off the mint account, which works for both token programs
 /// because the base `Mint` layout is identical and extensions are appended after it.
 pub fn mint_decimals(mint: &AccountInfo) -> Result<u8> {
@@ -205,6 +237,16 @@ impl TransferFee {
         net.checked_add(fee).ok_or(VaultError::MathOverflow.into())
     }
 
+    /// The fee a transfer of `amount` really pays, in bps of it, rounded up: under the rate when the
+    /// mint's maximum fee caps it.
+    pub fn effective_bps(&self, amount: u64) -> Result<u16> {
+        if amount == 0 || self.config.is_none() {
+            return Ok(self.bps);
+        }
+        let fee = (amount - self.net(amount)?) as u128;
+        Ok(((fee * 10_000).div_ceil(amount as u128)).min(10_000) as u16)
+    }
+
     /// Refuses a mint whose fee is above what the protocol accepts for new money (`cap`: the
     /// `TRANSFER_FEE_CAP_BPS` param).
     pub fn assert_within_cap(&self, cap: u16) -> Result<()> {
@@ -283,6 +325,21 @@ pub fn read_token_account(ai: &AccountInfo) -> Result<TokenAccountView> {
         owner: state.base.owner,
         amount: state.base.amount,
     })
+}
+
+/// What a classic SPL token account of `mint`, owned by `owner`, holds and can move: None if it
+/// isn't one (not created, another mint, another owner, another program) or it's frozen. Never an
+/// error: the USDC fee falls back to shares on any of these (`mint_redeem::usd_fee`).
+pub fn movable_balance(ai: &AccountInfo, mint: &Pubkey, owner: &Pubkey) -> Option<u64> {
+    if ai.owner != &anchor_spl::token::ID {
+        return None;
+    }
+    let data = ai.try_borrow_data().ok()?;
+    let state = StateWithExtensions::<spl_token_2022::state::Account>::unpack(&data).ok()?;
+    if state.base.mint != *mint || state.base.owner != *owner || state.base.state != AccountState::Initialized {
+        return None;
+    }
+    Some(state.base.amount)
 }
 
 /// Reads a basket's vault for `mint`, which must be the basket's associated token account.

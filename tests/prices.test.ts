@@ -118,8 +118,95 @@ describe("price band", () => {
     await post(w, w.mintA, $(12));
     await post(w, w.mintA, $(8));
     await expectError(post(w, w.mintA, $(12.01)), "PriceMoveTooLarge");
-    await expectError(post(w, w.mintA, $(7.99)), "PriceMoveTooLarge");
+    // A fall past the band isn't refused: it's posted at the band's floor until it has held.
+    await post(w, w.mintA, $(7.99));
     assert.equal(await posted(w, w.mintA), $(8));
+  });
+
+  it("a crash is followed in full once it has held ten minutes, and becomes the reference", async () => {
+    const w = await priceWorld();
+    await seed(w, w.mintA, $(10));
+    // Down 7x: posted at the band's floor ($8) meanwhile, the fall's time recorded in the guard.
+    await post(w, w.mintA, $(1.4));
+    assert.equal(await posted(w, w.mintA), $(8));
+    // Again a minute later: one fall can't be followed at once.
+    warp(w.ctx, 60);
+    await post(w, w.mintA, $(1.3));
+    assert.equal(await posted(w, w.mintA), $(8));
+    // Ten minutes after the first: still below the band, so it held. Followed as posted.
+    warp(w.ctx, 540);
+    await post(w, w.mintA, $(1.2));
+    assert.equal(await posted(w, w.mintA), $(1.2));
+    assert.equal(await reference(w, w.mintA), $(1.2));
+    // From there the band holds as before: up 20% at most.
+    await expectError(post(w, w.mintA, $(1.5)), "PriceMoveTooLarge");
+    await post(w, w.mintA, $(1.44));
+    assert.equal(await posted(w, w.mintA), $(1.44));
+  });
+
+  it("a guard made before the fall time existed grows 8 bytes at its next post, the keeper paying their rent", async () => {
+    const w = await priceWorld();
+    await seed(w, w.mintA, $(10));
+    const guard = pda.guard(w.mintA);
+    const acct = w.ctx.svm.getAccount(guard)!;
+    assert.equal(acct.data.length, 97, "a new guard is made at its full size");
+    // As mainnet's guards are today: 89 bytes, the rent for those.
+    w.ctx.svm.setAccount(guard, { ...acct, data: acct.data.slice(0, 89), lamports: 1_342_880 });
+    const keeperBefore = w.ctx.svm.getAccount(w.keeper.publicKey)!.lamports;
+    await post(w, w.mintA, $(10.5));
+    const grown = w.ctx.svm.getAccount(guard)!;
+    assert.equal(grown.data.length, 97);
+    assert.ok(grown.lamports > 1_342_880n || grown.lamports > 1_342_880, "rent topped up");
+    assert.ok(w.ctx.svm.getAccount(w.keeper.publicKey)!.lamports < keeperBefore);
+    assert.equal(await posted(w, w.mintA), $(10.5));
+    assert.equal(await reference(w, w.mintA), $(10));
+  });
+
+  it("a confirmed fall takes at most 90% off the reference at once: a crash to nothing is followed in steps", async () => {
+    const w = await priceWorld();
+    await seed(w, w.mintA, $(10));
+    await post(w, w.mintA, $(0.01));
+    warp(w.ctx, 600);
+    await post(w, w.mintA, $(0.01));
+    // 90% off $10: $1, not $0.01 (a wrong or stolen key can't zero an asset in two posts).
+    assert.equal(await posted(w, w.mintA), $(1));
+    assert.equal(await reference(w, w.mintA), $(1));
+    // Held ten more minutes, the next step: $0.10.
+    await post(w, w.mintA, $(0.01));
+    warp(w.ctx, 600);
+    await post(w, w.mintA, $(0.01));
+    assert.equal(await posted(w, w.mintA), $(0.1));
+  });
+
+  it("a feed can be set on a guard from before the fall time (89 bytes): it grows, the authority paying", async () => {
+    const w = await priceWorld();
+    await seed(w, w.mintA, $(10));
+    const guard = pda.guard(w.mintA);
+    const acct = w.ctx.svm.getAccount(guard)!;
+    w.ctx.svm.setAccount(guard, { ...acct, data: acct.data.slice(0, 89), lamports: 1_342_880 });
+    await rpc(w.ctx, feedIx(w, w.mintA, FEED));
+    assert.equal(w.ctx.svm.getAccount(guard)!.data.length, 97);
+    const g = (await w.ctx.vault.account.priceGuard.fetch(guard)) as any;
+    assert.deepEqual(Buffer.from(g.pythFeed), FEED);
+    assert.equal(BigInt(g.referenceE12.toString()), $(10), "the reference kept");
+  });
+
+  it("a fall that comes back within the band is forgotten, and a new one waits its ten minutes again", async () => {
+    const w = await priceWorld();
+    await seed(w, w.mintA, $(10));
+    await post(w, w.mintA, $(3));
+    warp(w.ctx, 300);
+    await post(w, w.mintA, $(9.5)); // back: forgotten
+    assert.equal(await posted(w, w.mintA), $(9.5));
+    warp(w.ctx, 400);
+    await post(w, w.mintA, $(3)); // a new fall, ten minutes from now
+    assert.equal(await posted(w, w.mintA), $(8));
+    warp(w.ctx, 599);
+    await post(w, w.mintA, $(3));
+    assert.equal(await posted(w, w.mintA), $(8));
+    warp(w.ctx, 1);
+    await post(w, w.mintA, $(3));
+    assert.equal(await posted(w, w.mintA), $(3));
   });
 
   it("within the hour, steps don't compound: the reference holds until an hour has passed", async () => {

@@ -201,12 +201,10 @@ describe("smart baskets: becoming smart", () => {
     const stranger = fund(w.ctx);
     await expectError(enableSmart(w.ctx, w.basket, stranger), "NotMandateAuthority");
     const bad: [Partial<Guard>, string][] = [
-      [{ maxDayBps: 4_001, maxWeekBps: 5_000 }, "day over 40%"],
       [{ maxDayBps: 0 }, "no change at all"],
-      [{ maxWeekBps: 10_001 }, "week over 100%"],
       [{ maxWeekBps: 1_000, maxDayBps: 2_000 }, "week under the day"],
-      [{ maxWeightBps: 3_501 }, "weight over 35%"],
-      [{ maxUnverifiedBps: 3_001 }, "unverified over 30%"],
+      [{ maxWeightBps: 0, maxUnverifiedBps: 0 }, "no weight at all"],
+      [{ maxWeightBps: 10_001, maxUnverifiedBps: 3_000 }, "one asset over the whole basket"],
       [{ maxWeightBps: 2_500, maxUnverifiedBps: 3_000 }, "unverified over the weight cap"],
       [{ minAssets: 1 }, "fewer than 2 assets"],
       [{ maxAssets: 15 }, "more than 14 assets, what a basket can hold"],
@@ -527,9 +525,9 @@ describe("smart baskets: pause and mandate", () => {
     const next = hash('{"goal":"blue chips"}');
     const tighter = { ...GUARD, maxDayBps: 500 };
     await expectError(propose(w, next, tighter, false, w.strategist), "NotMandateAuthority");
-    await expectError(propose(w, next, { ...GUARD, maxDayBps: 4_001 }), "BadGuardrails");
-    await expectError(propose(w, next, { ...GUARD, maxDayBps: 4_000, maxWeekBps: 10_001 }), "BadGuardrails");
-    await propose(w, next, { ...GUARD, maxDayBps: 4_000, maxWeekBps: 10_000 }); // the ceilings themselves
+    await expectError(propose(w, next, { ...GUARD, maxDayBps: 6_000, maxWeekBps: 5_000 }), "BadGuardrails"); // a week under a day
+    // No protocol ceiling since 8 Nov 2026: past the old 40% / 100% / 35% / 30% is the creator's call.
+    await propose(w, next, { ...GUARD, maxDayBps: 10_000, maxWeekBps: 60_000, maxWeightBps: 6_000, maxUnverifiedBps: 5_000 });
     await propose(w, next, tighter);
     await expectError(apply(w), "MandateNoticeRunning");
     // Until it applies, the old rules hold.
@@ -547,14 +545,13 @@ describe("smart baskets: pause and mandate", () => {
     await setTargets(w, [3_000, 2_500, 2_500, 2_000]);
   });
 
-  it("the notice and the ceilings are params: a mandate waits the notice in force when proposed, and a raised ceiling admits wider guardrails after its week", async () => {
+  it("the notice is a param: a mandate waits the notice in force when proposed; the old ceiling params bind smart baskets no more", async () => {
     const w = await smartWorld();
     const next = hash('{"goal":"wider"}');
+    // Past the old 40% a day, with the old ceiling param lowered to 5%: still the creator's call.
     const wide = { ...GUARD, maxDayBps: 5_000, maxWeekBps: 10_000 };
-    await expectError(propose(w, next, wide), "BadGuardrails");
-    await setParam(w.ctx, PARAM.SMART_MAX_DAY_BPS, 5_000n);
+    await setParam(w.ctx, PARAM.VOTE_MAX_DAY_BPS, 500n);
     await setParam(w.ctx, PARAM.MANDATE_NOTICE_SECS, BigInt(2 * DAY));
-    await expectError(propose(w, next, wide), "BadGuardrails");
     warp(w.ctx, PARAM_NOTICE);
     await propose(w, next, wide);
     const at = Number((await smartAccount(w)).pendingAt);

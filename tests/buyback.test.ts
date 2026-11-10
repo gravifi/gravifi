@@ -24,7 +24,7 @@ import {
   supply,
   seedPrices,
 } from "./helpers.ts";
-import { feeShares, fundHolder, mintIx, world, initKeepers, protocolFeesIx, setRoleIx, ROLE, setParam, PARAM, FAMILY, skipNotices } from "./fixtures.ts";
+import { feeShares, fundHolder, mintIx, world, initKeepers, protocolFeesIx, setRoleIx, ROLE, setParam, PARAM, FAMILY, skipNotices, USDC } from "./fixtures.ts";
 
 const PRICE_A = 1_000_000_000_000n; // $1.00
 const PRICE_B = 6_000_000_000_000n; // $6.00
@@ -457,3 +457,30 @@ describe("the GRAVI mint", () => {
 });
 
 void ata;
+
+describe("buyback: the burn's half of fees paid in USDC goes straight to GRAVI", () => {
+  it("a mint's fee in USDC lands in the burn PDA's USDC account, and a slice burns it as GRAVI", async () => {
+    const { usdcMint, usdcSides, feeBlock, quoteIx } = await import("./_usdc.ts");
+    const w = await buybackWorld();
+    usdcMint(w.ctx);
+    const sides = await usdcSides(w.ctx);
+    const bob = fund(w.ctx);
+    await fundHolder(w, bob);
+    const bobUsdc = await createAta(w.ctx, USDC, bob.publicKey);
+    await mintTo(w.ctx, USDC, bobUsdc, 1_000_000_000n);
+    // Bob buys $100 of shares: $0.40, $0.20 of it to the burn PDA in USDC.
+    const b = mintIx(w, bob, 10n * 1_000_000_000n).remainingAccounts(feeBlock(sides, bob.publicKey));
+    await send(w.ctx, [await quoteIx(w.ctx, w.keeper, 100_000_000n), await b.instruction()], [bob, w.keeper]);
+    assert.equal(balance(w.ctx, sides.burn), 200_000n);
+    // USDC at $1, GRAVI at $0.01: $0.20 buys 20 GRAVI, all burned.
+    await seedPrices(w.ctx, w.keeper, [[USDC, 1_000_000_000_000n], [w.graviMint, PRICE_GRAVI]]);
+    await setPrice(w, USDC, 1_000_000_000_000n);
+    await setPrice(w, w.graviMint, PRICE_GRAVI);
+    const keeperUsdc = await createAta(w.ctx, USDC, w.keeper.publicKey);
+    const graviSupply = supply(w.ctx, w.graviMint);
+    const fair = 20n * ONE_GRAVI;
+    await send(w.ctx, [await startIx(w, 200_000n, w.keeper, 50, 0n, { mint: USDC, source: sides.burn, to: keeperUsdc }), deliver(w, fair), await finishIx(w)], [w.keeper]);
+    assert.equal(balance(w.ctx, sides.burn), 0n);
+    assert.equal(supply(w.ctx, w.graviMint), graviSupply - fair);
+  });
+});

@@ -226,7 +226,7 @@ pub enum VaultError {
     VotingOver,
     #[msg("Your staked shares had no weight when this proposal opened")]
     NoVotingWeight,
-    #[msg("Shares that voted stay staked until the vote ends")]
+    #[msg("Staked shares stay a day after staking, and shares that voted until the vote ends")]
     SharesLocked,
     #[msg("This proposal can't execute: it hasn't passed, is waiting, has lapsed or already ran")]
     NotExecutable,
@@ -268,4 +268,48 @@ pub enum VaultError {
     PythPriceAhead,
     #[msg("Hand the basket to another wallet: not the empty address, nor the one running it now")]
     BadNewManager,
+    #[msg("Not one of our parts: its mint, OFT store, store admin or peer doesn't check out")]
+    NotAPart,
+    #[msg("This asset is already Verified")]
+    AlreadyVerified,
+    #[msg("Only the trip key starts a cross-chain trip")]
+    NotTripKeeper,
+    #[msg("Value is moving between chains for this basket: try again in a few minutes")]
+    TripOpen,
+    #[msg("No trip is out for this basket, or it isn't this one")]
+    TripNotOpen,
+    #[msg("The trip isn't past its deadline yet")]
+    TripNotDue,
+    #[msg("A trip missed its deadline: no new trip until the guardian clears it")]
+    TripStuck,
+    #[msg("The trip hasn't settled yet")]
+    TripNotSettled,
+    #[msg("A trip is between a part and another sleeve")]
+    TripNeedsPart,
+    #[msg("A trip's tokens go only to the bridge-out address the authority named")]
+    NotBridgeOut,
+    #[msg("Shares are still out, or something is still owed to the creator or the stakers")]
+    BasketNotEmpty,
+    #[msg("Close the basket's vaults first")]
+    VaultsOpen,
+    #[msg("A community proposal is still open: close it first")]
+    BasketBusy,
+    #[msg("A failed trip settles only by the trip key, the bridge-out address, the guardian or the authority")]
+    LateSettleNotAllowed,
+    #[msg("The trip's token account still holds tokens: settle it instead")]
+    TripVaultNotEmpty,
+    #[msg("This IOU's trip is still open: claim it once it settles")]
+    TripStillOpen,
+    #[msg("Leave at least two of the basket's assets without a stop")]
+    TooManyStops,
+    #[msg("That isn't this basket's USDC pot for its share stakers")]
+    BadPot,
+    #[msg("A trip's id is the unix time it starts")]
+    BadTripId,
+    #[msg("What the trip was to bring back has arrived: settle it instead")]
+    TripDelivered,
+    #[msg("No weights have been announced for this basket")]
+    NoAnnouncedTargets,
+    #[msg("The announced weights take effect when their notice is over")]
+    TargetsNotDue,
 }

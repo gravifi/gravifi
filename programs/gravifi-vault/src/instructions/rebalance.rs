@@ -70,6 +70,8 @@ fn start_slice<'info>(
     require!(s < n && b < n && s != b && sell_amount > 0, VaultError::BadParameter);
     require!(max_slippage_bps <= prm.bps(params::REBALANCE_SLIPPAGE_BPS), VaultError::BadParameter);
     require!(!ctx.accounts.rebalance_state.pending, VaultError::RebalancePending);
+    // A trip's tokens aren't in the vaults: the books would read it as drift and buy it twice.
+    require!(!basket.flag(TRIP_OPEN), VaultError::TripOpen);
 
     let book = value_book(basket, ctx.remaining_accounts, &prm)?;
     let drift = drift_bps(basket, &book)?;
@@ -136,8 +138,8 @@ fn start_slice<'info>(
     // for both. No new money goes into a sleeve whose fee is over the cap; selling one
     // out is always allowed.
     require_keys_eq!(ctx.accounts.buy_mint.key(), basket.constituents[b].mint, VaultError::ConstituentMismatch);
-    let sell_fee = TransferFee::of(&ctx.accounts.sell_mint.to_account_info())?;
-    let min_buy = oracle_floor(&prm, sell_value, max_slippage_bps, sell_fee.bps, &ctx.accounts.buy_mint.to_account_info(), &book.rows[b])?;
+    let sell_fee = TransferFee::of(&ctx.accounts.sell_mint.to_account_info())?.effective_bps(sell_amount)?;
+    let min_buy = oracle_floor(&prm, sell_value, max_slippage_bps, sell_fee, &ctx.accounts.buy_mint.to_account_info(), &book.rows[b])?;
 
     let basket_key = basket.key();
     assert_finish_follows(&ctx.accounts.instructions.to_account_info(), &basket_key)?;
@@ -182,6 +184,16 @@ fn start_slice<'info>(
     Ok(())
 }
 
+/// What a 0%-target sleeve may still hold and count as sold out: under a cent, USD x1e12.
+pub const SOLD_OUT_DUST_E12: u128 = 10_000_000_000;
+
+/// A sleeve sold out after its target went to 0% (a stop, a reweight) and left the basket.
+#[event]
+pub struct SoldOutRemoved {
+    pub basket: Pubkey,
+    pub mint: Pubkey,
+}
+
 /// Second half of a slice (or a sweep): checks the oracle floor, re-derives units for the
 /// sleeves that traded, and ends the session once every sleeve is near target, or once no
 /// trade `rebalance_start` would accept is left.
@@ -214,6 +226,24 @@ pub fn rebalance_finish<'info>(ctx: Context<'_, '_, 'info, 'info, RebalanceFinis
     let traded: &[usize] = if sweep { &[b] } else { &[s, b] };
     for &i in traded {
         basket.constituents[i].units_per_share = Basket::live_units(book.rows[i].balance, supply, basket.constituents[i].units_per_share)?;
+    }
+    // A sleeve at 0% this slice sold out (nothing left, or dust under a cent) leaves the basket
+    // (the team, 9 Nov: "when something sells out it should be removed from the basket"). No holder's
+    // claim changes; dust left in its vault is a stray token the sweep turns into the basket's own.
+    // A community basket drops it by `community_remove` instead, since an open Reweight pins its
+    // assets. At least two assets always stay.
+    let sold_out = !sweep
+        && basket.constituents[s].target_bps == 0
+        && (basket.constituents[s].units_per_share == 0 || book.rows[s].value < SOLD_OUT_DUST_E12)
+        && basket.control != ControlMode::Community
+        // Wrapped SOL at 0% is a smart basket's hub, routed through and added back within minutes.
+        && basket.constituents[s].mint != NATIVE_MINT
+        && basket.constituent_count > 2;
+    if sold_out {
+        let mint = basket.constituents[s].mint;
+        basket.constituents.remove(s);
+        basket.constituent_count -= 1;
+        emit!(SoldOutRemoved { basket: basket.key(), mint });
     }
 
     let st = &mut ctx.accounts.rebalance_state;
@@ -252,6 +282,7 @@ pub fn sweep_start<'info>(
     require!(max_slippage_bps <= prm.bps(params::REBALANCE_SLIPPAGE_BPS), VaultError::BadParameter);
     require!(!ctx.accounts.rebalance_state.pending, VaultError::RebalancePending);
 
+    require!(!basket.flag(TRIP_OPEN), VaultError::TripOpen);
     // Only a token outside the books: the basket's own are rebalanced, and its shares aren't
     // something to sell.
     let stray = ctx.accounts.stray_mint.key();
@@ -266,8 +297,8 @@ pub fn sweep_start<'info>(
     let book = value_book(basket, ctx.remaining_accounts, &prm)?;
     require_keys_eq!(ctx.accounts.buy_mint.key(), basket.constituents[b].mint, VaultError::ConstituentMismatch);
     let sell_value = token_value(sell_amount, price.price_e12, ctx.accounts.stray_mint.decimals)?;
-    let sell_fee = TransferFee::of(&ctx.accounts.stray_mint.to_account_info())?;
-    let min_buy = oracle_floor(&prm, sell_value, max_slippage_bps, sell_fee.bps, &ctx.accounts.buy_mint.to_account_info(), &book.rows[b])?;
+    let sell_fee = TransferFee::of(&ctx.accounts.stray_mint.to_account_info())?.effective_bps(sell_amount)?;
+    let min_buy = oracle_floor(&prm, sell_value, max_slippage_bps, sell_fee, &ctx.accounts.buy_mint.to_account_info(), &book.rows[b])?;
 
     assert_finish_follows(&ctx.accounts.instructions.to_account_info(), &basket_key)?;
 
@@ -306,21 +337,21 @@ pub fn sweep_start<'info>(
 /// allows for both. No new money goes into a sleeve whose fee is over the cap; selling one out
 /// is always allowed. A floor of zero would accept nothing back, so a slice that small is
 /// refused.
-fn oracle_floor(prm: &Params, sell_value: u128, max_slippage_bps: u16, sell_fee_bps: u16, buy_mint: &AccountInfo, buy: &Row) -> Result<u64> {
+pub(crate) fn oracle_floor(prm: &Params, sell_value: u128, max_slippage_bps: u16, sell_fee_bps: u16, buy_mint: &AccountInfo, buy: &Row) -> Result<u64> {
     // A sleeve the books count as worth nothing (`DEAD_PRICE_SECS`) has no price to buy at.
     require!(buy.price_e12 > 0, VaultError::BadPrice);
     let buy_fee = TransferFee::of(buy_mint)?;
     buy_fee.assert_within_cap(prm.bps(params::TRANSFER_FEE_CAP_BPS))?;
-    let floor_value = sell_value * (BPS_DENOM - max_slippage_bps as u128) / BPS_DENOM * (BPS_DENOM - sell_fee_bps as u128) / BPS_DENOM
-        * (BPS_DENOM - buy_fee.bps as u128)
-        / BPS_DENOM;
-    let min_buy = u64::try_from(
+    let floor_value = sell_value * (BPS_DENOM - max_slippage_bps as u128) / BPS_DENOM * (BPS_DENOM - sell_fee_bps as u128) / BPS_DENOM;
+    let gross = u64::try_from(
         floor_value
             .checked_mul(10u128.pow(buy.decimals as u32))
             .ok_or(VaultError::MathOverflow)?
             / buy.price_e12 as u128,
     )
     .map_err(|_| VaultError::MathOverflow)?;
+    // What arrives of it: the bought token's real fee (its maximum fee caps the rate).
+    let min_buy = buy_fee.net(gross)?;
     require!(min_buy > 0, VaultError::SliceTooSmall);
     Ok(min_buy)
 }

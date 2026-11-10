@@ -88,7 +88,7 @@ const applyCut = (w: World, creator: PublicKey) =>
 const claim = (w: World, to: PublicKey) =>
   rpc(
     w.ctx,
-    w.ctx.vault.methods.claimCreatorCut().accountsPartial({
+    w.ctx.vault.methods.claimCreatorCut().accountsPartial({ ext: null,
       basket: w.basket,
       protocol: pda.protocol(),
       shareMint: w.shareMint,

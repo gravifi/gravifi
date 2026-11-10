@@ -81,7 +81,9 @@ pub fn set_stops<'info>(ctx: Context<'_, '_, 'info, 'info, SetStops<'info>>, mut
 }
 
 /// One stop per asset at most, on assets the basket holds, in range (`STOP_MIN_BPS` to
-/// `STOP_MAX_BPS`).
+/// `STOP_MAX_BPS`), and at least two of the basket's weighted assets left without one (the team,
+/// 9 Nov: a basket whose every asset had a stop ended up holding one token), so stops firing can
+/// never leave it with fewer than two.
 pub(crate) fn check_stops(prm: &Params, basket: &Basket, stops: &[StopArgs]) -> Result<()> {
     let active = basket.active();
     let (lo, hi) = prm.stop_range();
@@ -91,7 +93,16 @@ pub(crate) fn check_stops(prm: &Params, basket: &Basket, stops: &[StopArgs]) -> 
         require!(stops[..i].iter().all(|o| o.mint != s.mint), VaultError::BadStop);
         require!((lo..=hi).contains(&s.pct_bps) && s.reference_e12 > 0, VaultError::BadStop);
     }
+    require!(stops.is_empty() || unstopped(active, stops.iter().map(|s| s.mint)) >= MIN_UNSTOPPED, VaultError::TooManyStops);
     Ok(())
+}
+
+/// How many assets a basket must keep without a stop, if it has any stops.
+pub const MIN_UNSTOPPED: usize = 2;
+
+/// How many of `active` carry a target and no stop, given the mints that have one.
+pub(crate) fn unstopped(active: &[Constituent], stopped: impl Iterator<Item = Pubkey> + Clone) -> usize {
+    active.iter().filter(|c| c.target_bps > 0 && !stopped.clone().any(|m| m == c.mint)).count()
 }
 
 /// Holds each stop's reference to its asset's fresh posted price (`prices`: each stop's
@@ -230,7 +241,7 @@ fn weight_caps(prm: &Params, basket: &Basket, basket_key: &Pubkey, extra: &[Acco
             (smart.guard.max_weight_bps, smart.guard.max_unverified_bps)
         }
         ControlMode::Community if basket.by_vote() => {
-            let (_, _, weight, unverified) = prm.smart_caps();
+            let (_, _, weight, unverified) = prm.vote_caps();
             (weight, unverified)
         }
         _ => return Ok(None),

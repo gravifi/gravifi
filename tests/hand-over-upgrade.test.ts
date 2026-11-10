@@ -3,7 +3,8 @@
 // target/deploy/onchain.so`), then this build loaded over it. Skipped without the dump.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { BN, ONE_SHARE, PublicKey, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, VAULT_ID, ata, balance, createAta, createMint, expectError, fund, pda, rpc, warp } from "./helpers.ts";
 import { NO_GRAVI, SEED_SHARES, UNITS_A, UNITS_B, feeShares, fundHolder, listAsset, mintIx, quads, redeemIx, world } from "./fixtures.ts";
 import type { Keypair } from "@solana/web3.js";
@@ -16,6 +17,8 @@ const SHARES = 10n * ONE_SHARE;
 describe("hand over: upgrading from the program on mainnet", () => {
   it("baskets made before keep working, read as their creator's, and can be handed over", async (t) => {
     if (!existsSync(ONCHAIN)) return t.skip("no dump of the mainnet program at target/deploy/onchain.so");
+    // Since 8 Nov the program on mainnet is the hand-over build itself: there's nothing to upgrade from.
+    if (createHash("sha256").update(readFileSync(ONCHAIN).subarray(0, 1_406_584)).digest("hex").startsWith("a7e4386d3a073e3f")) return t.skip("the mainnet dump is already the hand-over build (a7e4386d)");
     const w = await world({ program: ONCHAIN, shareTokenProgram: TOKEN_2022_PROGRAM_ID, seed: false });
     const [alice, bob] = [fund(w.ctx), fund(w.ctx)];
     await fundHolder(w, alice);
@@ -70,7 +73,7 @@ describe("hand over: upgrading from the program on mainnet", () => {
     const before = balance(w.ctx, bobShares);
     await rpc(
       w.ctx,
-      w.ctx.vault.methods.claimCreatorCut().accountsPartial({ basket: w.basket, protocol: pda.protocol(), shareMint: w.shareMint, treasuryShares: feeShares(w.shareMint, w.shareProgram).treasuryShares, creatorShares: bobShares, shareTokenProgram: w.shareProgram }),
+      w.ctx.vault.methods.claimCreatorCut().accountsPartial({ ext: null, basket: w.basket, protocol: pda.protocol(), shareMint: w.shareMint, treasuryShares: feeShares(w.shareMint, w.shareProgram).treasuryShares, creatorShares: bobShares, shareTokenProgram: w.shareProgram }),
     );
     assert.equal(balance(w.ctx, bobShares) - before, 60_000_000n);
     await rpc(w.ctx, redeemIx(w, alice, SHARES / 4n), [alice]);

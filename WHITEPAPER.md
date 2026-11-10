@@ -141,10 +141,11 @@ add, remove and reweight assets and set the mandate's stops. The changes are mad
 strategist key, which can do nothing else: not move a token, not change a fee or a limit, not
 touch another basket.
 
-The program holds every Smart basket to limits: at most 40% of the targets changed in any 24
-hours and 100% in any 7 days, at most 35% in one asset and 30% in one that isn't GraviFi
-Verified (the protocol authority can move them within bounds in the code, after 7 days' notice,
-section 8.2). A creator can set tighter ones, never looser. A new mandate or new limits wait
+The program holds every Smart basket to its creator's limits: how much of the targets may change
+in any 24 hours and any 7 days, the most in one asset and in one that isn't GraviFi Verified, and
+how many assets it holds. There is no protocol ceiling on them: holders read a basket's limits on
+its page before they buy. (A Smart basket on Robinhood Chain is still held to 40% a day, 100% a
+week, 35% in one asset and 30% unverified by its contracts.) A new mandate or new limits wait
 a day, so holders who disagree can redeem first, and the creator or the guardian can pause the
 reviews. A Smart basket starts with at least $50.
 
@@ -442,8 +443,8 @@ sold or redeemed until withdrawn. In a community basket, staked shares vote:
 - **Passing.** At least 10% of the supply votes, and over half of those voting agree (66% to change
   the creator's fee or cut, go smart, or leave). The vote takes 3 days and a passed change waits 24
   hours, so anyone who disagrees can redeem first. Anyone can then run it, for 7 days.
-- **Limits.** Every change stays within the ceilings a smart basket's strategist is held to: 35%
-  in one asset (30% if not Verified), 40% of the targets changed in a day, 100% in a week. Stop
+- **Limits.** Every change stays within the vote ceilings: 35% in one asset (30% if not
+  Verified), 40% of the targets changed in a day, 100% in a week. Stop
   losses fire with no vote, within the same weight caps. An asset sold out can be removed by
   anyone, but not while a proposal is open, nor for 11 days after a vote added one, so a new asset
   can't be dropped before the vote that weights it runs. Redeeming is always open.

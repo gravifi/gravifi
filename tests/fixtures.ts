@@ -15,12 +15,14 @@ import {
   pda,
   rpc,
   setup,
+  VAULT_ID,
   type Ctx,
 } from "./helpers.ts";
 
 export const UNITS_A = 2_000_000n; // 2.0 of token A (6 decimals) per share
 export const UNITS_B = 500_000_000n; // 0.5 of token B (9 decimals) per share
 export const SEED_SHARES = 10n * 1_000_000_000n; // 10 whole shares
+export const UNITS_C = 100_000n; // 0.1 of token C (6 decimals) per share, with `three`
 
 export type Access = "public" | "allowlist" | "private";
 export type Control = "creator" | "dao" | "immutable";
@@ -45,6 +47,9 @@ export interface WorldOpts {
   gravi?: { program: PublicKey; decimals: number };
   /** The vault program's binary, when not this build (`setup`). */
   program?: string;
+  /** A third asset, C (classic, 6 decimals), at 10%: targets 50% A / 40% B / 10% C. A basket with
+   *  stops needs two assets without one, so stop tests use three. */
+  three?: boolean;
 }
 
 export async function listAsset(ctx: Ctx, mint: PublicKey) {
@@ -91,7 +96,7 @@ export async function setCreationBurn(ctx: Ctx, graviMint: PublicKey, amount: bi
 // ------------------------------------------------------------------- roles and params
 
 /** `set_role`'s roles (instructions/protocol.rs). */
-export const ROLE = { authority: 0, guardian: 1, graviMint: 2, burnExempt: 3, lister: 4, strategist: 5, priceAuthority: 6, rebalancer: 7 } as const;
+export const ROLE = { authority: 0, guardian: 1, graviMint: 2, burnExempt: 3, lister: 4, strategist: 5, priceAuthority: 6, rebalancer: 7, partAdmin: 8, partOft: 9, trip: 10, tripOut: 11 } as const;
 /** `set_param`'s settings kept outside the params account (instructions/protocol.rs). */
 export const CONFIG = { protocolFees: 1_000, creationBurn: 1_001, smartFee: 1_002, smartBurn: 1_003, stakeThreshold: 1_004, communityOpen: 1_005 } as const;
 /** `set_param`'s ids for the params account, as in params.rs. */
@@ -101,9 +106,9 @@ export const PARAM = Object.fromEntries(
     "BUYBACK_REFUND_E12", "PRICE_MOVE_BPS", "PRICE_REFERENCE_SECS", "PYTH_AGE_SECS", "PYTH_TOLERANCE_MIN_BPS", "PYTH_TOLERANCE_MAX_BPS",
     "PYTH_CONF_MULTIPLE", "PRICE_AGE_SECS", "DEAD_PRICE_SECS", "STOP_CONFIRM_SECS", "STOP_WINDOW_SECS", "STOP_MIN_BPS", "STOP_MAX_BPS",
     "POLICY_MIN_DRIFT_BPS", "POLICY_MIN_INTERVAL_SECS", "TRANSFER_FEE_CAP_BPS", "SPLIT_COOLDOWN_SECS", "CUT_NOTICE_SECS", "INVITE_MAX_SECS",
-    "SMART_MAX_DAY_BPS", "SMART_MAX_WEEK_BPS", "SMART_MAX_WEIGHT_BPS", "SMART_MAX_UNVERIFIED_BPS", "MANDATE_NOTICE_SECS", "STAKE_WARMUP_SECS",
+    "VOTE_MAX_DAY_BPS", "VOTE_MAX_WEEK_BPS", "VOTE_MAX_WEIGHT_BPS", "VOTE_MAX_UNVERIFIED_BPS", "MANDATE_NOTICE_SECS", "STAKE_WARMUP_SECS",
     "STAKE_UNSTAKE_SECS", "STAKE_PERIOD_SECS", "VOTE_PERIOD_SECS", "VOTE_TIMELOCK_SECS", "VOTE_GRACE_SECS", "PROPOSE_MIN_BPS", "QUORUM_BPS",
-    "SUPERMAJORITY_BPS", "MAX_OPEN_PROPOSALS",
+    "SUPERMAJORITY_BPS", "MAX_OPEN_PROPOSALS", "TRIP_REFUND_E12", "TRIP_DEADLINE_SECS", "FALL_CONFIRM_SECS",
   ].map((name, id) => [name, id]),
 ) as Record<string, number>;
 /** The kill switches' bits (`KILL`). */
@@ -123,7 +128,8 @@ export function paramSlot(ctx: Ctx, id: number) {
 /** The params account's address, `[b"params"]`. */
 export const PARAMS = PublicKey.findProgramAddressSync([Buffer.from("params")], new PublicKey("HHmD4ZP5he9GrcmcNrpjahyK1dWh2MhMwmVpiPRJsw3G"))[0];
 
-const roleAccount = (role: number) => (role === ROLE.lister ? pda.lister() : role === ROLE.strategist ? pda.strategist() : role >= ROLE.priceAuthority ? pda.keepers() : null);
+const roleAccount = (role: number) =>
+  role === ROLE.lister ? pda.lister() : role === ROLE.strategist ? pda.strategist() : role >= ROLE.partAdmin ? pda.parts() : role >= ROLE.priceAuthority ? pda.keepers() : null;
 
 /** `set_role`, as a builder for `rpc`/`expectError`. */
 export function setRoleIx(ctx: Ctx, role: number, key: PublicKey, authority = ctx.payer.publicKey) {
@@ -166,6 +172,10 @@ function roleSlots(): [PublicKey, number, number][] {
     [pda.strategist(), 9, 41],
     [pda.keepers(), 9, 73],
     [pda.keepers(), 41, 113],
+    [pda.parts(), 9, 73],
+    [pda.parts(), 41, 113],
+    [pda.parts(), 153, 185],
+    [pda.parts(), 225, 257],
   ];
 }
 
@@ -252,6 +262,8 @@ export async function world(opts: WorldOpts = {}) {
   const mintB = await createMint(ctx, 9, TOKEN_2022_PROGRAM_ID, undefined, opts.feeBpsB, opts.issuerB);
   await listAsset(ctx, mintA);
   await listAsset(ctx, mintB);
+  const mintC = opts.three ? await createMint(ctx, 6, TOKEN_PROGRAM_ID) : undefined;
+  if (mintC) await listAsset(ctx, mintC);
 
   const creator = fund(ctx);
   const basketId = new Uint8Array(16);
@@ -271,8 +283,8 @@ export async function world(opts: WorldOpts = {}) {
         intervalSecs: new BN(30 * 86_400),
         driftBps: 500,
         mgmtFeeBps: opts.creatorFeeBps ?? 20,
-        mints: [mintA, mintB],
-        targetBps: [6_000, 4_000],
+        mints: mintC ? [mintA, mintB, mintC] : [mintA, mintB],
+        targetBps: mintC ? [5_000, 4_000, 1_000] : [6_000, 4_000],
       })
       .accountsPartial({
         ...NO_GRAVI,
@@ -286,6 +298,12 @@ export async function world(opts: WorldOpts = {}) {
         { pubkey: pda.asset(mintA), isSigner: false, isWritable: false },
         { pubkey: mintB, isSigner: false, isWritable: false },
         { pubkey: pda.asset(mintB), isSigner: false, isWritable: false },
+        ...(mintC
+          ? [
+              { pubkey: mintC, isSigner: false, isWritable: false },
+              { pubkey: pda.asset(mintC), isSigner: false, isWritable: false },
+            ]
+          : []),
       ]),
     [creator],
   );
@@ -293,15 +311,16 @@ export async function world(opts: WorldOpts = {}) {
   await createFeeAccounts(ctx, shareMint, shareProgram);
   const vaultA = await createAta(ctx, mintA, basket, TOKEN_PROGRAM_ID);
   const vaultB = await createAta(ctx, mintB, basket, TOKEN_2022_PROGRAM_ID);
+  const vaultC = mintC ? await createAta(ctx, mintC, basket, TOKEN_PROGRAM_ID) : undefined;
 
-  const w = { ctx, graviMint, mintA, mintB, creator, basket, basketId, shareMint, vaultA, vaultB, shareProgram };
+  const w = { ctx, graviMint, mintA, mintB, creator, basket, basketId, shareMint, vaultA, vaultB, shareProgram, mintC, vaultC, three: !!mintC };
 
   const holder = await fundHolder(w, creator);
   if (opts.seed ?? true) {
     await rpc(
       ctx,
       ctx.vault.methods
-        .seedBasket(new BN(SEED_SHARES.toString()), [new BN((opts.unitsA ?? UNITS_A).toString()), new BN(UNITS_B.toString())])
+        .seedBasket(new BN(SEED_SHARES.toString()), [new BN((opts.unitsA ?? UNITS_A).toString()), new BN(UNITS_B.toString()), ...(mintC ? [new BN(UNITS_C.toString())] : [])])
         .accountsPartial({
           payer: creator.publicKey,
           basket,
@@ -319,6 +338,12 @@ export async function world(opts: WorldOpts = {}) {
 
 export type World = Awaited<ReturnType<typeof world>>;
 
+/** USDC, which fees are paid in when they can be (mint_redeem.rs `usd_fee`). */
+export const USDC = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+/** A vote-run basket's USDC pot for its share stakers, and its owner. */
+export const potOwner = (basket: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("cut_pot"), basket.toBuffer()], VAULT_ID)[0];
+export const potOf = (basket: PublicKey) => ata(USDC, potOwner(basket), TOKEN_PROGRAM_ID);
+
 /** Where the protocol's mint/redeem fee lands: the burn PDA's and the treasury's share accounts. */
 export function feeShares(shareMint: PublicKey, shareProgram = TOKEN_PROGRAM_ID) {
   return { burnShares: ata(shareMint, pda.burn(), shareProgram), treasuryShares: ata(shareMint, pda.protocol(), shareProgram) };
@@ -331,17 +356,18 @@ export async function createFeeAccounts(ctx: Ctx, shareMint: PublicKey, sharePro
 }
 
 /** Gives `who` token accounts for both constituents (well funded) and for shares. */
-export async function fundHolder(w: Pick<World, "ctx" | "mintA" | "mintB" | "shareMint"> & { shareProgram?: PublicKey }, who: Keypair) {
+export async function fundHolder(w: Pick<World, "ctx" | "mintA" | "mintB" | "shareMint"> & { shareProgram?: PublicKey; mintC?: PublicKey; three?: boolean }, who: Keypair) {
   const a = await createAta(w.ctx, w.mintA, who.publicKey, TOKEN_PROGRAM_ID);
   const b = await createAta(w.ctx, w.mintB, who.publicKey, TOKEN_2022_PROGRAM_ID);
   await mintTo(w.ctx, w.mintA, a, 1_000_000_000_000n, TOKEN_PROGRAM_ID);
   await mintTo(w.ctx, w.mintB, b, 1_000_000_000_000_000n, TOKEN_2022_PROGRAM_ID);
+  if (w.three && w.mintC) await mintTo(w.ctx, w.mintC, await createAta(w.ctx, w.mintC, who.publicKey, TOKEN_PROGRAM_ID), 1_000_000_000_000n, TOKEN_PROGRAM_ID);
   const shares = await createAta(w.ctx, w.shareMint, who.publicKey, w.shareProgram ?? TOKEN_PROGRAM_ID);
   return { a, b, shares };
 }
 
 /** `[vault_ata, user_ata, mint, token_program]` per constituent, as mint/redeem expect. */
-export function quads(w: Pick<World, "mintA" | "mintB" | "vaultA" | "vaultB">, user: PublicKey) {
+export function quads(w: Pick<World, "mintA" | "mintB" | "vaultA" | "vaultB"> & { mintC?: PublicKey; vaultC?: PublicKey; three?: boolean }, user: PublicKey) {
   const row = (vaultAta: PublicKey, userAta: PublicKey, mint: PublicKey, program: PublicKey) => [
     { pubkey: vaultAta, isSigner: false, isWritable: true },
     { pubkey: userAta, isSigner: false, isWritable: true },
@@ -351,6 +377,7 @@ export function quads(w: Pick<World, "mintA" | "mintB" | "vaultA" | "vaultB">, u
   return [
     ...row(w.vaultA, ata(w.mintA, user, TOKEN_PROGRAM_ID), w.mintA, TOKEN_PROGRAM_ID),
     ...row(w.vaultB, ata(w.mintB, user, TOKEN_2022_PROGRAM_ID), w.mintB, TOKEN_2022_PROGRAM_ID),
+    ...(w.three && w.mintC && w.vaultC ? row(w.vaultC, ata(w.mintC, user, TOKEN_PROGRAM_ID), w.mintC, TOKEN_PROGRAM_ID) : []),
   ];
 }
 

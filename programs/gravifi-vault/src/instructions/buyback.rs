@@ -59,6 +59,9 @@ pub(crate) fn redeem_into<'info>(
     remaining: &[AccountInfo<'info>],
     shares: u64,
 ) -> Result<()> {
+    // While a trip is out its value isn't in the vaults, and these redeems take no IOU: the burn's or
+    // the stakers' slice of the trip would go to the other holders. They wait for it (`trip.rs`).
+    require!(!basket.flag(TRIP_OPEN), VaultError::TripOpen);
     let count = basket.constituent_count as usize;
     require!(remaining.len() == count * 4, VaultError::BadRemainingAccounts);
     let supply_before = share_mint.supply;
@@ -199,11 +202,11 @@ pub(crate) fn oracle_floor(prm: &Params, sell_amount: u64, sell_price: &AssetPri
         require!(p.price_e12 > 0 && prm.now - p.updated_at <= prm.secs(params::PRICE_AGE_SECS), VaultError::BadPrice);
     }
     require!(token_value(refund, sell_price.price_e12, sell_price.decimals)? <= prm.wide(params::BUYBACK_REFUND_E12), VaultError::RefundTooLarge);
-    let sell_fee = TransferFee::of(sell_mint)?;
+    let sell_fee = TransferFee::of(sell_mint)?.effective_bps(sell_amount)?;
     let floor_value = token_value(sell_amount, sell_price.price_e12, sell_price.decimals)?
         * (BPS_DENOM - max_slippage_bps as u128)
         / BPS_DENOM
-        * (BPS_DENOM - sell_fee.bps as u128)
+        * (BPS_DENOM - sell_fee as u128)
         / BPS_DENOM;
     let min_out = u64::try_from(
         floor_value

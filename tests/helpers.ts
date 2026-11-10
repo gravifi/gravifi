@@ -8,7 +8,7 @@ import {
   PublicKey,
   SystemProgram,
   Transaction,
-  type TransactionInstruction,
+  TransactionInstruction,
 } from "@solana/web3.js";
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
@@ -27,10 +27,29 @@ import {
   getMintLen,
 } from "@solana/spl-token";
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 
 const { Program, Wallet, BN } = anchor;
 export { BN };
+
+/** A creator's announced weights in a basket's extension account (set_targets, record 3:
+ *  [due i64][fingerprint 32][targets u16 x14]), or null. Read here, not from the app, so the
+ *  program's tests run on their own. */
+function readPendingTargets(ext: Uint8Array | null | undefined, count: number): { due: number; fingerprint: Uint8Array; bps: number[] } | null {
+  const RECORDS_AT = 44, USED_AT = 42, MAX = 14, TAG = 3;
+  if (!ext || ext.length < RECORDS_AT) return null;
+  const dv = new DataView(ext.buffer, ext.byteOffset, ext.byteLength);
+  const used = dv.getUint16(USED_AT, true);
+  for (let at = 0; at + 4 <= used; at += 4 + dv.getUint16(RECORDS_AT + at + 2, true)) {
+    if (dv.getUint16(RECORDS_AT + at, true) !== TAG || dv.getUint16(RECORDS_AT + at + 2, true) < 40 + 2 * MAX) continue;
+    const o = RECORDS_AT + at + 4;
+    const due = Number(dv.getBigInt64(o, true));
+    if (due === 0) return null;
+    return { due, fingerprint: ext.slice(o + 8, o + 40), bps: Array.from({ length: Math.min(count, MAX) }, (_, i) => dv.getUint16(o + 40 + 2 * i, true)) };
+  }
+  return null;
+}
 
 const root = new URL("..", import.meta.url).pathname;
 const vaultIdl = JSON.parse(readFileSync(`${root}target/idl/gravifi_vault.json`, "utf8"));
@@ -58,9 +77,55 @@ export function setup(program = `${root}target/deploy/gravifi_vault.so`) {
 /** Sends instructions signed by `signers` (payer always included) and expires the
  *  blockhash so an identical follow-up transaction is not rejected as a replay. */
 export async function send(ctx: Ctx, ixs: TransactionInstruction[], signers: Keypair[] = []) {
-  const tx = new Transaction().add(...ixs);
+  const announced = await withNotice(ctx, ixs);
+  const tx = new Transaction().add(...announced.ixs);
   await ctx.provider.sendAndConfirm!(tx, signers);
   ctx.svm.expireBlockhash();
+  for (const basket of announced.baskets) await applyWhenDue(ctx, basket);
+}
+
+// A creator's new weights on a basket others hold shares in are announced and apply a day later
+// (set_targets, apply_targets). Tests written before that see them applied as before: a set_targets
+// sent without remaining accounts gets the basket's extension account (created first if needed),
+// and once it lands the announcement is applied at its due time, the clock then put back. Tests of
+// the notice itself opt out (`manualNotice`) and name the accounts themselves.
+const SET_TARGETS = createHash("sha256").update("global:set_targets").digest().subarray(0, 8);
+const manual = new WeakSet<object>();
+export const manualNotice = (ctx: Ctx) => manual.add(ctx);
+const extOf = (ctx: Ctx, basket: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("ext"), basket.toBuffer()], ctx.vault.programId)[0];
+
+async function withNotice(ctx: Ctx, ixs: TransactionInstruction[]) {
+  if (manual.has(ctx)) return { ixs, baskets: [] as PublicKey[] };
+  const out: TransactionInstruction[] = [];
+  const baskets: PublicKey[] = [];
+  for (const ix of ixs) {
+    if (!ix.programId.equals(ctx.vault.programId) || !ix.data.subarray(0, 8).equals(SET_TARGETS) || ix.keys.length !== 3) {
+      out.push(ix);
+      continue;
+    }
+    const [authority, basket] = [ix.keys[0].pubkey, ix.keys[1].pubkey];
+    const ext = extOf(ctx, basket);
+    if (!ctx.svm.getAccount(ext) && !baskets.some((b) => b.equals(basket))) out.push(await ctx.vault.methods.extInit().accountsPartial({ payer: authority, basket, ext }).instruction());
+    out.push(new TransactionInstruction({ programId: ix.programId, data: ix.data, keys: [...ix.keys, { pubkey: ext, isSigner: false, isWritable: true }] }));
+    baskets.push(basket);
+  }
+  return { ixs: out, baskets };
+}
+
+async function applyWhenDue(ctx: Ctx, basket: PublicKey) {
+  const ext = extOf(ctx, basket);
+  const acc = ctx.svm.getAccount(ext);
+  const pending = acc ? readPendingTargets(acc.data, 14) : null;
+  if (!pending) return;
+  const c = ctx.svm.getClock();
+  ctx.svm.setClock(new Clock(c.slot, c.epochStartTimestamp, c.epoch, c.leaderScheduleEpoch, BigInt(pending.due)));
+  try {
+    const ix = await ctx.vault.methods.applyTargets().accountsPartial({ basket, ext }).instruction();
+    await ctx.provider.sendAndConfirm!(new Transaction().add(ix), []);
+  } finally {
+    ctx.svm.setClock(c);
+    ctx.svm.expireBlockhash();
+  }
 }
 
 /** Runs an Anchor method builder and expires the blockhash afterwards. */
@@ -210,6 +275,14 @@ export const pda = {
   invite: (wallet: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("invite"), wallet.toBuffer()], VAULT_ID)[0],
   lister: () => PublicKey.findProgramAddressSync([Buffer.from("lister")], VAULT_ID)[0],
   strategist: () => PublicKey.findProgramAddressSync([Buffer.from("strategist")], VAULT_ID)[0],
+  parts: () => PublicKey.findProgramAddressSync([Buffer.from("parts")], VAULT_ID)[0],
+  ext: (basket: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("ext"), basket.toBuffer()], VAULT_ID)[0],
+  trip: (basket: PublicKey, id: number) => {
+    const n = Buffer.alloc(4);
+    n.writeUInt32LE(id);
+    return PublicKey.findProgramAddressSync([Buffer.from("trip"), basket.toBuffer(), n], VAULT_ID)[0];
+  },
+  tripIou: (trip: PublicKey, wallet: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("trip_iou"), trip.toBuffer(), wallet.toBuffer()], VAULT_ID)[0],
   smart: (basket: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("smart"), basket.toBuffer()], VAULT_ID)[0],
   verified: (mint: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("verified"), mint.toBuffer()], VAULT_ID)[0],
   stop: (basket: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("stop"), basket.toBuffer()], VAULT_ID)[0],

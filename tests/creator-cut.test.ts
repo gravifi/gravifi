@@ -32,7 +32,7 @@ const apply = (w: World, creator: PublicKey = w.creator.publicKey) =>
 const claim = (w: World, creatorShares: PublicKey = ata(w.shareMint, w.creator.publicKey, w.shareProgram)) =>
   rpc(
     w.ctx,
-    w.ctx.vault.methods.claimCreatorCut().accountsPartial({
+    w.ctx.vault.methods.claimCreatorCut().accountsPartial({ ext: null,
       basket: w.basket,
       protocol: pda.protocol(),
       shareMint: w.shareMint,

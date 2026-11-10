@@ -11,6 +11,9 @@ pub mod smart;
 pub mod creator_cut;
 pub mod staking;
 pub mod community;
+pub mod trip;
+pub mod stake_cut;
+pub mod close;
 
 pub use protocol::*;
 pub use basket::*;
@@ -25,3 +28,6 @@ pub use smart::*;
 pub use creator_cut::*;
 pub use staking::*;
 pub use community::*;
+pub use trip::*;
+pub use stake_cut::*;
+pub use close::*;

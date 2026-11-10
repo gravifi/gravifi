@@ -65,10 +65,10 @@ const SPEC: [string, bigint, bigint, bigint, Rule][] = [
   ["SPLIT_COOLDOWN_SECS", 30n * 86_400n, 86_400n, 90n * 86_400n, "wait"],
   ["CUT_NOTICE_SECS", 86_400n, 6n * 3_600n, 30n * 86_400n, "wait"],
   ["INVITE_MAX_SECS", 31n * 86_400n, 86_400n, 93n * 86_400n, "now"],
-  ["SMART_MAX_DAY_BPS", 4_000n, 500n, 6_000n, "wait"],
-  ["SMART_MAX_WEEK_BPS", 10_000n, 1_000n, 15_000n, "wait"],
-  ["SMART_MAX_WEIGHT_BPS", 3_500n, 1_000n, 6_000n, "wait"],
-  ["SMART_MAX_UNVERIFIED_BPS", 3_000n, 100n, 5_000n, "wait"],
+  ["VOTE_MAX_DAY_BPS", 4_000n, 500n, 6_000n, "wait"],
+  ["VOTE_MAX_WEEK_BPS", 10_000n, 1_000n, 15_000n, "wait"],
+  ["VOTE_MAX_WEIGHT_BPS", 3_500n, 1_000n, 6_000n, "wait"],
+  ["VOTE_MAX_UNVERIFIED_BPS", 3_000n, 100n, 5_000n, "wait"],
   ["MANDATE_NOTICE_SECS", 86_400n, 6n * 3_600n, 14n * 86_400n, "wait"],
   ["STAKE_WARMUP_SECS", 2n * 86_400n, 3_600n, 14n * 86_400n, "wait"],
   ["STAKE_UNSTAKE_SECS", 7n * 86_400n, 86_400n, 30n * 86_400n, "wait"],
@@ -77,9 +77,12 @@ const SPEC: [string, bigint, bigint, bigint, Rule][] = [
   ["VOTE_TIMELOCK_SECS", 86_400n, 3_600n, 7n * 86_400n, "wait"],
   ["VOTE_GRACE_SECS", 7n * 86_400n, 86_400n, 30n * 86_400n, "wait"],
   ["PROPOSE_MIN_BPS", 100n, 10n, 1_000n, "wait"],
-  ["QUORUM_BPS", 1_000n, 100n, 5_000n, "wait"],
+  ["QUORUM_BPS", 2_000n, 100n, 5_000n, "wait"],
   ["SUPERMAJORITY_BPS", 6_600n, 5_100n, 9_000n, "wait"],
   ["MAX_OPEN_PROPOSALS", 3n, 1n, 10n, "wait"],
+  ["TRIP_REFUND_E12", 2_000_000_000_000n, 1n, 10_000_000_000_000n, "up"],
+  ["TRIP_DEADLINE_SECS", 7_200n, 1_800n, 86_400n, "wait"],
+  ["FALL_CONFIRM_SECS", 600n, 120n, 3_600n, "down"],
 ];
 const P = PARAM;
 assert.deepEqual(SPEC.map(([name]) => name), Object.keys(PARAM), "the table here and PARAM in fixtures.ts list the same ids");
@@ -156,13 +159,13 @@ describe("params: the account", () => {
 
   it("a pending value applies once its notice has run out, and folds into the value on the next change", async () => {
     const { ctx } = await protocolOnly();
-    await setParam(ctx, P.QUORUM_BPS, 2_000n);
+    await setParam(ctx, P.QUORUM_BPS, 3_000n);
     const at = slot(ctx, P.QUORUM_BPS).at;
     warp(ctx, NOTICE);
     assert.equal(BigInt(now(ctx)) >= at, true);
-    // A second change: the matured 20% is the value now, the new 30% waits its own week.
-    await setParam(ctx, P.QUORUM_BPS, 3_000n);
-    assert.deepEqual(slot(ctx, P.QUORUM_BPS), { value: 2_000n, pending: 3_000n, at: BigInt(now(ctx) + NOTICE) });
+    // A second change: the matured 30% is the value now, the new 40% waits its own week.
+    await setParam(ctx, P.QUORUM_BPS, 4_000n);
+    assert.deepEqual(slot(ctx, P.QUORUM_BPS), { value: 3_000n, pending: 4_000n, at: BigInt(now(ctx) + NOTICE) });
   });
 
   it("kill switches apply at once both ways; unknown bits and dark features this build doesn't know are refused", async () => {
@@ -293,7 +296,7 @@ describe("set_role", () => {
     const gravi = await initProtocol(ctx, 0);
     const outsider = fund(ctx);
     await expectError(rpc(ctx, setRoleIx(ctx, ROLE.guardian, outsider.publicKey, outsider.publicKey), [outsider]), "NotProtocolAuthority");
-    await expectError(setRole(ctx, 8, PublicKey.unique()), "BadRole");
+    await expectError(setRole(ctx, 12, PublicKey.unique()), "BadRole");
     const wrong = ctx.vault.methods
       .setRole(ROLE.lister, PublicKey.unique())
       .accountsPartial({ authority: ctx.payer.publicKey, protocol: pda.protocol() })

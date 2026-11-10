@@ -194,19 +194,128 @@ pub(crate) fn burn_gravi<'info>(
     Ok(())
 }
 
-/// Replace the target weights. `Immutable` rejects unconditionally, which is the whole
-/// promise of that mode.
+#[event]
+pub struct TargetsAnnounced {
+    pub basket: Pubkey,
+    pub targets: Vec<u16>,
+    pub due: i64,
+}
+
+#[event]
+pub struct TargetsApplied {
+    pub basket: Pubkey,
+    pub targets: Vec<u16>,
+}
+
+/// The extension record of a creator's announced weights: [due i64][fingerprint 32][targets u16 x14].
+pub const PENDING_TARGETS_TAG: u16 = 3;
+const PENDING_LEN: usize = 8 + 32 + 2 * MAX_LAUNCH_CONSTITUENTS;
+
+/// The basket's assets and weights as they stand: an announced change applies only to these.
+fn recipe_fingerprint(basket: &Basket) -> [u8; 32] {
+    let targets: Vec<u8> = basket.active().iter().flat_map(|c| c.target_bps.to_le_bytes()).collect();
+    let mut parts: Vec<&[u8]> = basket.active().iter().map(|c| c.mint.as_ref()).collect();
+    parts.push(&targets);
+    anchor_lang::solana_program::hash::hashv(&parts).to_bytes()
+}
+
+/// Whether the manager holds every share there is (or there are none): nobody else's holding
+/// changes, so a new recipe needs no notice. Read from the share mint and the manager's share
+/// account among `extra`, found by their keys; without them, the answer is no.
+fn manager_holds_all(basket: &Basket, manager: &Pubkey, extra: &[AccountInfo]) -> Result<bool> {
+    let Some(mint) = extra.iter().find(|a| *a.key == basket.share_mint) else { return Ok(false) };
+    let program = *mint.owner;
+    require!(program == anchor_spl::token::ID || program == anchor_spl::token_2022::ID, VaultError::ConstituentMismatch);
+    let supply = {
+        let d = mint.try_borrow_data()?;
+        require!(d.len() >= 44, VaultError::ConstituentMismatch);
+        u64::from_le_bytes(d[36..44].try_into().unwrap())
+    };
+    if supply == 0 {
+        return Ok(true);
+    }
+    for a in extra.iter().filter(|a| *a.owner == program && a.key != mint.key) {
+        let d = a.try_borrow_data()?;
+        if d.len() >= 72 && d[..32] == basket.share_mint.to_bytes() && d[32..64] == manager.to_bytes() {
+            return Ok(u64::from_le_bytes(d[64..72].try_into().unwrap()) == supply);
+        }
+    }
+    Ok(false)
+}
+
+/// Replaces the target weights. `Immutable` rejects unconditionally, which is the whole promise
+/// of that mode. Once others hold shares, a new recipe is announced and takes effect
+/// `TARGETS_NOTICE_SECS` later (`apply_targets`, by anyone), so holders who don't want it can
+/// leave first; announcing again replaces it (announcing today's weights withdraws it). A basket
+/// not yet seeded, or whose manager holds every share, changes at once.
+///
+/// Remaining accounts: the basket's extension account (`ext_init` first, if it has none), which
+/// keeps the announcement; for an immediate change, the share mint and the manager's share account.
 pub fn set_targets(ctx: Context<Reconfigure>, target_bps: Vec<u16>) -> Result<()> {
     authorise_recipe(&ctx.accounts.basket, &ctx.accounts.authority)?;
+    require!(!ctx.accounts.basket.flag(TRIP_OPEN), VaultError::TripOpen);
     let count = ctx.accounts.basket.constituent_count as usize;
     require!(target_bps.len() == count, VaultError::BadRemainingAccounts);
     let sum: u32 = target_bps.iter().map(|b| *b as u32).sum();
     require!(sum == BPS_DENOM as u32, VaultError::WeightsNotNormalised);
 
-    let basket = &mut ctx.accounts.basket;
-    for i in 0..count {
-        basket.constituents[i].target_bps = target_bps[i];
+    let basket_key = ctx.accounts.basket.key();
+    let ext_key = crate::ext::address(&basket_key).0;
+    let ext_ai = ctx.remaining_accounts.iter().find(|a| *a.key == ext_key && a.owner == &crate::ID);
+    let instant = !ctx.accounts.basket.seeded || manager_holds_all(&ctx.accounts.basket, &ctx.accounts.authority.key(), ctx.remaining_accounts)?;
+    if instant {
+        let basket = &mut ctx.accounts.basket;
+        for i in 0..count {
+            basket.constituents[i].target_bps = target_bps[i];
+        }
+        // Any announcement is void now (it no longer matches the recipe), and cleared if named.
+        if let Some(ext_ai) = ext_ai {
+            let mut d = ext_ai.try_borrow_mut_data()?;
+            crate::ext::check(&d, &basket_key)?;
+            if crate::ext::get(&d, PENDING_TARGETS_TAG).is_some() {
+                crate::ext::put(&mut d, PENDING_TARGETS_TAG, &[0u8; PENDING_LEN])?;
+            }
+        }
+        emit!(TargetsApplied { basket: basket_key, targets: target_bps });
+        return Ok(());
     }
+    let ext_ai = ext_ai.ok_or(VaultError::BadExt)?;
+    require!(ext_ai.is_writable, VaultError::BadExt);
+    let due = Clock::get()?.unix_timestamp + TARGETS_NOTICE_SECS;
+    let mut rec = [0u8; PENDING_LEN];
+    rec[..8].copy_from_slice(&due.to_le_bytes());
+    rec[8..40].copy_from_slice(&recipe_fingerprint(&ctx.accounts.basket));
+    for (i, t) in target_bps.iter().enumerate() {
+        rec[40 + 2 * i..42 + 2 * i].copy_from_slice(&t.to_le_bytes());
+    }
+    let mut d = ext_ai.try_borrow_mut_data()?;
+    crate::ext::check(&d, &basket_key)?;
+    crate::ext::put(&mut d, PENDING_TARGETS_TAG, &rec)?;
+    emit!(TargetsAnnounced { basket: basket_key, targets: target_bps, due });
+    Ok(())
+}
+
+/// Puts an announced recipe in force once its notice is over. Permissionless. Void (refused) if
+/// the basket's assets or weights changed since, or it's no longer creator-run.
+pub fn apply_targets(ctx: Context<ApplyTargets>) -> Result<()> {
+    let basket = &mut ctx.accounts.basket;
+    require!(basket.control == ControlMode::Creator, VaultError::NotMandateAuthority);
+    require!(!basket.flag(TRIP_OPEN), VaultError::TripOpen);
+    let basket_key = basket.key();
+    let mut d = ctx.accounts.ext.try_borrow_mut_data()?;
+    crate::ext::check(&d, &basket_key)?;
+    let rec = crate::ext::get(&d, PENDING_TARGETS_TAG).ok_or(VaultError::NoAnnouncedTargets)?;
+    let due = i64::from_le_bytes(rec[..8].try_into().unwrap());
+    require!(due != 0, VaultError::NoAnnouncedTargets);
+    require!(Clock::get()?.unix_timestamp >= due, VaultError::TargetsNotDue);
+    require!(rec[8..40] == recipe_fingerprint(basket), VaultError::AssetsChanged);
+    let n = basket.constituent_count as usize;
+    let targets: Vec<u16> = (0..n).map(|i| u16::from_le_bytes([rec[40 + 2 * i], rec[41 + 2 * i]])).collect();
+    for i in 0..n {
+        basket.constituents[i].target_bps = targets[i];
+    }
+    crate::ext::put(&mut d, PENDING_TARGETS_TAG, &[0u8; PENDING_LEN])?;
+    emit!(TargetsApplied { basket: basket_key, targets });
     Ok(())
 }
 
@@ -263,6 +372,8 @@ pub fn remove_constituent(ctx: Context<Reconfigure>, index: u8) -> Result<()> {
 /// for one more, no active transfer hook or fee past the cap, and the basket's vault for it.
 pub(crate) fn check_addable(basket: &Account<Basket>, mint_ai: &AccountInfo, entry_ai: &AccountInfo, vault_ai: &AccountInfo, prm: &Params) -> Result<()> {
     let mint_key = mint_ai.key();
+    // A trip buys into a sleeve by index: no asset comes or goes while one is out.
+    require!(!basket.flag(TRIP_OPEN), VaultError::TripOpen);
     require!((basket.constituent_count as usize) < MAX_LAUNCH_CONSTITUENTS, VaultError::TooManyConstituents);
     require!(basket.active().iter().all(|c| c.mint != mint_key), VaultError::DuplicateConstituent);
     let entry = load_asset_entry(entry_ai)?;
@@ -277,6 +388,7 @@ pub(crate) fn check_addable(basket: &Account<Basket>, mint_ai: &AccountInfo, ent
 /// Removes sleeve `index`, which must be at 0% and sold out.
 pub(crate) fn drop_emptied(basket: &mut Basket, index: u8) -> Result<()> {
     let (i, n) = (index as usize, basket.constituent_count as usize);
+    require!(!basket.flag(TRIP_OPEN), VaultError::TripOpen);
     require!(i < n, VaultError::BadParameter);
     require!(n > 2, VaultError::TooFewConstituents);
     let c = basket.constituents[i];
@@ -384,6 +496,7 @@ pub(crate) fn apply_split<'info>(
     denominator: u16,
     cooldown: i64,
 ) -> Result<()> {
+    require!(!basket.flag(TRIP_OPEN), VaultError::TripOpen);
     require!(
         (1..=100).contains(&numerator) && (1..=100).contains(&denominator) && numerator != denominator,
         VaultError::BadParameter
@@ -539,6 +652,15 @@ pub struct Reconfigure<'info> {
     /// CHECK: the params account (`params.rs`); it may not exist, and then every value is its default.
     #[account(address = PARAMS_ID)]
     pub params: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct ApplyTargets<'info> {
+    #[account(mut)]
+    pub basket: Account<'info, Basket>,
+    /// CHECK: the basket's extension account, checked in the instruction (`ext::check`).
+    #[account(mut, owner = crate::ID)]
+    pub ext: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]

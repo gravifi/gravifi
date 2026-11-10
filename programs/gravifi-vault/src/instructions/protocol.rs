@@ -49,6 +49,13 @@ pub const ROLE_LISTER: u8 = 4;
 pub const ROLE_STRATEGIST: u8 = 5;
 pub const ROLE_PRICE_AUTHORITY: u8 = 6;
 pub const ROLE_REBALANCER: u8 = 7;
+/// What proves a part on chain (`verify_part`): the admin of its OFT store, and the OFT program.
+pub const ROLE_PART_ADMIN: u8 = 8;
+pub const ROLE_PART_OFT: u8 = 9;
+/// The one key that starts cross-chain trips (`trip.rs`), in the parts' account too.
+pub const ROLE_TRIP: u8 = 10;
+/// The one owner a trip's tokens may go to, in the parts' account too.
+pub const ROLE_TRIP_OUT: u8 = 11;
 
 /// Names the key for a role; `Pubkey::default()` removes it (not the authority, nor the GRAVI
 /// mint, which is set once). Protocol authority only.
@@ -69,6 +76,8 @@ pub const ROLE_REBALANCER: u8 = 7;
 ///   account, created the first time.
 /// - price authority, rebalancer: the keepers' account (`[KEEPERS_SEED]`) is the one remaining
 ///   account, created the first time with the other key unset.
+/// - part admin, part OFT program, trip key, bridge-out address: the parts' account (`[PARTS_SEED]`) is the one
+///   remaining account, created (or grown) the first time with the other keys unset.
 pub fn set_role<'info>(ctx: Context<'_, '_, 'info, 'info, ProtocolConfig<'info>>, role: u8, key: Pubkey) -> Result<()> {
     let a = &mut *ctx.accounts;
     let (payer, system) = (a.authority.to_account_info(), a.system_program.to_account_info());
@@ -110,6 +119,19 @@ pub fn set_role<'info>(ctx: Context<'_, '_, 'info, 'info, ProtocolConfig<'info>>
             d[..8].copy_from_slice(Keepers::DISCRIMINATOR);
             d[8] = bump;
             let (at, pending) = if role == ROLE_PRICE_AUTHORITY { (PRICE_AUTHORITY_AT, PRICE_AUTHORITY_PENDING_AT) } else { (REBALANCER_AT, REBALANCER_PENDING_AT) };
+            name_key(&mut d, at, pending, key, now);
+        }
+        ROLE_PART_ADMIN | ROLE_PART_OFT | ROLE_TRIP | ROLE_TRIP_OUT => {
+            let (ai, bump) = role_account(ctx.remaining_accounts, PARTS_SEED, PARTS_LEN, &payer, &system)?;
+            let mut d = ai.try_borrow_mut_data()?;
+            d[..8].copy_from_slice(Parts::DISCRIMINATOR);
+            d[8] = bump;
+            let (at, pending) = match role {
+                ROLE_PART_ADMIN => (PART_ADMIN_AT, PART_ADMIN_PENDING_AT),
+                ROLE_PART_OFT => (PART_OFT_AT, PART_OFT_PENDING_AT),
+                ROLE_TRIP => (PART_TRIP_AT, PART_TRIP_PENDING_AT),
+                _ => (PART_TRIP_OUT_AT, PART_TRIP_OUT_PENDING_AT),
+            };
             name_key(&mut d, at, pending, key, now);
         }
         _ => return err!(VaultError::BadRole),
@@ -413,6 +435,29 @@ pub fn treasury_withdraw(ctx: Context<TreasuryWithdraw>, amount: u64) -> Result<
     )
 }
 
+/// Moves the treasury's USDC: its side of the protocol fees paid in USDC (`mint_redeem::usd_fee`).
+/// Nothing in it is owed to anyone: the stakers' share goes straight to their rewards PDA, and the
+/// creator's cut paid in USDC to the manager or a vote-run basket's pot. Protocol authority.
+pub fn treasury_withdraw_usdc(ctx: Context<TreasuryWithdrawUsdc>, amount: u64) -> Result<()> {
+    require!(amount > 0, VaultError::BadParameter);
+    let bump = [ctx.accounts.protocol.bump];
+    let seeds: [&[u8]; 2] = [PROTOCOL_SEED, &bump];
+    token_interface::transfer_checked(
+        CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            token_interface::TransferChecked {
+                from: ctx.accounts.treasury_usdc.to_account_info(),
+                mint: ctx.accounts.usdc_mint.to_account_info(),
+                to: ctx.accounts.destination.to_account_info(),
+                authority: ctx.accounts.protocol.to_account_info(),
+            },
+            &[&seeds],
+        ),
+        amount,
+        ctx.accounts.usdc_mint.decimals,
+    )
+}
+
 /// Posts an asset's USD price (per whole token, x1e12), which rebalance and buyback floors are
 /// checked against. Bounded by the asset's guard: for an asset with a Pyth feed, within Pyth's
 /// confidence (3-5%) of a fresh Pyth price; for any other, within 20% of a reference that rolls
@@ -421,56 +466,130 @@ pub fn treasury_withdraw(ctx: Context<TreasuryWithdraw>, amount: u64) -> Result<
 /// for days) can be posted at once instead of never fitting both. Without Pyth, an asset's first
 /// price only seeds its reference: the price becomes usable once a post at least a quarter of the
 /// reference window later (15 minutes by default) agrees with it.
+///
+/// A fall past the band (the team, 9 Nov: a token that crashed 7x took a day to be posted, so its
+/// stops fired and sold that late) is followed in full once it has held: the first post below the
+/// band is recorded and the price goes to the band's floor; any post below the band at least
+/// `FALL_CONFIRM_SECS` later (10 minutes by default) is accepted as it is, and becomes the new
+/// reference. A post back within the band forgets the fall. A rise past the band is still
+/// refused: the keeper follows it in steps.
 pub fn set_price(ctx: Context<SetPrice>, price_e12: u64) -> Result<()> {
     require!(price_e12 > 0, VaultError::BadPrice);
     let prm = Params::load(&ctx.accounts.params)?;
     let now = prm.now;
     let mint_ai = ctx.accounts.mint.to_account_info();
     let decimals = mint_decimals(&mint_ai)?;
+    let mint_key = ctx.accounts.mint.key();
+    let payer = ctx.accounts.price_authority.to_account_info();
+    let system = ctx.accounts.system_program.to_account_info();
+    let guard_ai = ctx.accounts.price_guard.to_account_info();
+    let mut g = load_guard(&guard_ai, &payer, &system, &mint_key, ctx.bumps.price_guard)?;
+    let mut fall_at = guard_fall_at(&guard_ai);
     let p = &mut ctx.accounts.asset_price;
-    let g = &mut ctx.accounts.price_guard;
-    g.bump = ctx.bumps.price_guard;
-    g.mint = ctx.accounts.mint.key();
     // A guard created after prices were already posted starts from the last one.
     if g.reference_e12 == 0 && p.price_e12 > 0 {
         g.reference_e12 = p.price_e12;
         g.reference_at = p.updated_at;
     }
     p.bump = ctx.bumps.asset_price;
-    p.mint = ctx.accounts.mint.key();
+    p.mint = mint_key;
     p.decimals = decimals;
-    if g.pyth_feed == [0u8; 32] {
-        let agrees = g.reference_e12 > 0 && within(price_e12 as u128, g.reference_e12 as u128, prm.wide(params::PRICE_MOVE_BPS));
-        // No price usable yet, and nothing independent to check one against: the first post only
-        // seeds the reference, and so does one that disagrees with it (a mistyped seed can be
-        // replaced). The asset gets a usable price only from a post that agrees with the seed at
-        // least a quarter of the reference window after it (15 minutes by default), so a wrong
-        // first price can't be traded against at once: it has to hold, in public, first.
-        if p.price_e12 == 0 && (!agrees || now - g.reference_at < prm.secs(params::PRICE_REFERENCE_SECS) / 4) {
-            if !agrees {
-                g.reference_e12 = price_e12;
-                g.reference_at = now;
+    'post: {
+        if g.pyth_feed == [0u8; 32] {
+            let band = prm.wide(params::PRICE_MOVE_BPS);
+            let agrees = g.reference_e12 > 0 && within(price_e12 as u128, g.reference_e12 as u128, band);
+            // No price usable yet, and nothing independent to check one against: the first post
+            // only seeds the reference, and so does one that disagrees with it (a mistyped seed can
+            // be replaced). The asset gets a usable price only from a post that agrees with the seed
+            // at least a quarter of the reference window after it (15 minutes by default), so a
+            // wrong first price can't be traded against at once: it has to hold, in public, first.
+            if p.price_e12 == 0 && (!agrees || now - g.reference_at < prm.secs(params::PRICE_REFERENCE_SECS) / 4) {
+                if !agrees {
+                    g.reference_e12 = price_e12;
+                    g.reference_at = now;
+                }
+                break 'post;
             }
-            return Ok(());
+            if !agrees {
+                let floor = g.reference_e12 as u128 * (BPS_DENOM - band.min(BPS_DENOM)) / BPS_DENOM;
+                // Only a fall: a rise past the band is followed in steps.
+                require!((price_e12 as u128) < floor, VaultError::PriceMoveTooLarge);
+                if fall_at != 0 && now - fall_at >= prm.secs(params::FALL_CONFIRM_SECS) {
+                    // It held: the price as posted, and the reference with it, at most
+                    // MAX_CONFIRMED_FALL_BPS below the reference at once (a wrong or stolen price key
+                    // can't take an asset to nothing in two posts; a real crash is followed in steps).
+                    let least = u64::try_from(g.reference_e12 as u128 * (BPS_DENOM - MAX_CONFIRMED_FALL_BPS as u128) / BPS_DENOM).map_err(|_| VaultError::MathOverflow)?.max(1);
+                    let followed = price_e12.max(least);
+                    fall_at = 0;
+                    g.reference_e12 = followed;
+                    g.reference_at = now;
+                    p.price_e12 = followed;
+                    p.updated_at = now;
+                    break 'post;
+                }
+                if fall_at == 0 {
+                    fall_at = now;
+                }
+                // Meanwhile as far down as the band goes.
+                p.price_e12 = u64::try_from(floor).map_err(|_| VaultError::MathOverflow)?.max(1);
+                p.updated_at = now;
+                break 'post;
+            }
+            // Back within the band: a fall that didn't hold is forgotten.
+            fall_at = 0;
+        } else {
+            let ai = ctx.accounts.pyth_price.as_ref().ok_or(VaultError::PythPriceMissing)?;
+            let pp = pyth::read(ai, &g.pyth_feed, now, prm.secs(params::PYTH_AGE_SECS))?;
+            let multiplier = extensions::current_multiplier(&mint_ai.try_borrow_data()?, now).unwrap_or(1.0);
+            let pyth_e12 = pp.e12(pp.price as u64, multiplier).ok_or(VaultError::PythPriceInvalid)?;
+            let conf_bps = (pp.conf as u128 * BPS_DENOM) / pp.price as u128;
+            let hi = prm.wide(params::PYTH_TOLERANCE_MAX_BPS);
+            let tolerance = (conf_bps * prm.wide(params::PYTH_CONF_MULTIPLE)).clamp(prm.wide(params::PYTH_TOLERANCE_MIN_BPS).min(hi), hi);
+            require!(pyth_e12 > 0 && within(price_e12 as u128, pyth_e12, tolerance), VaultError::PriceOffPyth);
         }
-        require!(agrees, VaultError::PriceMoveTooLarge);
-    } else {
-        let ai = ctx.accounts.pyth_price.as_ref().ok_or(VaultError::PythPriceMissing)?;
-        let pp = pyth::read(ai, &g.pyth_feed, now, prm.secs(params::PYTH_AGE_SECS))?;
-        let multiplier = extensions::current_multiplier(&mint_ai.try_borrow_data()?, now).unwrap_or(1.0);
-        let pyth_e12 = pp.e12(pp.price as u64, multiplier).ok_or(VaultError::PythPriceInvalid)?;
-        let conf_bps = (pp.conf as u128 * BPS_DENOM) / pp.price as u128;
-        let hi = prm.wide(params::PYTH_TOLERANCE_MAX_BPS);
-        let tolerance = (conf_bps * prm.wide(params::PYTH_CONF_MULTIPLE)).clamp(prm.wide(params::PYTH_TOLERANCE_MIN_BPS).min(hi), hi);
-        require!(pyth_e12 > 0 && within(price_e12 as u128, pyth_e12, tolerance), VaultError::PriceOffPyth);
+        if g.reference_e12 == 0 || now - g.reference_at >= prm.secs(params::PRICE_REFERENCE_SECS) {
+            g.reference_e12 = price_e12;
+            g.reference_at = now;
+        }
+        p.price_e12 = price_e12;
+        p.updated_at = now;
     }
-    if g.reference_e12 == 0 || now - g.reference_at >= prm.secs(params::PRICE_REFERENCE_SECS) {
-        g.reference_e12 = price_e12;
-        g.reference_at = now;
+    save_guard(&guard_ai, &g, fall_at, &payer, &system)
+}
+
+/// The asset's guard at `ai` (`[GUARD_SEED, mint]`, bump `bump`), created the first time with
+/// `payer` paying its rent. Read by hand: a guard made before the fall time existed is 8 bytes
+/// shorter than the rest (`GUARD_FALL_AT`), until `save_guard` grows it.
+fn load_guard<'info>(ai: &AccountInfo<'info>, payer: &AccountInfo<'info>, system: &AccountInfo<'info>, mint: &Pubkey, bump: u8) -> Result<PriceGuard> {
+    if ai.owner != &crate::ID {
+        create_pda(payer, ai, system, &[GUARD_SEED, mint.as_ref(), &[bump]], GUARD_LEN_WITH_FALL)?;
+        return Ok(PriceGuard { bump, mint: *mint, reference_e12: 0, reference_at: 0, pyth_feed: [0u8; 32] });
     }
-    p.price_e12 = price_e12;
-    p.updated_at = now;
+    let g = PriceGuard::try_deserialize(&mut &ai.try_borrow_data()?[..])?;
+    require_keys_eq!(g.mint, *mint, VaultError::BadPrice);
+    Ok(g)
+}
+
+/// Writes the guard back with its fall time, growing an older guard (made before the fall time
+/// existed) by those 8 bytes, `payer` topping up their rent, so every guard ends up one size and
+/// `set_price_feed` can name it as Anchor's own account.
+fn save_guard<'info>(ai: &AccountInfo<'info>, g: &PriceGuard, fall_at: i64, payer: &AccountInfo<'info>, system: &AccountInfo<'info>) -> Result<()> {
+    grow(ai, payer, system, GUARD_LEN_WITH_FALL)?;
+    let mut data = ai.try_borrow_mut_data()?;
+    {
+        let mut out: &mut [u8] = &mut data;
+        g.try_serialize(&mut out)?;
+    }
+    if data.len() >= GUARD_LEN_WITH_FALL {
+        data[GUARD_FALL_AT..GUARD_FALL_AT + 8].copy_from_slice(&fall_at.to_le_bytes());
+    }
     Ok(())
+}
+
+/// When a fall past the band was first posted for this guard (0: none), from its tail.
+fn guard_fall_at(guard: &AccountInfo) -> i64 {
+    let d = guard.data.borrow();
+    d.get(GUARD_FALL_AT..GUARD_FALL_AT + 8).map(|b| i64::from_le_bytes(b.try_into().unwrap())).unwrap_or(0)
 }
 
 /// Whether `price` is within `bps` of `reference`, either way.
@@ -480,11 +599,23 @@ fn within(price: u128, reference: u128, bps: u128) -> bool {
 
 /// Names the Pyth feed an asset's posted prices are checked against; all zeros removes it.
 /// Pyth's feeds name no mint, so each one is matched to its token by hand. Protocol authority.
+/// The guard is at its full size (`GUARD_LEN_WITH_FALL`): `set_price` grows an older one the next
+/// time a price is posted for its asset.
 pub fn set_price_feed(ctx: Context<SetPriceFeed>, feed_id: [u8; 32]) -> Result<()> {
-    let g = &mut ctx.accounts.price_guard;
-    g.bump = ctx.bumps.price_guard;
-    g.mint = ctx.accounts.mint.key();
+    // Loaded and saved by hand, as `set_price` does: a guard from before the fall time (89 bytes)
+    // is taken and grown here too, so a broken feed can always be replaced; none yet, it's made.
+    let a = &ctx.accounts;
+    let (guard_ai, payer, system) = (a.price_guard.to_account_info(), a.authority.to_account_info(), a.system_program.to_account_info());
+    let mint = a.mint.key();
+    let fall_at = if guard_ai.owner == &crate::ID { guard_fall_at(&guard_ai) } else { 0 };
+    let mut g = load_guard(&guard_ai, &payer, &system, &mint, ctx.bumps.price_guard)?;
     g.pyth_feed = feed_id;
+    save_guard(&guard_ai, &g, fall_at, &payer, &system)
+}
+
+/// Reads a price guard and does nothing else: it keeps `PriceGuard` in the IDL, which clients use
+/// to decode guards, now that every instruction loads guards by hand. Anyone; no effect.
+pub fn read_price_guard(_ctx: Context<ReadPriceGuard>) -> Result<()> {
     Ok(())
 }
 
@@ -636,6 +767,29 @@ pub struct TreasuryWithdraw<'info> {
 }
 
 #[derive(Accounts)]
+pub struct TreasuryWithdrawUsdc<'info> {
+    pub authority: Signer<'info>,
+
+    #[account(
+        seeds = [PROTOCOL_SEED],
+        bump = protocol.bump,
+        constraint = authority_of(&protocol.to_account_info()) == authority.key() @ VaultError::NotProtocolAuthority
+    )]
+    pub protocol: Account<'info, Protocol>,
+
+    #[account(address = crate::instructions::mint_redeem::USDC_MINT)]
+    pub usdc_mint: InterfaceAccount<'info, MintI>,
+
+    #[account(mut, token::mint = usdc_mint, token::authority = protocol, token::token_program = token_program)]
+    pub treasury_usdc: InterfaceAccount<'info, TokenAccountI>,
+
+    #[account(mut, token::mint = usdc_mint, token::token_program = token_program)]
+    pub destination: InterfaceAccount<'info, TokenAccountI>,
+
+    pub token_program: Interface<'info, TokenInterface>,
+}
+
+#[derive(Accounts)]
 pub struct SetPrice<'info> {
     #[account(mut)]
     pub price_authority: Signer<'info>,
@@ -644,8 +798,10 @@ pub struct SetPrice<'info> {
     pub mint: InterfaceAccount<'info, MintI>,
     #[account(init_if_needed, payer = price_authority, space = 8 + AssetPrice::INIT_SPACE, seeds = [PRICE_SEED, mint.key().as_ref()], bump)]
     pub asset_price: Account<'info, AssetPrice>,
-    #[account(init_if_needed, payer = price_authority, space = 8 + PriceGuard::INIT_SPACE, seeds = [GUARD_SEED, mint.key().as_ref()], bump)]
-    pub price_guard: Account<'info, PriceGuard>,
+    /// CHECK: `[GUARD_SEED, mint]`, the asset's `PriceGuard`, created and read by hand
+    /// (`load_guard`): one made before the fall time existed is 8 bytes shorter until it's grown.
+    #[account(mut, seeds = [GUARD_SEED, mint.key().as_ref()], bump)]
+    pub price_guard: UncheckedAccount<'info>,
     /// CHECK: the asset's Pyth price update, read by `pyth::read` (owner, feed, verification,
     /// age). Needed only when its guard names a feed.
     pub pyth_price: Option<UncheckedAccount<'info>>,
@@ -662,7 +818,13 @@ pub struct SetPriceFeed<'info> {
     #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump, constraint = authority_of(&protocol.to_account_info()) == authority.key() @ VaultError::NotProtocolAuthority)]
     pub protocol: Account<'info, Protocol>,
     pub mint: InterfaceAccount<'info, MintI>,
-    #[account(init_if_needed, payer = authority, space = 8 + PriceGuard::INIT_SPACE, seeds = [GUARD_SEED, mint.key().as_ref()], bump)]
-    pub price_guard: Account<'info, PriceGuard>,
+    /// CHECK: `[GUARD_SEED, mint]`, created or loaded and grown by hand (`load_guard`, `save_guard`).
+    #[account(mut, seeds = [GUARD_SEED, mint.key().as_ref()], bump)]
+    pub price_guard: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct ReadPriceGuard<'info> {
+    pub price_guard: Account<'info, PriceGuard>,
 }

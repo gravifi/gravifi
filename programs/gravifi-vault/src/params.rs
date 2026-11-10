@@ -11,7 +11,7 @@
 //! - Operational values (price checks and freshness, keeper and buyback limits, the invite length)
 //!   apply at once: they bound the app's own keys and spend no holder's money beyond the bounds.
 //! - Values holders and creators live by (stop rules, policy minimums, the transfer-fee cap, split
-//!   cooldown, notices, Smart ceilings, staking and vote rules) wait `PARAM_NOTICE_SECS` (a week, as
+//!   cooldown, notices, vote ceilings, staking and vote rules) wait `PARAM_NOTICE_SECS` (a week, as
 //!   a staking-threshold raise does), so anyone who disagrees can leave first.
 //! - Rebalance slippage and the slice caps protect holders in one direction only: lowering them
 //!   applies at once, raising them waits the notice.
@@ -44,7 +44,7 @@ const HEADER: usize = 16;
 /// [value u64][pending u64][pending_at i64], little-endian. `pending` applies from `pending_at`
 /// (0: nothing pending); a value of 0 means unset, the default.
 const SLOT_LEN: usize = 24;
-/// Room for 80 ids; 41 are used, the rest (about 0.9 KB) wait for future values.
+/// Room for 80 ids; 44 are used, the rest (about 0.9 KB) wait for future values.
 pub const PARAM_SLOTS: usize = 80;
 pub const PARAMS_LEN: usize = HEADER + PARAM_SLOTS * SLOT_LEN;
 /// How long a change holders live by waits before it applies.
@@ -80,10 +80,12 @@ pub const TRANSFER_FEE_CAP_BPS: u16 = 22;
 pub const SPLIT_COOLDOWN_SECS: u16 = 23;
 pub const CUT_NOTICE_SECS: u16 = 24;
 pub const INVITE_MAX_SECS: u16 = 25;
-pub const SMART_MAX_DAY_BPS: u16 = 26;
-pub const SMART_MAX_WEEK_BPS: u16 = 27;
-pub const SMART_MAX_WEIGHT_BPS: u16 = 28;
-pub const SMART_MAX_UNVERIFIED_BPS: u16 = 29;
+/// A vote-run basket's Reweight ceilings (ids 26-29 were named SMART_MAX_* until 8 Nov 2026, when
+/// smart baskets stopped being held to them: a smart basket keeps only its creator's guardrails).
+pub const VOTE_MAX_DAY_BPS: u16 = 26;
+pub const VOTE_MAX_WEEK_BPS: u16 = 27;
+pub const VOTE_MAX_WEIGHT_BPS: u16 = 28;
+pub const VOTE_MAX_UNVERIFIED_BPS: u16 = 29;
 pub const MANDATE_NOTICE_SECS: u16 = 30;
 pub const STAKE_WARMUP_SECS: u16 = 31;
 pub const STAKE_UNSTAKE_SECS: u16 = 32;
@@ -95,6 +97,12 @@ pub const PROPOSE_MIN_BPS: u16 = 37;
 pub const QUORUM_BPS: u16 = 38;
 pub const SUPERMAJORITY_BPS: u16 = 39;
 pub const MAX_OPEN_PROPOSALS: u16 = 40;
+/// A cross-chain trip's keeper refund, its bridge and gas fees (`trip.rs`), USD x1e12.
+pub const TRIP_REFUND_E12: u16 = 41;
+/// How long a trip may be out before anyone can mark it failed.
+pub const TRIP_DEADLINE_SECS: u16 = 42;
+/// How long a fall past the price band must hold before `set_price` follows it in full.
+pub const FALL_CONFIRM_SECS: u16 = 43;
 
 // ------------------------------------------------------------------------- kill switches
 
@@ -144,14 +152,19 @@ const DAY: u64 = 86_400;
 /// - policy: drift at least 0.1%-5% (today 0.5%), a schedule at least hourly to weekly (today daily).
 /// - transfer-fee cap 1%-8% (today 4%); split cooldown 1-90 days (today 30); a cut rise's notice 6
 ///   hours to 30 days (today a day); an invite up to 1-93 days (today 31).
-/// - Smart ceilings: 5%-60% a day (today 40%), 10%-150% a week (today 100%), one asset 10%-60%
-///   (today 35%), unverified 1%-50% (today 30%); a mandate's notice 6 hours to 14 days (today 1).
+/// - a vote-run basket's Reweight ceilings: 5%-60% a day (today 40%), 10%-150% a week (today 100%),
+///   one asset 10%-60% (today 35%), unverified 1%-50% (today 30%). A smart basket has no protocol
+///   ceilings, only its creator's guardrails. A mandate's notice 6 hours to 14 days (today 1).
 /// - staking: warm-up 1 hour to 14 days (today 2), unstaking 1-30 days (today 7), a pot's month
 ///   7-90 days (today 30).
 /// - votes: voting 1-14 days (today 3), the wait after 1 hour-7 days (today 1), the window to run
 ///   it 1-30 days (today 7); proposing takes 0.1%-10% of the supply (today 1%), quorum 1%-50%
-///   (today 10%), the supermajority 51%-90% (today 66%), 1-10 open proposals (today 3).
-const SPECS: [(u64, u64, u64, u8); 41] = [
+///   (today 20%), the supermajority 51%-90% (today 66%), 1-10 open proposals (today 3).
+/// - trips: the keeper refund for a trip's bridge and gas fees up to $10 (today $2), a trip's
+///   deadline 30 minutes to a day (today 2 hours).
+/// - a fall past the price band is followed in full once it has held 2 minutes to an hour (today
+///   10 minutes); shortening it waits the notice.
+const SPECS: [(u64, u64, u64, u8); 44] = [
     (0, 0, 0, NOW),                                        // KILL (checked by hand)
     (0, 0, 0, WAIT),                                       // FEATURES (checked by hand)
     (MAX_REBALANCE_SLIPPAGE_BPS as u64, 10, 500, UP_WAITS),
@@ -178,10 +191,10 @@ const SPECS: [(u64, u64, u64, u8); 41] = [
     (st::SPLIT_COOLDOWN_SECS as u64, DAY, 90 * DAY, WAIT),
     (st::CUT_NOTICE_SECS as u64, 6 * 3_600, 30 * DAY, WAIT),
     (MAX_INVITE_SECS as u64, DAY, 93 * DAY, NOW),
-    (st::SMART_MAX_DAY_BPS as u64, 500, 6_000, WAIT),
-    (st::SMART_MAX_WEEK_BPS as u64, 1_000, 15_000, WAIT),
-    (st::SMART_MAX_WEIGHT_BPS as u64, 1_000, 6_000, WAIT),
-    (st::SMART_MAX_UNVERIFIED_BPS as u64, 100, 5_000, WAIT),
+    (st::VOTE_MAX_DAY_BPS as u64, 500, 6_000, WAIT),
+    (st::VOTE_MAX_WEEK_BPS as u64, 1_000, 15_000, WAIT),
+    (st::VOTE_MAX_WEIGHT_BPS as u64, 1_000, 6_000, WAIT),
+    (st::VOTE_MAX_UNVERIFIED_BPS as u64, 100, 5_000, WAIT),
     (st::MANDATE_NOTICE_SECS as u64, 6 * 3_600, 14 * DAY, WAIT),
     (st::STAKE_WARMUP_SECS as u64, 3_600, 14 * DAY, WAIT),
     (st::STAKE_UNSTAKE_SECS as u64, DAY, 30 * DAY, WAIT),
@@ -193,6 +206,9 @@ const SPECS: [(u64, u64, u64, u8); 41] = [
     (st::QUORUM_BPS as u64, 100, 5_000, WAIT),
     (st::SUPERMAJORITY_BPS as u64, 5_100, 9_000, WAIT),
     (st::MAX_OPEN_PROPOSALS as u64, 1, 10, WAIT),
+    (st::TRIP_REFUND_E12 as u64, 1, 10_000_000_000_000, UP_WAITS),
+    (st::TRIP_DEADLINE_SECS as u64, 1_800, DAY, WAIT),
+    (st::FALL_CONFIRM_SECS as u64, 120, 3_600, DOWN_WAITS),
 ];
 
 // ---------------------------------------------------------------------------------- reading
@@ -268,10 +284,11 @@ impl Params {
         (lo.min(hi), hi)
     }
 
-    /// Smart ceilings `(day, week, weight, unverified)`; unverified never above the weight cap.
-    pub fn smart_caps(&self) -> (u16, u16, u16, u16) {
-        let weight = self.bps(SMART_MAX_WEIGHT_BPS);
-        (self.bps(SMART_MAX_DAY_BPS), self.bps(SMART_MAX_WEEK_BPS), weight, self.bps(SMART_MAX_UNVERIFIED_BPS).min(weight))
+    /// A vote-run basket's Reweight ceilings `(day, week, weight, unverified)`; unverified never
+    /// above the weight cap.
+    pub fn vote_caps(&self) -> (u16, u16, u16, u16) {
+        let weight = self.bps(VOTE_MAX_WEIGHT_BPS);
+        (self.bps(VOTE_MAX_DAY_BPS), self.bps(VOTE_MAX_WEEK_BPS), weight, self.bps(VOTE_MAX_UNVERIFIED_BPS).min(weight))
     }
 
     /// An asset a vote added can't be removed for this long: room for its Reweight to be proposed,
@@ -384,9 +401,9 @@ mod tests {
         assert!(write(&mut d, REBALANCE_SLIPPAGE_BPS, 501, 100).is_err());
         // A vote rule waits either way; the value in force withdraws it.
         write(&mut d, QUORUM_BPS, 500, 0).unwrap();
-        assert_eq!(view(&d, 1).bps(QUORUM_BPS), 1_000);
-        write(&mut d, QUORUM_BPS, 1_000, 1).unwrap();
-        assert_eq!(view(&d, PARAM_NOTICE_SECS * 2).bps(QUORUM_BPS), 1_000);
+        assert_eq!(view(&d, 1).bps(QUORUM_BPS), 2_000);
+        write(&mut d, QUORUM_BPS, 2_000, 1).unwrap();
+        assert_eq!(view(&d, PARAM_NOTICE_SECS * 2).bps(QUORUM_BPS), 2_000);
         // Features: on waits (none known yet, so refused); kill switches at once.
         assert!(write(&mut d, FEATURES, 1, 0).is_err());
         write(&mut d, KILL, FAMILY_MINT, 0).unwrap();

@@ -615,7 +615,8 @@ describe("staking: free baskets", () => {
     return basket;
   }
 
-  const usedToday = async (w: SW, who: Keypair) => (await stakeOf(w, who)).freeUsed as number;
+  // The low 12 bits: the day's free baskets (the top 4 count free smart burns among them).
+  const usedToday = async (w: SW, who: Keypair) => ((await stakeOf(w, who)).freeUsed as number) & 0xfff;
 
   it("1M warmed up makes one basket a day with no burn; GRAVI still warming doesn't count", async () => {
     const w = await stakeWorld();
@@ -686,7 +687,7 @@ describe("staking: free baskets", () => {
     await expectError(createBasket(w, who, false, who, false), "BadStake");
   });
 
-  it("making a basket smart while creating it is free with a free basket a day, without using one", async () => {
+  it("making a basket smart while creating it is free for the day's free basket only: a second smart basket burns", async () => {
     const w = await stakeWorld();
     await setCreationBurn(w.ctx, w.graviMint, BURN);
     await rpc(w.ctx, setParamIx(w.ctx, CONFIG.smartBurn, 50_000n * ONE_GRAVI, [w.graviMint])); skipNotices(w.ctx);
@@ -698,22 +699,38 @@ describe("staking: free baskets", () => {
       await listAsset(w.ctx, m);
       more.push(m);
     }
-    const basket = await createBasket(w, who, false, who, true, [w.mintA, w.mintB, ...more]);
     const guard = { maxDayBps: 2_000, maxWeekBps: 5_000, maxWeightBps: 3_500, maxUnverifiedBps: 3_000, minAssets: 2, maxAssets: 6, stopBps: 0, stopTrailing: false };
-    const before = balance(w.ctx, ata(w.graviMint, who.publicKey, GRAVI_PROGRAM));
-    await rpc(
-      w.ctx,
-      w.ctx.vault.methods
-        .enableSmart(Array.from(new Uint8Array(32).fill(7)), guard)
-        .accountsPartial({ creator: who.publicKey, basket, smart: pda.smart(basket), protocol: pda.protocol(), creationBurn: pda.creationBurn(), ...NO_GRAVI })
-        .remainingAccounts([
-          { pubkey: pda.stake(who.publicKey), isSigner: false, isWritable: false },
-          { pubkey: pda.stakePool(), isSigner: false, isWritable: false },
-        ]),
-      [who],
-    );
-    assert.equal(balance(w.ctx, ata(w.graviMint, who.publicKey, GRAVI_PROGRAM)), before);
+    const wallet = ata(w.graviMint, who.publicKey, GRAVI_PROGRAM);
+    const enable = (basket: PublicKey, gravi: boolean) =>
+      rpc(
+        w.ctx,
+        w.ctx.vault.methods
+          .enableSmart(Array.from(new Uint8Array(32).fill(7)), guard)
+          .accountsPartial({
+            creator: who.publicKey,
+            basket,
+            smart: pda.smart(basket),
+            protocol: pda.protocol(),
+            creationBurn: pda.creationBurn(),
+            ...(gravi ? { graviMint: w.graviMint, creatorGravi: wallet, graviTokenProgram: GRAVI_PROGRAM } : NO_GRAVI),
+          })
+          .remainingAccounts([
+            { pubkey: pda.stake(who.publicKey), isSigner: false, isWritable: true },
+            { pubkey: pda.stakePool(), isSigner: false, isWritable: false },
+          ]),
+        [who],
+      );
+    const first = await createBasket(w, who, false, who, true, [w.mintA, w.mintB, ...more]);
+    const before = balance(w.ctx, wallet);
+    await enable(first, false);
+    assert.equal(balance(w.ctx, wallet), before);
     assert.equal(await usedToday(w, who), 1, "still only the creation's");
+    // The second basket of the day pays its creation burn, and its smart burn too.
+    const second = await createBasket(w, who, true, who, true, [w.mintA, w.mintB, ...more]);
+    await expectError(enable(second, false), "CreationBurnAccountsMissing");
+    const paid = balance(w.ctx, wallet);
+    await enable(second, true);
+    assert.equal(balance(w.ctx, wallet), paid - 50_000n * ONE_GRAVI, "the smart burn is paid");
   });
 
   it("unstaking ends it at once, and someone else's stake doesn't help", async () => {

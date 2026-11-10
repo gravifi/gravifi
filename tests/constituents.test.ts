@@ -210,7 +210,7 @@ describe("adding and removing assets", () => {
     assert.equal(balance(w.ctx, w.vaultC), 2_400_000n);
   });
 
-  it("an asset at 0% is sold out by rebalancing, then removed", async () => {
+  it("an asset at 0% is sold out by rebalancing, and leaves the basket as its last slice lands", async () => {
     const w = await cWorld();
     await send(w.ctx, [await addIx(w), await targetsIx(w, [4_000, 4_000, 2_000])], [w.creator]);
     await setPrices(w, [w.mintA, w.mintB, w.mintC]);
@@ -228,9 +228,8 @@ describe("adding and removing assets", () => {
     await send(w.ctx, [await targetsIx(w, [4_500, 5_500, 0])], [w.creator]);
     await slice(w, ["A", "B", "C"], "C", "A", 10_000n, 10_000n);
     assert.equal(balance(w.ctx, w.vaultC), 0n);
-    assert.equal((await basketOf(w)).constituents[2].unitsPerShare.toString(), "0");
 
-    await send(w.ctx, [await removeIx(w, 2)], [w.creator]);
+    // Sold out at 0%, C left the basket as that slice landed: no removal needed.
     const b = await basketOf(w);
     assert.equal(b.constituentCount, 2);
     assert.deepEqual(b.constituents.map((c) => c.mint.toBase58()), [w.mintA.toBase58(), w.mintB.toBase58()]);
@@ -251,7 +250,7 @@ describe("adding and removing assets", () => {
     await expectError(slice(w, ["A", "B", "C"], "B", "A", 1_000_000n, 6_000_000n), "RebalanceNotDue");
     await slice(w, ["A", "B", "C"], "C", "A", 10_000n, 10_000n);
     assert.equal(balance(w.ctx, w.vaultC), 0n);
-    await send(w.ctx, [await removeIx(w, 2)], [w.creator]);
+    // Sold out at 0%: gone from the basket with that slice.
     assert.equal((await basketOf(w)).constituentCount, 2);
   });
 

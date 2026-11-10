@@ -170,6 +170,15 @@ pub struct Basket {
 pub const CUT_RISE_VOID: u8 = 1;
 /// `reserved[4]`, bit 1: the basket was handed over; `handed_to` is its manager.
 pub const HANDED_OVER: u8 = 2;
+/// `reserved[4]`, bit 2: its extension account keeps a stakers' cut record (`stake_cut.rs`): the
+/// creator's cut on a vote-run basket goes to its share stakers, and `claim_creator_cut` reads it.
+pub const STAKER_CUT: u8 = 4;
+/// `reserved[4]`, bit 3: a cross-chain trip is out (`trip.rs`): mints, slices, fee accrual and
+/// splits wait for it to settle, and a redeem takes an IOU for its share of it.
+pub const TRIP_OPEN: u8 = 8;
+/// `reserved[4]`, bit 4: a trip missed its deadline; no new trip until the guardian or the
+/// authority clears it (`trip_clear`).
+pub const TRIP_STUCK: u8 = 16;
 
 /// The Basket account's size: as it was before `handed_to` (every basket on chain has this size),
 /// which leaves room for `MAX_STORED_CONSTITUENTS` and the manager.
@@ -237,6 +246,19 @@ impl Basket {
             self.reserved[4] |= CUT_RISE_VOID;
         } else {
             self.reserved[4] &= !CUT_RISE_VOID;
+        }
+    }
+
+    /// Whether a flag of `reserved[4]` is set.
+    pub fn flag(&self, bit: u8) -> bool {
+        self.reserved[4] & bit != 0
+    }
+
+    pub fn set_flag(&mut self, bit: u8, on: bool) {
+        if on {
+            self.reserved[4] |= bit;
+        } else {
+            self.reserved[4] &= !bit;
         }
     }
 
@@ -597,8 +619,8 @@ pub struct Strategist {
 }
 
 /// `[VERIFIED_SEED, mint]` exists for each asset the protocol authority vouches for (GraviFi
-/// Verified, `set_verified`). A smart basket holds an asset without one to at most its guard's
-/// `max_unverified_bps`.
+/// Verified, `set_verified`), or that proved itself one of our parts (`verify_part`). A smart
+/// basket holds an asset without one to at most its guard's `max_unverified_bps`.
 pub const VERIFIED_SEED: &[u8] = b"verified";
 
 #[account]
@@ -608,19 +630,135 @@ pub struct VerifiedAsset {
     pub mint: Pubkey,
 }
 
+/// `[PARTS_SEED]`: what proves a part (a mixed basket's Robinhood Chain side, bridged to Solana as an
+/// OFT token) on chain, so `verify_part` can give it a Verified record without the authority: the
+/// OFT program the parts are made with, and the key that is admin of each part's OFT store (the
+/// app's server key). [discriminator][bump][store admin][OFT program], then each one's pending key
+/// (`PARTS_LEN`), named by `set_role` ROLE_PART_ADMIN / ROLE_PART_OFT, which wait a day as every
+/// role does.
+pub const PARTS_SEED: &[u8] = b"parts";
+pub const PART_ADMIN_AT: usize = 9;
+pub const PART_OFT_AT: usize = 41;
+pub const PART_ADMIN_PENDING_AT: usize = 73;
+pub const PART_OFT_PENDING_AT: usize = PART_ADMIN_PENDING_AT + PENDING_KEY_LEN;
+/// The trip key (`trip.rs`, ROLE_TRIP), after the two pending keys, then its own pending key: the
+/// one key that starts cross-chain trips.
+pub const PART_TRIP_AT: usize = PART_OFT_PENDING_AT + PENDING_KEY_LEN;
+pub const PART_TRIP_PENDING_AT: usize = PART_TRIP_AT + 32;
+/// The bridge-out address (ROLE_TRIP_OUT), then its pending key: the one owner a trip's tokens may
+/// go to. Another key than the trip key's, so a leaked trip key alone can start a trip but not
+/// take what it moves (the team, 8 Nov: "Yes, build both").
+pub const PART_TRIP_OUT_AT: usize = PART_TRIP_PENDING_AT + PENDING_KEY_LEN;
+pub const PART_TRIP_OUT_PENDING_AT: usize = PART_TRIP_OUT_AT + 32;
+pub const PARTS_LEN: usize = PART_TRIP_OUT_PENDING_AT + PENDING_KEY_LEN;
+
+#[account]
+#[derive(InitSpace)]
+pub struct Parts {
+    pub bump: u8,
+    pub store_admin: Pubkey,
+    pub oft_program: Pubkey,
+}
+
+/// The parts' store admin in force, from the parts account.
+pub fn part_admin_of(parts: &AccountInfo) -> Pubkey {
+    key_in_force(parts, PART_ADMIN_AT, PART_ADMIN_PENDING_AT)
+}
+
+/// The parts' OFT program in force, from the parts account.
+pub fn part_oft_of(parts: &AccountInfo) -> Pubkey {
+    key_in_force(parts, PART_OFT_AT, PART_OFT_PENDING_AT)
+}
+
+/// The trip key in force, from the parts account (`Pubkey::default()`: none).
+pub fn trip_key_of(parts: &AccountInfo) -> Pubkey {
+    key_in_force(parts, PART_TRIP_AT, PART_TRIP_PENDING_AT)
+}
+
+/// The bridge-out address in force, from the parts account (`Pubkey::default()`: none).
+pub fn trip_out_of(parts: &AccountInfo) -> Pubkey {
+    key_in_force(parts, PART_TRIP_OUT_AT, PART_TRIP_OUT_PENDING_AT)
+}
+
+/// One cross-chain trip of a mixed basket, at `[TRIP_SEED, basket, id]` (`trip.rs`): tokens of one
+/// sleeve went out with the trip key, and at least `min_buy` of the other must come back into the
+/// trip's own token account (its canonical ATA for `buy_mint`) before `trip_settle` puts them in
+/// the basket. One of the two sleeves is a part.
+pub const TRIP_SEED: &[u8] = b"trip";
+/// A redeemer's claim on a trip that was out when they redeemed, at `[TRIP_IOU_SEED, trip, wallet]`.
+pub const TRIP_IOU_SEED: &[u8] = b"trip_iou";
+/// How long staked shares stay before they can be taken back (a stake or a top-up restarts it).
+pub const SHARE_STAKE_LOCK_SECS: i64 = 24 * 3_600;
+/// How long a creator's new weights wait, once others hold shares (`set_targets`).
+pub const TARGETS_NOTICE_SECS: i64 = 24 * 3_600;
+/// `Stake::free_used`: the day's free baskets in the low bits, free smart burns above them.
+pub const FREE_SMART_SHIFT: u16 = 12;
+pub const FREE_BASKETS_MASK: u16 = (1 << FREE_SMART_SHIFT) - 1;
+/// How far a trip's id (its start's unix time) may be from the start: ids are never reused.
+pub const TRIP_ID_WINDOW_SECS: i64 = 600;
+pub const TRIP_OPENED: u8 = 0;
+pub const TRIP_FAILED: u8 = 1;
+pub const TRIP_SETTLED: u8 = 2;
+
+#[account]
+#[derive(InitSpace)]
+pub struct Trip {
+    pub bump: u8,
+    pub basket: Pubkey,
+    pub id: u32,
+    /// The trip key that started it, who paid the rent and gets it back.
+    pub keeper: Pubkey,
+    pub started_at: i64,
+    /// Past it, anyone may mark the trip failed (`trip_fail`).
+    pub deadline: i64,
+    pub sell_index: u8,
+    pub buy_index: u8,
+    pub sell_mint: Pubkey,
+    pub buy_mint: Pubkey,
+    pub sell_amount: u64,
+    /// The least of `buy_mint` the trip must bring back, from the posted prices at the start.
+    pub min_buy: u64,
+    pub supply_at_start: u64,
+    /// Shares redeemed while it was out: their holders' slice of what comes back is kept for them.
+    pub iou_shares: u64,
+    pub iou_unclaimed: u64,
+    pub status: u8,
+    /// What came back, and how much of it is kept for the IOUs.
+    pub delivered: u64,
+    pub iou_pool: u64,
+    pub iou_pool_left: u64,
+}
+
+#[account]
+#[derive(InitSpace)]
+pub struct TripIou {
+    pub bump: u8,
+    pub trip: Pubkey,
+    pub wallet: Pubkey,
+    pub shares: u64,
+}
+
 pub const SMART_SEED: &[u8] = b"smart";
-/// Ceilings on a smart basket's guardrails: a creator may set tighter ones, never looser. Target changes (the sum of the increases) per rolling 24 hours and 7 days, and the
-/// weight of one asset, Verified and not.
-/// (The default of the `SMART_MAX_*` params: `params.rs`.)
-pub const SMART_MAX_DAY_BPS: u16 = 4_000;
-pub const SMART_MAX_WEEK_BPS: u16 = 10_000;
-pub const SMART_MAX_WEIGHT_BPS: u16 = 3_500;
-pub const SMART_MAX_UNVERIFIED_BPS: u16 = 3_000;
+/// Ceilings a vote-run basket's Reweight is held to (`params::VOTE_MAX_*`): target changes (the sum
+/// of the increases) per rolling 24 hours and 7 days, and the weight of one asset, Verified and not.
+/// (These were also a smart basket's ceilings until 8 Nov 2026; a smart basket is now held only to
+/// its creator's own guardrails.)
+pub const VOTE_MAX_DAY_BPS: u16 = 4_000;
+pub const VOTE_MAX_WEEK_BPS: u16 = 10_000;
+pub const VOTE_MAX_WEIGHT_BPS: u16 = 3_500;
+pub const VOTE_MAX_UNVERIFIED_BPS: u16 = 3_000;
 /// How long a new mandate waits before it applies, so holders who disagree can redeem first.
 /// (The default of the `MANDATE_NOTICE_SECS` param: `params.rs`.)
 pub const MANDATE_NOTICE_SECS: i64 = 86_400;
 /// The turnover window: one bucket per hour, 7 days.
 pub const TURNOVER_HOURS: usize = 168;
+/// A cross-chain trip's keeper refund (bridge and gas fees), USD x1e12, and its deadline.
+/// (Defaults of the `TRIP_REFUND_E12` and `TRIP_DEADLINE_SECS` params: `params.rs`.)
+pub const TRIP_REFUND_E12: u128 = 2_000_000_000_000;
+pub const TRIP_DEADLINE_SECS: i64 = 2 * 3_600;
+/// How long a fall past the price band must hold before it's followed in full (`set_price`).
+/// (The default of the `FALL_CONFIRM_SECS` param: `params.rs`.)
+pub const FALL_CONFIRM_SECS: i64 = 600;
 
 /// What the strategist must stay within, set by the creator.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Default, Debug, PartialEq, Eq, InitSpace)]
@@ -712,6 +850,12 @@ pub const BUYBACK_SEED: &[u8] = b"buyback";
 pub const BUYBACK_SOL_SEED: &[u8] = b"buyback_sol";
 /// Wrapped SOL: what the burn PDA's tokens are sold for, before the SOL buys GRAVI in one go.
 pub const NATIVE_MINT: Pubkey = pubkey!("So11111111111111111111111111111111111111112");
+/// The most a confirmed fall past the price band takes off the reference at once (`set_price`):
+/// 90%, so a wrong or stolen price key can't take a Pyth-less asset to nothing in two posts.
+pub const MAX_CONFIRMED_FALL_BPS: u16 = 9_000;
+/// What a vote-run basket's USDC pot may still owe its stakers (shared out, unclaimed: rounding)
+/// when the basket closes; it then goes to the manager with what's never been shared ($0.001).
+pub const POT_DUST_USDC: u64 = 1_000;
 
 /// Prices are USD per whole token, scaled by 1e12 (so $0.000001 keeps six digits).
 pub const PRICE_SCALE: u128 = 1_000_000_000_000;
@@ -859,6 +1003,12 @@ pub struct PriceGuard {
     /// Pyth feed id; all zeros for none.
     pub pyth_feed: [u8; 32],
 }
+
+/// After the `PriceGuard` fields, an 8-byte tail: when a fall past the band was first posted
+/// (`set_price`; i64, 0 for none). New guards have it; an older one grows to hold it the next time
+/// a price is posted for its asset.
+pub const GUARD_FALL_AT: usize = 8 + PriceGuard::INIT_SPACE;
+pub const GUARD_LEN_WITH_FALL: usize = GUARD_FALL_AT + 8;
 
 /// Oracle price of one listed asset, at `[PRICE_SEED, mint]`.
 #[account]
@@ -1110,7 +1260,8 @@ pub struct Stake {
     pub index_paid: u128,
     /// SOL earned and not yet claimed, in lamports.
     pub owed: u64,
-    /// The day (unix time / DAY_SECS) of `free_used`: baskets made with no burn that day.
+    /// The day (unix time / DAY_SECS) of `free_used`: baskets made with no burn that day (the low
+    /// 12 bits), and of those how many were also made smart with no burn (the top 4).
     pub free_day: i64,
     pub free_used: u16,
 }
@@ -1126,15 +1277,33 @@ impl Stake {
         if threshold == 0 { 0 } else { self.warm(now) / threshold }
     }
 
-    /// Uses one of today's free baskets if one is left.
-    pub fn take_free(&mut self, threshold: u64, now: i64) -> bool {
+    fn today(&mut self, now: i64) {
         let day = now.div_euclid(DAY_SECS);
         if self.free_day != day {
             self.free_day = day;
             self.free_used = 0;
         }
-        if (self.free_used as u64) < self.free_per_day(threshold, now) {
+    }
+
+    /// Uses one of today's free baskets if one is left.
+    pub fn take_free(&mut self, threshold: u64, now: i64) -> bool {
+        self.today(now);
+        let used = self.free_used & FREE_BASKETS_MASK;
+        if (used as u64) < self.free_per_day(threshold, now) && used < FREE_BASKETS_MASK {
             self.free_used += 1;
+            return true;
+        }
+        false
+    }
+
+    /// Makes a basket smart with no burn: only for a basket made free today, one each, so a free
+    /// basket a day is one free smart basket a day, never a free smart burn on paid ones.
+    pub fn take_free_smart(&mut self, now: i64) -> bool {
+        self.today(now);
+        let baskets = self.free_used & FREE_BASKETS_MASK;
+        let smart = self.free_used >> FREE_SMART_SHIFT;
+        if smart < baskets && smart < (u16::MAX >> FREE_SMART_SHIFT) {
+            self.free_used += 1 << FREE_SMART_SHIFT;
             return true;
         }
         false
@@ -1192,7 +1361,7 @@ pub const VOTE_TIMELOCK_SECS: i64 = 86_400;
 pub const VOTE_GRACE_SECS: i64 = 7 * 86_400;
 /// (These four: the defaults of the params of the same names, `params.rs`.)
 pub const PROPOSE_MIN_BPS: u128 = 100;
-pub const QUORUM_BPS: u128 = 1_000;
+pub const QUORUM_BPS: u128 = 2_000;
 /// Fee, Go Smart and leaving need this much of For + Against; the rest need over half.
 pub const SUPERMAJORITY_BPS: u128 = 6_600;
 pub const MAX_OPEN_PROPOSALS: u8 = 3;
